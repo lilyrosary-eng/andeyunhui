@@ -146,6 +146,10 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("get_blacklist_paths", "data"),
     ("add_to_blacklist", "data"),
     ("remove_from_blacklist", "data"),
+    // 笔记读写（阅读模块「导出读书笔记」等跨模块联动；data 能力管控）
+    ("save_note", "data"),
+    ("get_note_content", "data"),
+    ("get_all_notes", "data"),
 ];
 
 /// 前缀规则（族级）

@@ -2,9 +2,27 @@
 // 阅读视图 — CSS 多栏分页 + 三种布局模式
 // 横板/双栏：多章滑动窗口动态缓存（当前章前后各若干章），无缝翻页
 // 竖版：单章节滚动，到底部自动下一章
+// 高亮/批注：分片存储见 readingHighlights.ts；本文件负责「窗口 DOM 重建后按文本节点重放」与
+// 「竖版选字 → 工具条创建」。重放只加背景色 <mark>（padding/margin/border 恒 0，不影响页宽测量）。
 
 const React = window.__HOST_REACT__;
 import { T, useLang } from '../../_shared/pluginRuntime';
+import {
+  addHighlights,
+  buildChapterIndexMap,
+  deleteHighlight,
+  emitHighlightsChanged,
+  getHighlight,
+  HIGHLIGHT_BG,
+  HIGHLIGHT_COLORS,
+  listHighlights,
+  onHighlightsChanged,
+  updateHighlight,
+  validateHighlightAgainstText,
+  type HighlightColor,
+  type HighlightRecord,
+  type NewHighlight,
+} from './readingHighlights';
 const { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } = React;
 
 interface ReadingChapter {
@@ -29,6 +47,9 @@ interface ReadingViewProps {
   externalScrollPercent?: number | null;
   externalPageInChapter?: number | null;
   onPageProgress?: (pageInChapter: number) => void;
+  // 一次性外部高亮跳转（侧边栏笔记/命令面板点击）：定位并短暂高亮后回调父组件清空
+  externalHighlightId?: string | null;
+  onExternalHighlightConsumed?: () => void;
 }
 
 // ============ 布局常量 ============
@@ -50,7 +71,135 @@ interface ChapterBoundary {
   endPage: number;
 }
 
-export function ReadingView({ book, onBack, externalChapterIndex, onChapterChange, onScrollProgress, externalScrollPercent, externalPageInChapter, onPageProgress }: ReadingViewProps) {
+// ============ 高亮 DOM 工具（重放用） ============
+// 约定：高亮偏移量的"章节纯文本"= 章节 .chapter-marker 子树内所有 Text 节点按文档序拼接。
+// wrapRange / unwrapMarks 都基于该口径，保证存储偏移与 DOM 重放一致。
+
+const HL_CONTEXT = 30;
+
+/** 创建高亮 mark：只有背景色，padding/margin/border 显式清零 —— 不得参与页宽测量 */
+function createMarkEl(id: string, color: HighlightColor): HTMLElement {
+  const m = document.createElement('mark');
+  m.setAttribute('data-hl-id', id);
+  m.setAttribute('data-hl-color', color);
+  m.style.cssText =
+    `background-color:${HIGHLIGHT_BG[color] || HIGHLIGHT_BG.yellow};` +
+    'color:inherit;padding:0;margin:0;border:0;border-radius:0;box-shadow:none;';
+  return m;
+}
+
+/** 解包全部高亮 mark（还原纯文本 DOM），重放前调用保证幂等 */
+function unwrapMarks(root: HTMLElement): void {
+  const marks = root.querySelectorAll('mark[data-hl-id]');
+  if (marks.length === 0) return;
+  const touched = new Set<Node>();
+  marks.forEach((mm) => {
+    const m = mm as HTMLElement;
+    const p = m.parentNode;
+    if (!p) return;
+    while (m.firstChild) p.insertBefore(m.firstChild, m);
+    p.removeChild(m);
+    touched.add(p);
+  });
+  // 合并相邻文本节点，让下次遍历得到的偏移序列稳定
+  touched.forEach((n) => {
+    try { (n as Node & { normalize?: () => void }).normalize?.(); } catch { /* 忽略 */ }
+  });
+}
+
+interface TextWalkEntry { node: Text; start: number; end: number }
+
+function walkTextNodes(root: HTMLElement): { text: string; entries: TextWalkEntry[] } {
+  const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const entries: TextWalkEntry[] = [];
+  let text = '';
+  let n = tw.nextNode();
+  while (n) {
+    const t = n as Text;
+    const len = t.data.length;
+    if (len > 0) {
+      entries.push({ node: t, start: text.length, end: text.length + len });
+      text += t.data;
+    }
+    n = tw.nextNode();
+  }
+  return { text, entries };
+}
+
+/** 把 [start,end) 覆盖的文本片段各自包进 mark。逐条调用前先按 start 降序，减少 split 影响 */
+function wrapRange(root: HTMLElement, start: number, end: number, id: string, color: HighlightColor): void {
+  if (end - start <= 0) return;
+  const { entries } = walkTextNodes(root);
+  const pieces: Text[] = [];
+  for (const e of entries) {
+    const from = Math.max(start, e.start);
+    const to = Math.min(end, e.end);
+    if (to - from <= 0) continue;
+    if (e.node.parentElement?.closest('mark[data-hl-id]')) continue; // 已着色：首条优先，避免嵌套
+    const localFrom = from - e.start;
+    const localTo = to - e.start;
+    let node = e.node;
+    if (localTo < node.data.length) { try { node.splitText(localTo); } catch { continue; } }
+    if (localFrom > 0) { try { node = node.splitText(localFrom) as Text; } catch { continue; } }
+    pieces.push(node);
+  }
+  for (const p of pieces) {
+    const parent = p.parentNode;
+    if (!parent) continue;
+    const m = createMarkEl(id, color);
+    parent.insertBefore(m, p);
+    m.appendChild(p);
+  }
+}
+
+/** 选区与章节 marker 的交集 → 每章一条片段（跨章选择自动拆分）。偏移口径与 walkTextNodes 一致 */
+function buildSelectionSegments(
+  container: HTMLElement,
+  range: Range,
+  chapters: ReadingChapter[],
+): NewHighlight[] {
+  const out: NewHighlight[] = [];
+  const markers = Array.from(container.querySelectorAll<HTMLElement>('[data-chapter-index]'));
+  for (const marker of markers) {
+    const di = parseInt(marker.getAttribute('data-chapter-index') || '-1', 10);
+    if (di < 0) continue;
+    const mr = document.createRange();
+    try { mr.selectNodeContents(marker); } catch { continue; }
+    let s: number;
+    let e: number;
+    const sCmp = mr.comparePoint(range.startContainer, range.startOffset);
+    const eCmp = mr.comparePoint(range.endContainer, range.endOffset);
+    if (sCmp === 1) continue;          // 选区起点在本章之后
+    if (eCmp === -1) break;            // 选区终点在本章之前（marker 有序，可直接结束）
+    const len = mr.toString().length;
+    if (sCmp === -1) s = 0;
+    else {
+      const r2 = mr.cloneRange(); r2.setEnd(range.startContainer, range.startOffset);
+      s = r2.toString().length;
+    }
+    if (eCmp === 1) e = len;
+    else {
+      const r3 = mr.cloneRange(); r3.setEnd(range.endContainer, range.endOffset);
+      e = r3.toString().length;
+    }
+    if (e - s <= 0) continue;
+    const text = mr.toString();
+    out.push({
+      chapterId: chapters[di]?.id || '',
+      chapterIndex: di,
+      start: s,
+      end: e,
+      quote: text.slice(s, e),
+      prefix: text.slice(Math.max(0, s - HL_CONTEXT), s),
+      suffix: text.slice(e, e + HL_CONTEXT),
+      color: 'yellow',
+      note: '',
+    });
+  }
+  return out;
+}
+
+export function ReadingView({ book, onBack, externalChapterIndex, onChapterChange, onScrollProgress, externalScrollPercent, externalPageInChapter, onPageProgress, externalHighlightId, onExternalHighlightConsumed }: ReadingViewProps) {
   useLang();
   // 分页状态（横板/双栏模式）
   const [absolutePage, setAbsolutePage] = useState(0);
@@ -154,6 +303,237 @@ const lockTransition = useCallback(() => {
   }, [book.chapters, windowStart, windowEnd]);
 
   const currentChapter = book.chapters[chapterIndex] || book.chapters[0] || { title: '—', content: '' };
+
+  // ============ 高亮 / 批注 ============
+  // 存储是唯一事实源（readingHighlights 分片）；本视图负责：
+  // 1) combinedHtml / 布局 / 数据变化后，在当前窗口 DOM 上重放着色（含 quote 漂移校验与回写）；
+  // 2) 竖版选字工具条（横版/双栏有拖拽翻页热区，不接管选择事件）；
+  // 3) 外部高亮跳转（一次性 externalHighlightId）。
+  interface SelToolbarState {
+    x: number;
+    y: number;
+    mode: 'selection' | 'existing';
+    quote: string;
+    segments: NewHighlight[];
+    existingId?: string;
+  }
+  const [highlights, setHighlights] = useState<HighlightRecord[]>([]);
+  const highlightsRef = useRef<HighlightRecord[]>([]);
+  useEffect(() => { highlightsRef.current = highlights; }, [highlights]);
+  const [selToolbar, setSelToolbar] = useState<SelToolbarState | null>(null);
+  const [notePopover, setNotePopover] = useState<{ initial: string } | null>(null);
+  const [noteText, setNoteText] = useState('');
+  const extHlDeadlineRef = useRef(0);
+
+  // 切书 → 重新加载高亮
+  useEffect(() => {
+    setHighlights(listHighlights(book.filePath));
+    setSelToolbar(null);
+    setNotePopover(null);
+    extHlDeadlineRef.current = 0;
+  }, [book.filePath]);
+
+  // 外部变更（侧栏删除/编辑/导出）→ 重新加载
+  useEffect(() => onHighlightsChanged((fp) => {
+    const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase();
+    if (norm(fp) === norm(book.filePath)) setHighlights(listHighlights(book.filePath));
+  }), [book.filePath]);
+
+  // —— 重放：窗口 DOM 会随切章/滑窗重建，这里在绘制前把着色补回去 ——
+  useLayoutEffect(() => {
+    if (book.chapters.length === 0) return;
+    const container = isPaginatedMode ? contentRef.current : verticalRef.current;
+    if (!container) return;
+    const chapterMap = buildChapterIndexMap(highlights);
+    const markers = container.querySelectorAll<HTMLElement>('[data-chapter-index]');
+    const patches: Array<{ id: string; patch: Partial<HighlightRecord> }> = [];
+    markers.forEach((marker) => {
+      unwrapMarks(marker);
+      const di = parseInt(marker.getAttribute('data-chapter-index') || '-1', 10);
+      if (di < 0) return;
+      const ch = book.chapters[di];
+      const recs = chapterMap.get(ch?.id || '') || chapterMap.get(`idx:${di}`) || [];
+      if (recs.length === 0) return;
+      const { text } = walkTextNodes(marker);
+      const applyList: HighlightRecord[] = [];
+      for (const r of recs) {
+        const v = validateHighlightAgainstText(r, text);
+        if (v.changed) patches.push({ id: r.id, patch: { start: v.record.start, end: v.record.end, stale: v.record.stale } });
+        if (!v.stale) applyList.push(v.record);
+      }
+      // 降序应用：先包裹靠后的片段，减小 split 对前段偏移的影响
+      applyList.sort((a, b) => b.start - a.start);
+      for (const rec of applyList) wrapRange(marker, rec.start, rec.end, rec.id, rec.color);
+    });
+    if (patches.length > 0) {
+      // 漂移/失效回写（只标 stale，绝不删除）；随后刷新 state 触发重放收敛
+      for (const p of patches) updateHighlight(book.filePath, p.id, p.patch, { touch: false });
+      setHighlights(listHighlights(book.filePath));
+    }
+  }, [combinedHtml, isPaginatedMode, layoutMode, highlights, book.chapters, book.filePath]);
+
+  // —— 外部高亮定位（一次性 externalHighlightId）：找到 → 跳转+闪现；找不到 → 等窗口/章节就绪重试，超时放弃 ——
+  useEffect(() => {
+    if (!externalHighlightId) { extHlDeadlineRef.current = 0; return; }
+    const container = isPaginatedMode ? contentRef.current : verticalRef.current;
+    if (!container) return;
+    const el = container.querySelector<HTMLElement>(`mark[data-hl-id="${externalHighlightId}"]`);
+    if (el) {
+      if (isPaginatedMode) {
+        // 分页模式：按栏偏移把该 mark 所在页翻出来（与 measure 的页码公式一致）
+        const colGap = isBookMode ? BOOK_GUTTER : GAP;
+        const st = (pageWidth + colGap) * pagesPerStep;
+        const tol = Math.max(2, st * 0.05);
+        const page = Math.max(0, Math.min(pageCount - 1, Math.floor((el.offsetLeft - PAD + tol) / st)));
+        setAbsolutePage(page);
+      } else {
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+      const prevBg = el.style.backgroundColor;
+      el.style.backgroundColor = 'rgba(255, 140, 0, 0.65)';
+      el.style.outline = '2px solid rgba(255, 140, 0, 0.55)';
+      el.style.outlineOffset = '0';
+      window.setTimeout(() => {
+        el.style.backgroundColor = prevBg;
+        el.style.outline = '';
+        el.style.outlineOffset = '';
+      }, 1600);
+      extHlDeadlineRef.current = 0;
+      onExternalHighlightConsumed?.();
+      return;
+    }
+    const rec = getHighlight(book.filePath, externalHighlightId);
+    // 记录不存在或已失效：没有可定位的目标，直接消费掉一次性 prop
+    if (!rec || rec.stale) { onExternalHighlightConsumed?.(); return; }
+    // 章节尚未进入渲染窗口（流式加载/滑窗中）：等下一次重放再试，10s 超时兜底
+    if (!extHlDeadlineRef.current) extHlDeadlineRef.current = Date.now() + 10000;
+    else if (Date.now() > extHlDeadlineRef.current) {
+      extHlDeadlineRef.current = 0;
+      onExternalHighlightConsumed?.();
+    }
+  }, [externalHighlightId, highlights, combinedHtml, isPaginatedMode, isBookMode, pageWidth, pageCount, pagesPerStep, book.filePath, onExternalHighlightConsumed]);
+
+  // —— 竖版选字 → 工具条（仅竖版；横版/双栏把 pointer 事件留给翻页热区）——
+  const handleVerticalMouseUp = useCallback(() => {
+    if (isPaginatedMode) return;
+    // 延后一拍：mouseup 时 selection 可能尚未 finalize
+    window.setTimeout(() => {
+      const sel = document.getSelection();
+      const container = verticalRef.current;
+      const vp = viewportRef.current;
+      if (!sel || !container || !vp) return;
+      if (sel.isCollapsed || sel.rangeCount === 0) {
+        // 无选区：可能是点击了已有高亮 → 管理工具条（复制/批注/删除）
+        const node = sel.anchorNode;
+        const markEl = (node instanceof Element
+          ? node.closest('mark[data-hl-id]')
+          : node?.parentElement?.closest('mark[data-hl-id]')) as HTMLElement | null;
+        if (markEl) {
+          const id = markEl.getAttribute('data-hl-id') || '';
+          const rec = highlightsRef.current.find((h) => h.id === id) || getHighlight(book.filePath, id);
+          if (rec) {
+            const vpRect = vp.getBoundingClientRect();
+            const r = markEl.getBoundingClientRect();
+            setNotePopover(null);
+            setSelToolbar({
+              x: Math.max(60, Math.min(vpRect.width - 60, r.left + r.width / 2 - vpRect.left)),
+              y: Math.max(48, r.top - vpRect.top),
+              mode: 'existing',
+              quote: rec.quote,
+              segments: [],
+              existingId: rec.id,
+            });
+            return;
+          }
+        }
+        setSelToolbar(null);
+        setNotePopover(null);
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      if (!container.contains(range.commonAncestorContainer)) { setSelToolbar(null); return; }
+      const segments = buildSelectionSegments(container, range, book.chapters);
+      if (segments.length === 0) { setSelToolbar(null); return; }
+      const vpRect = vp.getBoundingClientRect();
+      const r = range.getBoundingClientRect();
+      setNotePopover(null);
+      setSelToolbar({
+        x: Math.max(60, Math.min(vpRect.width - 60, r.left + r.width / 2 - vpRect.left)),
+        y: Math.max(48, r.top - vpRect.top),
+        mode: 'selection',
+        quote: sel.toString(),
+        segments,
+      });
+    }, 0);
+  }, [isPaginatedMode, book.chapters, book.filePath]);
+
+  // —— 工具条动作 ——
+  const refreshHighlights = useCallback(() => {
+    setHighlights(listHighlights(book.filePath));
+    setSelToolbar(null);
+    setNotePopover(null);
+    document.getSelection()?.removeAllRanges();
+  }, [book.filePath]);
+
+  const createFromSelection = useCallback((color: HighlightColor, note?: string) => {
+    if (!selToolbar || selToolbar.mode !== 'selection') return;
+    addHighlights(book.filePath, selToolbar.segments.map((s) => ({ ...s, color, note: note || '' })));
+    emitHighlightsChanged(book.filePath);
+    refreshHighlights();
+  }, [selToolbar, book.filePath, refreshHighlights]);
+
+  const saveNoteAction = useCallback(() => {
+    if (!selToolbar) return;
+    if (selToolbar.mode === 'existing' && selToolbar.existingId) {
+      updateHighlight(book.filePath, selToolbar.existingId, { note: noteText });
+    } else if (selToolbar.mode === 'selection') {
+      // 「加批注」直接以黄色建档（工具条上再点其他颜色会另行创建纯色高亮）
+      addHighlights(book.filePath, selToolbar.segments.map((s) => ({ ...s, color: 'yellow' as HighlightColor, note: noteText })));
+    } else {
+      return;
+    }
+    emitHighlightsChanged(book.filePath);
+    refreshHighlights();
+  }, [selToolbar, noteText, book.filePath, refreshHighlights]);
+
+  const deleteExistingHighlight = useCallback(() => {
+    if (!selToolbar?.existingId) return;
+    deleteHighlight(book.filePath, selToolbar.existingId);
+    emitHighlightsChanged(book.filePath);
+    refreshHighlights();
+  }, [selToolbar, book.filePath, refreshHighlights]);
+
+  const copySelectionText = useCallback(() => {
+    const text = selToolbar?.quote || '';
+    const done = () => refreshHighlights();
+    try {
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(text).then(done, () => {
+          try {
+            const ta = document.createElement('textarea');
+            ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+          } catch { /* 忽略 */ }
+          done();
+        });
+        return;
+      }
+    } catch { /* 走兜底 */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    } catch { /* 忽略 */ }
+    done();
+  }, [selToolbar, refreshHighlights]);
+
+  const openNotePopover = useCallback(() => {
+    const initial = selToolbar?.mode === 'existing' && selToolbar.existingId
+      ? (highlightsRef.current.find((h) => h.id === selToolbar.existingId)?.note || '')
+      : '';
+    setNoteText(initial);
+    setNotePopover({ initial });
+  }, [selToolbar]);
 
   // ============ 测量页数和章节边界 ============
   // 章节标记已强制 break-before: column（首章除外），故"xx章"标题恒在栏顶，
@@ -611,6 +991,8 @@ const lockTransition = useCallback(() => {
   // 通过 chapter-marker 的 offsetTop 检测当前阅读章节，计算章节内进度（非整个窗口的进度）
   const onVerticalScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
+    // 滚动即收起选字工具条：它的坐标锚在选区上，滚动后会漂移
+    setSelToolbar(null);
     const markers = el.querySelectorAll('[data-chapter-index]');
     if (markers.length === 0) return;
 
@@ -823,7 +1205,7 @@ const lockTransition = useCallback(() => {
           </>
         ) : (
           /* 竖版：多章拼接滚动（与横板共用 combinedHtml，切换模式不闪烁）*/
-          <div ref={verticalRef} className="h-full overflow-y-auto relative" onScroll={onVerticalScroll}>
+          <div ref={verticalRef} className="h-full overflow-y-auto relative" onScroll={onVerticalScroll} onMouseUp={handleVerticalMouseUp}>
             <div
               className="reader-vertical max-w-2xl mx-auto"
               style={{
@@ -832,6 +1214,72 @@ const lockTransition = useCallback(() => {
               } as Record<string, string | number>}
               dangerouslySetInnerHTML={{ __html: combinedHtml }}
             />
+          </div>
+        )}
+
+        {/* 选字工具条（仅竖版）：着色 / 批注 / 复制 / 删除。挂在 viewport 层（不随正文滚动），
+            stopPropagation 避免触发容器 mouseup / 翻页逻辑把自己关掉 */}
+        {!isPaginatedMode && selToolbar && (
+          <div
+            className="absolute z-30"
+            style={{ left: `${selToolbar.x}px`, top: `${selToolbar.y}px`, transform: 'translate(-50%, -110%)' }}
+            onMouseUp={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-1 rounded-xl bg-white dark:bg-stone-800 shadow-lg border border-black/10 dark:border-white/10 px-2 py-1.5 whitespace-nowrap">
+              {selToolbar.mode === 'selection' && HIGHLIGHT_COLORS.map((c) => (
+                <button
+                  key={c}
+                  title={T(`reading.hl.color${c.charAt(0).toUpperCase()}${c.slice(1)}`)}
+                  onClick={() => createFromSelection(c)}
+                  className="w-5 h-5 rounded-full border border-black/15 dark:border-white/20 hover:scale-110 transition-transform"
+                  style={{ backgroundColor: HIGHLIGHT_BG[c] }}
+                />
+              ))}
+              {selToolbar.mode === 'selection' && <div className="w-px h-4 bg-black/10 dark:bg-white/10 mx-0.5" />}
+              <button onClick={openNotePopover} title={T('reading.hl.note')}
+                className="w-6 h-6 flex items-center justify-center rounded-md text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/10 transition-colors">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                </svg>
+              </button>
+              <button onClick={copySelectionText} title={T('reading.hl.copy')}
+                className="w-6 h-6 flex items-center justify-center rounded-md text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/10 transition-colors">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+              </button>
+              {selToolbar.mode === 'existing' && (
+                <button onClick={deleteExistingHighlight} title={T('reading.hl.delete')}
+                  className="w-6 h-6 flex items-center justify-center rounded-md text-neutral-500 dark:text-stone-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                  </svg>
+                </button>
+              )}
+            </div>
+            {notePopover && (
+              <div className="absolute left-1/2 -translate-x-1/2 top-full mt-2 w-64 rounded-xl bg-white dark:bg-stone-800 shadow-lg border border-black/10 dark:border-white/10 p-2">
+                <textarea
+                  autoFocus
+                  rows={3}
+                  value={noteText}
+                  onChange={(e) => setNoteText(e.target.value)}
+                  placeholder={T('reading.notes.notePlaceholder')}
+                  className="w-full text-xs rounded-lg border border-black/10 dark:border-white/10 bg-transparent px-2 py-1.5 resize-none outline-none focus:border-[var(--element-bg)] text-neutral-700 dark:text-stone-200"
+                />
+                <div className="flex items-center justify-end gap-1.5 mt-1.5">
+                  <button onClick={() => setNotePopover(null)}
+                    className="px-2 py-1 rounded-md text-xs text-neutral-400 dark:text-stone-500 hover:bg-black/5 dark:hover:bg-white/10 transition-colors">
+                    {T('reading.notes.cancel')}
+                  </button>
+                  <button onClick={saveNoteAction}
+                    className="px-2.5 py-1 rounded-md text-xs bg-[var(--element-bg)] text-white hover:opacity-90 transition-opacity">
+                    {T('reading.notes.save')}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

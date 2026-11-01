@@ -67,7 +67,21 @@ export function Board() {
     };
 
     const selection = editor.getSelectionPath();
-    if (selection) strokePath(selection);
+    const outline = editor.getSelectionOutline();
+    if (outline) {
+      // 收缩/扩展过的选区没有几何路径，直接画 mask 的 1px 边界带（深色 + 偏移白边）
+      ctx.save();
+      ctx.translate(v.panX, v.panY);
+      ctx.scale(z, z);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(outline, 0, 0);
+      ctx.filter = 'invert(1)';
+      ctx.drawImage(outline, 1 / z, 1 / z);
+      ctx.filter = 'none';
+      ctx.restore();
+    } else if (selection) {
+      strokePath(selection);
+    }
 
     if (selection && s.tool === 'move' && !t.active) {
       const b = editor.getSelectionDisplayBounds();

@@ -66,6 +66,7 @@ pub fn run() {
             rag_list_sources,
             rag_delete_source,
             rag_embed_api,
+            rag_rerank_api,
             rag_list_chunks,
             rag_update_vectors,
             rag_stats,
@@ -111,7 +112,8 @@ pub fn run() {
 
 use crate::services::rag_service::{
     RagChunkInput, RagChunkRow, RagEmbedRequest, RagEmbedResponse, RagIngestResult,
-    RagQueryResult, RagSourceInput, RagSourceInfo, RagStats, RagVecUpdate,
+    RagQueryResult, RagRerankRequest, RagRerankResponse, RagSourceInput, RagSourceInfo, RagStats,
+    RagVecUpdate,
 };
 
 /// Android 端命令名与桌面 commands 层一致（`rag_init_db` 等），
@@ -192,11 +194,49 @@ pub async fn rag_delete_source(
     .await
 }
 
+/// 嵌入代理（Android）。
+///
+/// 2026-11-01 修正：参数从 `req: RagEmbedRequest` 改成**扁平字段**，与桌面
+/// `commands::rag_commands::rag_embed_api` 完全一致。原来那个版本要求前端传
+/// `{ req: {...} }`，而实际调用方（`src/core/stores/semanticMemory.ts`、
+/// `AiChatMemorySettings.tsx`、RAG 插件）全部传扁平 camelCase ⇒ 移动端每次嵌入都会
+/// "invalid args" 失败，伴侣语义记忆在真机上一直是静默降级的。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn rag_embed_api(
-    req: RagEmbedRequest,
+    texts: Vec<String>,
+    endpoint: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
 ) -> Result<RagEmbedResponse, String> {
-    crate::services::rag_service::rag_embed_api(req).await
+    crate::services::rag_service::rag_embed_api(RagEmbedRequest {
+        texts,
+        endpoint,
+        api_key,
+        model,
+    })
+    .await
+}
+
+/// 重排代理（Android）：与桌面 `rag_commands::rag_rerank_api` 同名同参数。
+/// 只读 HTTP 代理，不碰数据库；默认 3s 超时（见 rag_service::rag_rerank_api）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn rag_rerank_api(
+    query: String,
+    documents: Vec<String>,
+    endpoint: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+    timeout_ms: Option<u64>,
+) -> Result<RagRerankResponse, String> {
+    crate::services::rag_service::rag_rerank_api(RagRerankRequest {
+        query,
+        documents,
+        endpoint,
+        api_key,
+        model,
+        timeout_ms,
+    })
+    .await
 }
 
 // ============ 重建向量 / 统计 / 备份（与桌面命令同名，前端无需区分平台） ============

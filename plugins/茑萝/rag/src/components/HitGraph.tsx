@@ -12,11 +12,17 @@
 // 边：
 //   - query → chunk：线宽/透明度 ∝ 归一化相似度
 //   - chunk ↔ chunk：同来源且字符区间相邻 → 虚线（表示"同一段上下文"）
+//
+// 2026-11-01（重排）：**半径/线宽一律用「本次排序实际用的分」**——
+//   重排生效时是 rerank_score，否则是向量余弦分（见 retriever.effectiveScore）。
+//   否则会出现「图上最远的节点被排在第一条」这种自相矛盾的图，
+//   用户就没法靠这张图核对排序了。
 
 const React = window.__HOST_REACT__;
 const { useState, useEffect, useMemo } = React;
 
 import { ragStore, type LastResult } from '../store/rag-store';
+import { effectiveScore, scoreLabel } from '../retrieve/retriever';
 import type { RagHit } from '../api/host';
 
 const W = 680;
@@ -50,19 +56,23 @@ function computeLayout(hits: RagHit[]): Laid {
   const cx = W / 2;
   const cy = H / 2;
   const n = Math.max(1, hits.length);
-  const top = Math.max(...hits.map((h) => h.score), 0.0001);
+  // 归一化基准用「本次排序的分」的最大值（重排分优先，否则向量分）
+  const top = Math.max(...hits.map((h) => effectiveScore(h)), 0.0001);
   const q: Pt = { x: cx, y: cy, vx: 0, vy: 0 };
-  const nodes = hits.map((h, i) => ({
-    p: {
-      x: cx + Math.cos((i / n) * Math.PI * 2) * 140,
-      y: cy + Math.sin((i / n) * Math.PI * 2) * 110,
-      vx: 0,
-      vy: 0,
-    } as Pt,
-    r: 8 + 8 * (h.score / top),
-    // 分数越高，弹簧目标长度越短 ⇒ 越靠近 query（直观表达"更相关"）
-    target: 95 + (1 - h.score / top) * 85,
-  }));
+  const nodes = hits.map((h, i) => {
+    const s = effectiveScore(h);
+    return {
+      p: {
+        x: cx + Math.cos((i / n) * Math.PI * 2) * 140,
+        y: cy + Math.sin((i / n) * Math.PI * 2) * 110,
+        vx: 0,
+        vy: 0,
+      } as Pt,
+      r: 8 + 8 * (s / top),
+      // 分数越高，弹簧目标长度越短 ⇒ 越靠近 query（直观表达"更相关"）
+      target: 95 + (1 - s / top) * 85,
+    };
+  });
 
   for (let iter = 0; iter < 260; iter++) {
     // 节点互斥
@@ -141,8 +151,10 @@ export function HitGraph() {
   }
   if (!laid) return null;
 
-  const top = Math.max(...last.hits.map((h) => h.score), 0.0001);
+  const top = Math.max(...last.hits.map((h) => effectiveScore(h)), 0.0001);
   const sel = selected !== null ? last.hits[selected] : null;
+  /** 本次图的排序依据（重排 or 向量），标题里写清楚，避免把两种分看混。 */
+  const scoreName = last.hits.some((h) => h.rerank_score !== undefined) ? '相关度' : '相似度';
 
   return (
     <div className="flex flex-col gap-3">
@@ -150,8 +162,10 @@ export function HitGraph() {
         <span>
           查询「{shortTitle(last.query, 20)}」· 命中 {last.hits.length} 条
           {last.dropped > 0 ? ` · 已过滤 ${last.dropped} 条` : ''}
+          {/* 排序依据写在标题里：两种分的尺度不同，混看会误判「为什么这条大」 */}
+          {` · 按${scoreName}排序`}
         </span>
-        <span>点节点看原文 · 线越粗越相似</span>
+        <span>点节点看原文 · 线越粗{scoreName === '相关度' ? '越相关' : '越相似'}</span>
       </div>
 
       <div className="rounded-xl border border-neutral-200/60 dark:border-stone-600/60 bg-white/50 dark:bg-stone-900/30 overflow-hidden">
@@ -159,7 +173,7 @@ export function HitGraph() {
           {/* query → chunk 关联边 */}
           {last.hits.map((h, i) => {
             const nd = laid.nodes[i];
-            const ratio = h.score / top;
+            const ratio = effectiveScore(h) / top;
             return (
               <line
                 key={`e${i}`}
@@ -237,7 +251,7 @@ export function HitGraph() {
                   fontSize={10}
                   className="fill-neutral-600 dark:fill-stone-300"
                 >
-                  {shortTitle(h.source_title, 12)} · {h.score.toFixed(2)}
+                  {shortTitle(h.source_title, 12)} · {effectiveScore(h).toFixed(2)}
                 </text>
               </g>
             );
@@ -249,8 +263,12 @@ export function HitGraph() {
         <div className="text-[11px] whitespace-pre-wrap rounded-lg border border-neutral-200/60 dark:border-stone-600/60 bg-white/50 dark:bg-stone-900/40 px-3 py-2 text-neutral-600 dark:text-stone-300 max-h-40 overflow-auto">
           {sel.text}
           <div className="mt-1 text-neutral-400 dark:text-stone-500">
-            来源：{sel.source_title} · 相似度 {sel.score.toFixed(4)} · 字符区间 [{sel.char_start},{' '}
-            {sel.char_end})
+            来源：{sel.source_title} · {scoreLabel(sel)} {effectiveScore(sel).toFixed(4)}
+            {sel.rerank_score !== undefined
+              ? ` · 向量 ${sel.score.toFixed(4)}（原第 ${sel.original_rank}）`
+              : ''}
+            {' · '}
+            字符区间 [{sel.char_start}, {sel.char_end})
           </div>
         </div>
       )}

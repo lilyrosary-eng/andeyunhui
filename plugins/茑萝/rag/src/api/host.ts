@@ -21,6 +21,16 @@ export interface RagHit {
   score: number;
   char_start: number;
   char_end: number;
+  /**
+   * 向量（余弦）分 —— 与 `score` 同值，**由前端检索层补写**（后端从不返回该字段）。
+   * 存在的意义：开了重排后 `score` 仍是向量分，但要按重排顺序展示/画图，
+   * 两个分数都得留着，否则「为什么这条排第一」就无从核对。
+   */
+  vector_score?: number;
+  /** 重排分（仅启用 rerank 时由前端写入；后端无 rerank 字段）。 */
+  rerank_score?: number;
+  /** 重排前的向量排名（1 起）；用于 UI 显示「向量第 5 → 重排第 1」。 */
+  original_rank?: number;
 }
 
 /** rag_query 响应。 */
@@ -197,6 +207,51 @@ export function ragEmbedApi(texts: string[], opts: EmbedOptions = {}): Promise<R
     endpoint: opts.endpoint,
     apiKey: opts.apiKey,
     model: opts.model,
+  });
+}
+
+// ============ 重排代理（rag_rerank_api） ============
+
+/** 重排选项：端点/key/模型/超时，与 EmbedOptions 同形（同一条 Rust 安全边界）。 */
+export interface RerankOptions {
+  endpoint?: string;
+  apiKey?: string;
+  model?: string;
+  /** 单次请求超时（毫秒）；后端缺省 3000，钳制 500~15000。 */
+  timeoutMs?: number;
+}
+
+/** 一条重排结果：`index` 是传入 documents 的下标（0 起）。 */
+export interface RagRerankItem {
+  index: number;
+  score: number;
+}
+
+/** rag_rerank_api 响应。 */
+export interface RagRerankResponse {
+  results: RagRerankItem[];
+  /** 后端实际使用的模型/端点（回带给 UI 核对，防止「配 A 探 B」）。 */
+  model?: string;
+  endpoint?: string;
+}
+
+/**
+ * 重排代理：把 query + 候选文档发给 `/v1/rerank`（Cohere/Jina/SiliconFlow/vLLM 事实标准）
+ * 或 Ollama `/api/rerank`，返回 `(index, score)`。
+ * 与 `rag_embed_api` 一样：只读、不写库、默认 3s 超时；失败由调用方降级为向量排序。
+ */
+export function ragRerankApi(
+  query: string,
+  documents: string[],
+  opts: RerankOptions = {},
+): Promise<RagRerankResponse> {
+  return hostApi.invoke<RagRerankResponse>('rag_rerank_api', {
+    query,
+    documents,
+    endpoint: opts.endpoint,
+    apiKey: opts.apiKey,
+    model: opts.model,
+    timeoutMs: opts.timeoutMs,
   });
 }
 

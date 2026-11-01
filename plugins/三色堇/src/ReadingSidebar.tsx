@@ -1,11 +1,23 @@
 /// <reference path="../../global.d.ts" />
 // 阅读模块侧边栏 — 双层 drill-down：
 // 第一层：嵌套目录树（母目录 + 子目录 + 书籍）
-// 第二层：选中书后切换为章节目录（点击章节在主区域跳转）
+// 第二层：选中书后切换为「目录 / 笔记」双 tab（目录=章节列表；笔记=高亮与批注，可跳转/搜索/删除/编辑/导出）
 const React = window.__HOST_REACT__;
 import { T, useLang } from '../../_shared/pluginRuntime';
-const { useMemo, useState } = React;
+import {
+  HIGHLIGHT_BG,
+  buildReadingNoteMarkdown,
+  deleteHighlight,
+  emitHighlightsChanged,
+  listHighlights,
+  noteIdForBook,
+  onHighlightsChanged,
+  updateHighlight,
+  type HighlightRecord,
+} from './readingHighlights';
+const { useMemo, useState, useEffect, useCallback } = React;
 const { ModuleSidebarShell, NestedNavList, BarChart3 } = window.__HOST_UI__ || {};
+const hostApi = window.__HOST_API__;
 
 interface BookSummary {
   filePath: string;
@@ -47,6 +59,8 @@ interface ReadingSidebarProps {
   currentBook: ReadingBook | null;
   currentChapterIndex: number;
   onChapterClick: (index: number) => void;
+  /** 笔记 tab 点击高亮 → 跳原文章节并定位高亮 */
+  onHighlightJump?: (chapterIndex: number, highlightId: string) => void;
   onBackToBooks: () => void;
   onOpenStats: () => void;
 }
@@ -270,7 +284,7 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
     books, currentFilePath, openingFilePath,
     searchQuery, onSearchChange,
     onBookClick, onOpenSettings, onChangeRoot,
-    currentBook, currentChapterIndex, onChapterClick, onBackToBooks,
+    currentBook, currentChapterIndex, onChapterClick, onHighlightJump, onBackToBooks,
     onOpenStats,
   } = props;
 
@@ -291,6 +305,110 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
     const q = searchQuery.trim().toLowerCase();
     return rootBooks.filter(b => b.title.toLowerCase().includes(q));
   }, [rootBooks, searchQuery]);
+
+  // ===== 「目录 / 笔记」tab 与高亮列表状态（同样全部放在条件 return 之前）=====
+  const [hlTab, setHlTab] = useState<'toc' | 'notes'>('toc');
+  const [noteQuery, setNoteQuery] = useState('');
+  const [highlights, setHighlights] = useState<HighlightRecord[]>([]);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
+  const [noteExists, setNoteExists] = useState<boolean | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState('');
+
+  const bookPath = currentBook?.filePath || null;
+  const normPath = (p: string) => p.replace(/\\/g, '/').toLowerCase();
+
+  useEffect(() => {
+    if (!bookPath) {
+      setHighlights([]);
+      setNoteExists(null);
+      setExportMsg(null);
+      setEditingId(null);
+      return;
+    }
+    setHighlights(listHighlights(bookPath));
+    setExportMsg(null);
+    setEditingId(null);
+    // 「一书一笔记」是否已存在：决定导出按钮文案（导出 / 更新）与「打开笔记」入口
+    let alive = true;
+    hostApi?.invoke('get_note_content', { noteId: noteIdForBook(bookPath) })
+      .then(() => { if (alive) setNoteExists(true); })
+      .catch(() => { if (alive) setNoteExists(false); });
+    return () => { alive = false; };
+  }, [bookPath]);
+
+  useEffect(() => onHighlightsChanged((fp) => {
+    if (bookPath && normPath(fp) === normPath(bookPath)) setHighlights(listHighlights(bookPath));
+  }), [bookPath]);
+
+  const refreshHighlights = useCallback(() => {
+    if (bookPath) setHighlights(listHighlights(bookPath));
+  }, [bookPath]);
+
+  const handleHighlightDelete = useCallback((id: string) => {
+    if (!bookPath) return;
+    deleteHighlight(bookPath, id);
+    emitHighlightsChanged(bookPath);
+    refreshHighlights();
+  }, [bookPath, refreshHighlights]);
+
+  const handleNoteStartEdit = useCallback((h: HighlightRecord) => {
+    setEditingId(h.id);
+    setEditDraft(h.note || '');
+  }, []);
+
+  const handleNoteSaveEdit = useCallback((id: string) => {
+    if (!bookPath) return;
+    updateHighlight(bookPath, id, { note: editDraft });
+    emitHighlightsChanged(bookPath);
+    refreshHighlights();
+    setEditingId(null);
+  }, [bookPath, editDraft, refreshHighlights]);
+
+  const openLinkedNote = useCallback(() => {
+    if (!bookPath) return;
+    const noteId = noteIdForBook(bookPath);
+    hostApi?.navigate?.({ module: 'notes', entity: noteId, props: { noteId } });
+  }, [bookPath]);
+
+  // 导出一本书 → 一篇笔记（幂等：noteId 由书路径 hash 决定，重复导出即更新）
+  const handleExport = useCallback(async () => {
+    if (!currentBook || !hostApi?.invoke) return;
+    if (currentBook.chapters.length === 0 || exportBusy) return;
+    setExportBusy(true);
+    setExportMsg(null);
+    const noteId = noteIdForBook(currentBook.filePath);
+    try {
+      const recs = listHighlights(currentBook.filePath);
+      const md = buildReadingNoteMarkdown(
+        currentBook.title,
+        currentBook.filePath,
+        currentBook.chapters.map((ch, i) => ({ index: i, id: ch.id, title: ch.title })),
+        recs,
+      );
+      await hostApi.invoke('save_note', {
+        noteId,
+        title: T('reading.notes.noteTitle', { title: currentBook.title }),
+        content: md,
+      });
+      // 高亮批量回填 noteId（回链信息；失败不影响导出结果）
+      for (const r of recs) {
+        if (r.noteId !== noteId) updateHighlight(currentBook.filePath, r.id, { noteId }, { touch: false });
+      }
+      setNoteExists(true);
+      emitHighlightsChanged(currentBook.filePath);
+      // 宿主笔记列表刷新（宿主在 NotesModule 监听；插件不直接 import 宿主 zustand store）
+      window.dispatchEvent(new CustomEvent('andy:notes-refresh'));
+      // 统一走导航契约打开笔记
+      hostApi.navigate?.({ module: 'notes', entity: noteId, props: { noteId } });
+    } catch (err) {
+      console.error('[reading] 导出读书笔记失败:', err);
+      setExportMsg(T('reading.notes.exportFailed'));
+    } finally {
+      setExportBusy(false);
+    }
+  }, [currentBook, exportBusy]);
 
   // ====== 第二层：章节目录（选中书后显示）======
   // 使用 NestedNavList 模板：返回按钮在内容区顶部（不占用 primaryAction 导入按钮），
@@ -320,6 +438,122 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
             })),
           },
         ];
+
+    // ===== 「目录 / 笔记」tab 行 =====
+    const tabRow = React.createElement('div', { className: 'flex items-center gap-1 px-2 pb-2' },
+      ...([
+        { key: 'toc' as const, label: T('reading.tab.toc') },
+        { key: 'notes' as const, label: T('reading.tab.notes') },
+      ].map((tab) => React.createElement('button', {
+        key: tab.key,
+        onClick: () => setHlTab(tab.key),
+        className: `flex-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+          hlTab === tab.key
+            ? 'bg-[var(--element-bg)]/10 text-[var(--element-bg)]'
+            : 'text-neutral-400 dark:text-stone-500 hover:bg-black/5 dark:hover:bg-white/5'
+        }`,
+      }, tab.label, tab.key === 'notes' && highlights.length > 0
+        ? React.createElement('span', { className: 'ml-1 text-[10px] opacity-70' }, highlights.length)
+        : null))),
+    );
+
+    // ===== 笔记 tab：高亮 + 批注列表（搜索 / 跳转 / 删除 / 编辑批注 / 导出）=====
+    const q = noteQuery.trim().toLowerCase();
+    const visibleNotes = q
+      ? highlights.filter((h) =>
+          (h.quote || '').toLowerCase().includes(q) ||
+          (h.note || '').toLowerCase().includes(q) ||
+          (currentBook.chapters[h.chapterIndex]?.title || '').toLowerCase().includes(q))
+      : highlights;
+
+    const notesPanel = React.createElement('div', { className: 'flex flex-col min-h-0 flex-1' },
+      // 导出行
+      React.createElement('div', { className: 'px-2 pb-2 space-y-1' },
+        React.createElement('div', { className: 'flex items-center gap-1.5' },
+          React.createElement('button', {
+            onClick: () => { void handleExport(); },
+            disabled: exportBusy || currentBook.chapters.length === 0,
+            className: 'btn-press flex-1 px-2 py-1.5 rounded-lg text-xs font-medium bg-[var(--element-bg)] text-white hover:opacity-90 transition-opacity disabled:opacity-50',
+          }, exportBusy ? T('reading.notes.exporting') : (noteExists ? T('reading.notes.update') : T('reading.notes.export'))),
+          noteExists && React.createElement('button', {
+            onClick: openLinkedNote,
+            title: T('reading.notes.openNote'),
+            className: 'btn-press px-2 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 transition-colors',
+          }, T('reading.notes.openNote')),
+        ),
+        exportMsg && React.createElement('p', { className: 'text-[10px] text-red-400 dark:text-red-400 px-0.5' }, exportMsg),
+        // 搜索
+        React.createElement('input', {
+          type: 'text',
+          value: noteQuery,
+          onChange: (e: React.ChangeEvent<HTMLInputElement>) => setNoteQuery(e.target.value),
+          placeholder: T('reading.notes.searchPlaceholder'),
+          className: 'w-full px-2.5 py-1.5 rounded-lg bg-black/5 dark:bg-white/5 border border-transparent focus:border-[var(--element-bg)] outline-none text-xs text-neutral-600 dark:text-stone-300 placeholder:text-neutral-400 dark:placeholder:text-stone-500',
+        }),
+      ),
+      // 列表
+      React.createElement('div', { className: 'flex-1 min-h-0 overflow-y-auto px-2 pb-2 space-y-1.5' },
+        visibleNotes.length === 0
+          ? React.createElement('div', { className: 'py-8 text-center text-xs text-neutral-400 dark:text-stone-500 px-2 leading-relaxed' }, T('reading.notes.empty'))
+          : visibleNotes.map((h) => {
+              const chapterLabel = currentBook.chapters[h.chapterIndex]?.title || T('reading.chapterN', { n: h.chapterIndex + 1 });
+              return React.createElement('div', {
+                key: h.id,
+                className: 'group rounded-lg border border-black/5 dark:border-white/10 bg-white/50 dark:bg-white/5 px-2 py-2',
+              },
+                React.createElement('button', {
+                  onClick: () => onHighlightJump?.(h.chapterIndex, h.id),
+                  className: 'w-full text-left',
+                },
+                  React.createElement('div', { className: 'flex items-center gap-1.5 mb-1' },
+                    React.createElement('span', {
+                      className: 'w-2.5 h-2.5 rounded-full flex-shrink-0 border border-black/10 dark:border-white/20',
+                      style: { backgroundColor: HIGHLIGHT_BG[h.color] },
+                    }),
+                    React.createElement('span', { className: 'text-[10px] text-neutral-400 dark:text-stone-500 truncate flex-1' }, chapterLabel),
+                    h.stale && React.createElement('span', {
+                      className: 'text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 flex-shrink-0',
+                    }, T('reading.notes.stale')),
+                  ),
+                  React.createElement('p', { className: 'text-xs text-neutral-600 dark:text-stone-300 line-clamp-2 break-all' }, `「${h.quote}」`),
+                  h.note
+                    ? React.createElement('p', { className: 'mt-1 text-[11px] text-neutral-500 dark:text-stone-400 line-clamp-2 break-all' }, `✎ ${h.note}`)
+                    : null,
+                ),
+                React.createElement('div', { className: 'flex items-center justify-end gap-1 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity' },
+                  React.createElement('button', {
+                    onClick: () => handleNoteStartEdit(h),
+                    className: 'px-1.5 py-0.5 rounded text-[10px] text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5 transition-colors',
+                  }, T('reading.hl.note')),
+                  React.createElement('button', {
+                    onClick: () => handleHighlightDelete(h.id),
+                    className: 'px-1.5 py-0.5 rounded text-[10px] text-neutral-400 dark:text-stone-500 hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors',
+                  }, T('reading.hl.delete')),
+                ),
+                editingId === h.id && React.createElement('div', { className: 'mt-1.5' },
+                  React.createElement('textarea', {
+                    autoFocus: true,
+                    rows: 3,
+                    value: editDraft,
+                    onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setEditDraft(e.target.value),
+                    placeholder: T('reading.notes.notePlaceholder'),
+                    className: 'w-full text-xs rounded-lg border border-black/10 dark:border-white/10 bg-transparent px-2 py-1.5 resize-none outline-none focus:border-[var(--element-bg)] text-neutral-700 dark:text-stone-200',
+                  }),
+                  React.createElement('div', { className: 'flex items-center justify-end gap-1.5 mt-1' },
+                    React.createElement('button', {
+                      onClick: () => setEditingId(null),
+                      className: 'px-2 py-1 rounded-md text-[10px] text-neutral-400 dark:text-stone-500 hover:bg-black/5 dark:hover:bg-white/10 transition-colors',
+                    }, T('reading.notes.cancel')),
+                    React.createElement('button', {
+                      onClick: () => handleNoteSaveEdit(h.id),
+                      className: 'px-2 py-1 rounded-md text-[10px] bg-[var(--element-bg)] text-white hover:opacity-90 transition-opacity',
+                    }, T('reading.notes.save')),
+                  ),
+                ),
+              );
+            }),
+      ),
+    );
 
     const nestedContent = NestedNavList
       ? React.createElement(NestedNavList, {
@@ -364,7 +598,12 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
           onSearchChange: () => {},
           searchPlaceholder: T('reading.chapterCount', { n: currentBook.chapters.length }),
           // 不使用 primaryAction —— 返回按钮由 NestedNavList 内容区提供（与视频模块一致）
-          children: nestedContent,
+          children: React.createElement(React.Fragment, null,
+            tabRow,
+            hlTab === 'toc'
+              ? nestedContent
+              : notesPanel,
+          ),
         })
       : null;
   }

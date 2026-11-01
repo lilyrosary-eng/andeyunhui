@@ -11,8 +11,10 @@
 const React = window.__HOST_REACT__;
 const { useState, useEffect } = React;
 
-import { ragStore, type LastResult, type RagView } from '../store/rag-store';
+import { ragStore, type LastResult, type RagView, type RerankInfo } from '../store/rag-store';
 import { ragStats, type RagSourceInfo, type RagStats } from '../api/host';
+import { resolveRerank, rerankModeText, type ResolvedRerank } from '../retrieve/rerank-config';
+import { t as T, useLang } from '../lib/i18n';
 
 const VIEWS: { id: RagView; label: string; hint: string }[] = [
   { id: 'chat', label: '对话', hint: '检索 + 带引用回答' },
@@ -21,10 +23,13 @@ const VIEWS: { id: RagView; label: string; hint: string }[] = [
 ];
 
 export function RagSidebar() {
+  useLang();
   const [sources, setSources] = useState<RagSourceInfo[]>(() => ragStore.getSources());
   const [view, setView] = useState<RagView>(() => ragStore.getView());
   const [last, setLast] = useState<LastResult | null>(() => ragStore.getLastResult());
   const [stats, setStats] = useState<RagStats | null>(null);
+  /** 当前检索排序模式（卡片广播 or 自己解析一次；不重复发探测请求）。 */
+  const [rerank, setRerank] = useState<RerankInfo | null>(() => ragStore.getRerankInfo());
 
   async function refreshStats() {
     try {
@@ -42,13 +47,22 @@ export function RagSidebar() {
     });
     const un2 = ragStore.subscribeView((v) => setView(v));
     const un3 = ragStore.subscribeLastResult((r) => setLast(r));
+    const un4 = ragStore.subscribeRerank((info) => setRerank(info));
     // 侧栏可能先于主面板挂载：自己拉一次数据（幂等）
     void ragStore.refresh();
     void refreshStats();
+    // 卡片还没广播过（面板未挂载）时，自己解析一次 —— resolveRerank 有 30s 缓存，
+    // 且**只解析不探测**，不会产生网络请求。
+    if (!ragStore.getRerankInfo()) {
+      void resolveRerank().then((cfg: ResolvedRerank) =>
+        ragStore.setRerankInfo({ usable: cfg.usable, text: rerankModeText(cfg) }),
+      );
+    }
     return () => {
       un1();
       un2();
       un3();
+      un4();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -76,6 +90,17 @@ export function RagSidebar() {
             {v.label}
           </button>
         ))}
+      </div>
+
+      {/* 检索排序模式（灰字）：让「有没有真的在重排」在侧栏一眼可见 */}
+      <div className="text-[11px] leading-relaxed text-neutral-400 dark:text-stone-500">
+        <div className="text-neutral-500 dark:text-stone-400">{T('rag.retrieve.title')}</div>
+        <div className={rerank && !rerank.usable ? 'text-neutral-400 dark:text-stone-500' : ''} title={rerank?.text}>
+          <span className="truncate">{rerank ? rerank.text : T('rag.retrieve.probing')}</span>
+        </div>
+        {rerank && !rerank.usable ? (
+          <div className="text-neutral-400 dark:text-stone-500">{T('rag.retrieve.degradedHint')}</div>
+        ) : null}
       </div>
 
       {/* 规模速览 */}

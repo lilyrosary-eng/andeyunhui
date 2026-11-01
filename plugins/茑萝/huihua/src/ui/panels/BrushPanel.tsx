@@ -62,8 +62,25 @@ function BrushPreview() {
     const mapPressure = (p: number) => (s.pressureBezier
       ? sampleBezier(s.pressureBezier, p)
       : Math.pow(p, s.pressureCurve));
+
+    const points: Array<[number, number]> = [];
+    for (let x = 14; x <= w - 14; x += 2) {
+      const t = (x - 14) / Math.max(1, w - 28);
+      points.push([x, h / 2 + Math.sin(t * Math.PI * 2) * 14]);
+    }
+    let totalLen = 0;
+    for (let i = 1; i < points.length; i++) {
+      totalLen += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+    }
+    // 首尾渐细：离起点或终点越近越细，和落笔时的算法一致
+    const ramp = (len: number) => (s.taper <= 0
+      ? 1
+      : Math.max(0, Math.min(1, Math.min(len, totalLen - len) / s.taper)));
+    let prev: { x: number; y: number; len: number } | null = null;
     const dab = (x: number, y: number, p: number) => {
-      const radius = Math.max(0.5, (width * mapPressure(p)) / 2);
+      const len = prev ? prev.len + Math.hypot(x - prev.x, y - prev.y) : 0;
+      prev = { x, y, len };
+      const radius = Math.max(0.5, (width * mapPressure(p) * ramp(len)) / 2);
       if (s.hardness >= 1) {
         bctx.globalAlpha = alpha;
         bctx.fillStyle = s.color;
@@ -83,11 +100,6 @@ function BrushPreview() {
       }
     };
 
-    const points: Array<[number, number]> = [];
-    for (let x = 14; x <= w - 14; x += 2) {
-      const t = (x - 14) / Math.max(1, w - 28);
-      points.push([x, h / 2 + Math.sin(t * Math.PI * 2) * 14]);
-    }
     const last = Math.max(1, points.length - 1);
     if (points.length) {
       dab(points[0][0], points[0][1], 0);
@@ -111,7 +123,7 @@ function BrushPreview() {
     ctx.globalAlpha = s.opacity;
     ctx.drawImage(buffer, 0, 0, w, h);
     ctx.globalAlpha = 1;
-  }, [s.color, s.size, s.opacity, s.hardness, s.flow, s.spacing, s.pressureCurve, s.pressureBezier]);
+  }, [s.color, s.size, s.opacity, s.hardness, s.flow, s.spacing, s.pressureCurve, s.pressureBezier, s.taper]);
 
   return (
     <div
@@ -323,6 +335,8 @@ export function BrushPanel() {
       <SliderRow label="硬度" min={0} max={1} step={0.05} value={s.hardness} display={`${Math.round(s.hardness * 100)}`} onChange={editor.setHardness} />
       <SliderRow label="流量" min={0.02} max={1} step={0.02} value={s.flow} display={`${Math.round(s.flow * 100)}%`} onChange={editor.setFlow} />
       <SliderRow label="间距" min={0.05} max={1} step={0.05} value={s.spacing} display={`${Math.round(s.spacing * 100)}%`} onChange={editor.setSpacing} />
+      <SliderRow label="渐细" min={0} max={100} step={1} value={s.taper} display={`${s.taper}px`} onChange={editor.setTaper} />
+      <SliderRow label="速度" min={0} max={1} step={0.05} value={s.velocity} display={`${Math.round(s.velocity * 100)}%`} onChange={editor.setVelocity} />
       <div className="flex items-center justify-between">
         <span className="text-[10px] text-neutral-500 dark:text-stone-400">压感曲线</span>
         <span className="text-[10px] tabular-nums text-neutral-400 dark:text-stone-500">

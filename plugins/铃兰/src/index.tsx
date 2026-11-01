@@ -427,6 +427,8 @@ interface MusicSettingsPanelProps {
   onLocalLrcFirstToggle: (v: boolean) => void;
   showAlbum: boolean;
   onShowAlbumToggle: (v: boolean) => void;
+  seamlessPrefetch: boolean;
+  onSeamlessPrefetchToggle: (v: boolean) => void;
   playMode: 'list' | 'single' | 'random';
   onPlayModeChange: (v: 'list' | 'single' | 'random') => void;
   lyricsAlign: 'center' | 'left' | 'right';
@@ -790,6 +792,27 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
               </button>
             ))}
           </div>
+        </div>
+      </div>
+
+      {/* 播放设置（无缝播放第一阶段：本地预缓冲） */}
+      <div className="glass-panel p-4">
+        <h3 className="text-xs font-semibold text-neutral-500 dark:text-stone-400 mb-3">{T('music.settings.playback')}</h3>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <span className="text-xs text-neutral-600 dark:text-stone-300">{T('music.settings.seamlessPrefetch')}</span>
+            <p className="text-[11px] text-neutral-400 dark:text-stone-500 mt-1 leading-relaxed">{T('music.settings.seamlessPrefetchHint')}</p>
+          </div>
+          <button
+            onClick={() => p.onSeamlessPrefetchToggle(!p.seamlessPrefetch)}
+            className="w-9 h-5 rounded-full transition-colors shrink-0"
+            style={{ backgroundColor: p.seamlessPrefetch ? 'var(--element-bg)' : 'rgb(212 212 212)', position: 'relative' }}
+          >
+            <div
+              className="w-4 h-4 rounded-full bg-white shadow-sm"
+              style={{ position: 'absolute', top: '2px', left: p.seamlessPrefetch ? '18px' : '2px', transition: 'left 0.2s' }}
+            />
+          </button>
         </div>
       </div>
 
@@ -1375,6 +1398,8 @@ useEffect(() => {
   const [showAlbum, setShowAlbum] = useState(() => {
     return localStorage.getItem('music_show_album') !== 'false';
   });
+  // 无缝播放（本地预缓冲）：真源在 musicPlayer（localStorage 'music_seamless_prefetch'，默认开）
+  const [seamlessPrefetch, setSeamlessPrefetch] = useState(() => musicPlayer.getSeamlessPrefetchEnabled());
   // 沉浸页歌词对齐方式：center（居中）/ left（左对齐）/ right（右对齐）
   const [lyricsAlign, setLyricsAlign] = useState<'center' | 'left' | 'right'>(() => {
     const saved = localStorage.getItem('music_lyrics_align');
@@ -2457,6 +2482,12 @@ useEffect(() => {
     localStorage.setItem('music_show_album', String(val));
   }, []);
 
+  // 无缝播放开关：持久化与生效都由 musicPlayer 负责（关闭时其内部会立即释放预缓冲元素）
+  const handleSeamlessPrefetchToggle = useCallback((val: boolean) => {
+    setSeamlessPrefetch(val);
+    musicPlayer.setSeamlessPrefetchEnabled(val);
+  }, []);
+
   // 歌词对齐方式设置
   const handleLyricsAlignChange = useCallback((val: 'center' | 'left' | 'right') => {
     setLyricsAlign(val);
@@ -2717,6 +2748,8 @@ useEffect(() => {
                   onLocalLrcFirstToggle={handleLocalLrcFirstToggle}
                   showAlbum={showAlbum}
                   onShowAlbumToggle={handleShowAlbumToggle}
+                  seamlessPrefetch={seamlessPrefetch}
+                  onSeamlessPrefetchToggle={handleSeamlessPrefetchToggle}
                   playMode={playMode}
                   onPlayModeChange={handlePlayModeChange}
                   lyricsAlign={lyricsAlign}

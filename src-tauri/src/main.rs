@@ -2204,6 +2204,9 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             rag_commands::rag_list_sources,
             rag_commands::rag_delete_source,
             rag_commands::rag_embed_api,
+            // rag_rerank_api 代理 /v1/rerank（Cohere/Jina/SiliconFlow/vLLM 事实标准）与
+            // Ollama /api/rerank：只读、3s 超时、不碰数据库（见 rag_service::rag_rerank_api）。
+            rag_commands::rag_rerank_api,
             // 重建向量 / 统计 / 备份（换嵌入模型后按原文重算，不需要重传文件）
             rag_commands::rag_list_chunks,
             rag_commands::rag_update_vectors,

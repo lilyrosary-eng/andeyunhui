@@ -76,6 +76,9 @@ export const KEYS = {
   companion: {
     cache:             { key: 'andeyunhui.mobile.companion.cache', kind: 'json', scope: 'shared', note: 'core/stores/companionStore 浏览器预览兜底缓存' },
     ragEmbed:          { key: 'andeyunhui.mobile.rag.embed', kind: 'json', scope: 'shared', note: 'core/stores/semanticMemory 嵌入端点配置' },
+    // 检索重排配置：**独立 key**，与嵌入配置分开存（换重排不该动嵌入端点，反之亦然）。
+    // 读写方：plugins/茑萝/rag/src/retrieve/rerank-config.ts
+    ragRerank:         { key: 'andeyunhui.mobile.rag.rerank', kind: 'json', scope: 'shared', note: '茑萝/RAG 插件的检索重排（rerank）配置：开关/端点/模型/候选数/最终数/超时' },
   },
   devtools: {
     logLevel:          { key: 'log_level', kind: 'string', scope: 'dev', note: '生产排障口头开关' },

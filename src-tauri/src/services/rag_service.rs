@@ -442,6 +442,42 @@ pub struct RagEmbedResponse {
     pub dim: usize,
 }
 
+/// rag_rerank_api 请求：查询 + 候选文档 + 端点/模型（与 `RagEmbedRequest` 同一安全边界）。
+///
+/// 字段全部由调用方（前端）给出，后端**不猜**默认端点：重排没有「本机 Ollama 一定在」
+/// 这种合理兜底，猜一个端点只会产生一条看不懂的超时错误。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RagRerankRequest {
+    pub query: String,
+    pub documents: Vec<String>,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// 单次请求超时（毫秒）。缺省 3000，钳制在 500~15000。
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// 一条重排结果：`index` 是**候选文档数组里的下标**（0 起），`score` 是重排模型给的相关度。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RagRerankItem {
+    pub index: usize,
+    pub score: f32,
+}
+
+/// rag_rerank_api 响应。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RagRerankResponse {
+    pub results: Vec<RagRerankItem>,
+    /// 实际使用的模型（回带给 UI 核对，避免「配的是 A 模型、探的是 B 模型」）。
+    pub model: String,
+    /// 实际请求的端点。
+    pub endpoint: String,
+}
+
 // ============ 公共 API ============
 
 /// 初始化数据库（建表）。幂等，可重复调用。
@@ -1297,6 +1333,221 @@ pub async fn rag_embed_api(req: RagEmbedRequest) -> Result<RagEmbedResponse, Str
     }
 }
 
+// ============ 重排代理（rag_rerank_api） ============
+//
+// 插件沙箱屏蔽 fetch，重排也必须由 Rust（reqwest）代理 —— 与 `rag_embed_api` **同一条
+// 安全边界**：只发一次 HTTP、只读、**绝不碰 SQLite**（不建连接、不写库、不备份）。
+// 支持的端点形状（请求体三者一致，都是 Cohere 事实标准）：
+//   1) OpenAI 兼容 `/v1/rerank`（Cohere / Jina / SiliconFlow / Xinference / vLLM …）
+//      请求 {model, query, documents:[..], top_n}，响应 {results:[{index, relevance_score}]}
+//   2) Ollama `/api/rerank`
+//      请求同上；响应 {results:[{index?, relevance_score}]} —— **单条文档时 index 会缺省**，
+//      所以解析时按位置补 index。
+// 另外容忍两种常见变体：顶层直接是数组（TEI `/rerank`）、分数键叫 `score` / `relevance`。
+//
+// 刻意**不做**的三件事（都是「假本地模型」陷阱的变体）：
+//   - 不猜默认端点：没有 rerank 端点就直接报错，让 UI 明确降级为向量排序；
+//   - 不下载模型、不引 ONNX：后端只做 HTTP 代理；
+//   - 不做「静默截断候选」：候选数超限就报错，让调用方显式调小 candidateK。
+
+/// 重排请求默认超时（毫秒）——检索在用户提问的关键路径上，3s 是「宁可降级也不要卡住」的选择。
+pub const RERANK_DEFAULT_TIMEOUT_MS: u64 = 3000;
+const RERANK_MIN_TIMEOUT_MS: u64 = 500;
+const RERANK_MAX_TIMEOUT_MS: u64 = 15_000;
+/// 单次请求的候选条数上限（与前端 candidateK 的钳制上限一致）。
+const RERANK_MAX_DOCS: usize = 64;
+/// 单条候选送检的字符上限（父块可能 3000+ 字；重排模型窗口有限，超了截断该条而不是整批失败）。
+const RERANK_MAX_DOC_CHARS: usize = 3000;
+
+/// 超时钳制：调用方传 0 / 巨大值都不能把主线程关键路径拖死。
+fn clamp_rerank_timeout(timeout_ms: Option<u64>) -> u64 {
+    match timeout_ms {
+        None => RERANK_DEFAULT_TIMEOUT_MS,
+        Some(v) => v.clamp(RERANK_MIN_TIMEOUT_MS, RERANK_MAX_TIMEOUT_MS),
+    }
+}
+
+/// 按字符数截断（`chars()` 而非 `len()`：中文一个字节序列算一个字，按字节切会切断字符）。
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
+/// 从一条重排结果里取分数：`relevance_score`（Cohere/Ollama/Jina）> `score`（TEI）> `relevance`。
+fn rerank_score_of(item: &serde_json::Value) -> Option<f32> {
+    for key in ["relevance_score", "score", "relevance"] {
+        if let Some(n) = item.get(key).and_then(|x| x.as_f64()) {
+            let f = n as f32;
+            if f.is_finite() {
+                return Some(f);
+            }
+            // NaN / ±Inf：视为无效，继续试下一个键（最后都没有就报错）
+        }
+    }
+    None
+}
+
+/// 解析重排响应体为 `(index, score)` 列表。**纯函数**，可单测（不依赖网络）。
+///
+/// 校验三件事，任一不满足就报错而不是给一堆 0 分：
+///   - 条数：0 条 = 端点没返回任何东西；多于候选数 = 上游串了数据；
+///   - `index` 必须落在 `[0, doc_count)`，且**不重复**（重复意味着两条候选会被当成同一条）；
+///   - `score` 必须是有限数字。
+/// 返回按分数降序排好的列表（多数上游已排序，这里再排一次保证确定性）。
+fn parse_rerank_items(v: &serde_json::Value, doc_count: usize) -> Result<Vec<RagRerankItem>, String> {
+    // 顶层是数组（TEI /rerank）→ 直接用它；否则按 Cohere 形状取 results / data。
+    let arr: &Vec<serde_json::Value> = if v.is_array() {
+        v.as_array().unwrap()
+    } else {
+        ["results", "data"]
+            .iter()
+            .find_map(|k| v.get(*k).and_then(|x| x.as_array()))
+            .ok_or_else(|| format!(
+                "重排响应既没有 results 也没有 data（前 200 字：{}）",
+                v.to_string().chars().take(200).collect::<String>()
+            ))?
+    };
+
+    if arr.is_empty() {
+        return Err("重排响应 results 为空数组（端点在装死：模型没加载 / query-documents 不匹配）".to_string());
+    }
+    if arr.len() > doc_count {
+        return Err(format!(
+            "重排返回条数超过候选数（返回 {}，候选 {}）—— 上游把别的请求的结果串进来了",
+            arr.len(),
+            doc_count
+        ));
+    }
+
+    let mut out: Vec<RagRerankItem> = Vec::with_capacity(arr.len());
+    let mut seen = vec![false; doc_count];
+    for (pos, item) in arr.iter().enumerate() {
+        // Ollama 单文档时会省掉 index；按位置补。
+        let index = match item.get("index").and_then(|x| x.as_u64()) {
+            Some(i) => i as usize,
+            None => pos,
+        };
+        if index >= doc_count {
+            return Err(format!(
+                "重排返回的 index 越界：index={index} 但只有 {doc_count} 条候选"
+            ));
+        }
+        if seen[index] {
+            return Err(format!("重排返回的 index 重复：{index}（同一条候选被打了两分）"));
+        }
+        seen[index] = true;
+        let score = rerank_score_of(item).ok_or_else(|| format!(
+            "重排响应第 {pos} 条缺少可用的分数字段（试过 relevance_score / score / relevance）"
+        ))?;
+        out.push(RagRerankItem { index, score });
+    }
+    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(out)
+}
+
+/// 代理重排：把 `query` + 候选文档发给配置的重排端点，返回按相关度降序的 `(index, score)`。
+pub async fn rag_rerank_api(req: RagRerankRequest) -> Result<RagRerankResponse, String> {
+    let endpoint = req
+        .endpoint
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "重排失败：没有重排端点。请在知识库「检索设置」里选择/填写重排模型端点。".to_string()
+        })?;
+    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        return Err(format!("重排失败：端点必须是 http(s) 地址，收到「{endpoint}」"));
+    }
+    let model = req.model.unwrap_or_default().trim().to_string();
+    if model.is_empty() {
+        return Err("重排失败：没有模型名。".to_string());
+    }
+    if req.query.trim().is_empty() {
+        return Err("重排失败：查询为空。".to_string());
+    }
+    if req.documents.is_empty() {
+        return Err("重排失败：候选文档为空。".to_string());
+    }
+    if req.documents.len() > RERANK_MAX_DOCS {
+        return Err(format!(
+            "重排失败：候选 {} 条，超过单次上限 {RERANK_MAX_DOCS} 条。请把「检索设置」里的候选数量调小。",
+            req.documents.len()
+        ));
+    }
+    let documents: Vec<String> = req
+        .documents
+        .iter()
+        .map(|d| truncate_chars(d, RERANK_MAX_DOC_CHARS))
+        .collect();
+    let timeout_ms = clamp_rerank_timeout(req.timeout_ms);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+        .map_err(|e| format!("创建重排 HTTP 客户端失败: {e}"))?;
+
+    // top_n 显式给满：否则 Cohere 类端点可能只回前若干条，剩下的候选拿不到分数，
+    // 前端就会把「没被打分」误当成「不相关」丢掉。
+    let body = serde_json::json!({
+        "model": model,
+        "query": req.query,
+        "documents": documents,
+        "top_n": documents.len(),
+    });
+
+    let mut builder = client
+        .post(&endpoint)
+        .header("Content-Type", "application/json");
+    let api_key = req.api_key.unwrap_or_default();
+    if !api_key.trim().is_empty() {
+        builder = builder.header("Authorization", format!("Bearer {}", api_key.trim()));
+    }
+    let resp = builder.json(&body).send().await.map_err(|e| {
+        if e.is_timeout() {
+            format!("重排请求超时（{timeout_ms}ms）：端点响应过慢或模型尚未加载")
+        } else {
+            format!("重排请求失败: {e}")
+        }
+    })?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        // 与 rag_embed_api 同口径：把请求形状打出来。重排最常见的 400 原因是
+        // 「这个端点根本没有 rerank」（把 embeddings/chat 的 base_url 直接填了进来）。
+        log::warn!(
+            "[rag-rerank] 上游拒绝 HTTP {} · endpoint={} · model={} · 候选 {} 条 · 响应体={}",
+            status,
+            endpoint,
+            model,
+            documents.len(),
+            txt.chars().take(400).collect::<String>()
+        );
+        return Err(format!(
+            "重排 HTTP {}: {}",
+            status,
+            txt.chars().take(300).collect::<String>()
+        ));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析重排响应失败: {e}"))?;
+    let results = parse_rerank_items(&v, documents.len())?;
+    log::info!(
+        "[rag-rerank] ok endpoint={endpoint} model={model} 候选={} 返回={}",
+        documents.len(),
+        results.len()
+    );
+    Ok(RagRerankResponse {
+        results,
+        model,
+        endpoint,
+    })
+}
+
 // ============ 隔离逻辑单测 ============
 // 命名空间强制改写是 RAG 的安全边界（插件不得读 ai-chat 伴侣记忆），
 // 纯函数，可直接单测，不依赖 AppHandle / SQLite。
@@ -1373,5 +1624,100 @@ mod tests {
         let _rank: f64 = conn
             .query_row("SELECT bm25(t) FROM t WHERE t MATCH '泄漏'", [], |r| r.get(0))
             .unwrap_or(0.0);
+    }
+
+    // ============ 重排响应解析（rag_rerank_api） ============
+
+    /// Cohere / Jina / SiliconFlow 的标准形状：按分数降序返回。
+    #[test]
+    fn 重排解析_cohere_标准形状并排序() {
+        let v = serde_json::json!({
+            "model": "bge-reranker-v2-m3",
+            "results": [
+                { "index": 0, "relevance_score": 0.12 },
+                { "index": 1, "relevance_score": 0.98 }
+            ]
+        });
+        let got = parse_rerank_items(&v, 2).expect("应解析成功");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].index, 1);
+        assert!((got[0].score - 0.98).abs() < 1e-6);
+    }
+
+    /// Ollama `/api/rerank`：单条文档时**没有 index**，必须按位置补，不能整批失败。
+    #[test]
+    fn 重排解析_ollama_缺省_index() {
+        let v = serde_json::json!({ "results": [{ "relevance_score": 0.7 }] });
+        let got = parse_rerank_items(&v, 1).expect("应解析成功");
+        assert_eq!(got[0].index, 0);
+        assert_eq!(got[0].score, 0.7);
+    }
+
+    /// TEI / 部分本地服务：顶层直接是数组、分数键叫 `score`。
+    #[test]
+    fn 重排解析_顶层数组与_score_键() {
+        let v = serde_json::json!([
+            { "index": 1, "score": 0.4 },
+            { "index": 0, "score": 0.6 }
+        ]);
+        let got = parse_rerank_items(&v, 2).expect("应解析成功");
+        assert_eq!(got[0].index, 0);
+    }
+
+    /// 上游只回了前 N 条（服务端自己套了 top_n）：合法，按返回的那几条算。
+    #[test]
+    fn 重排解析_允许少于候选条数() {
+        let v = serde_json::json!({ "results": [{ "index": 2, "relevance_score": 0.5 }] });
+        let got = parse_rerank_items(&v, 5).expect("应解析成功");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].index, 2);
+    }
+
+    /// 四类必须报错的情况 —— 静默吞掉就会把「端点其实是假的」伪装成「检索质量变差了」。
+    #[test]
+    fn 重排解析_越界与重复与空数组都拒绝() {
+        // index 越界
+        let v = serde_json::json!({ "results": [{ "index": 9, "relevance_score": 0.5 }] });
+        assert!(parse_rerank_items(&v, 2).unwrap_err().contains("越界"));
+        // index 重复
+        let v = serde_json::json!({
+            "results": [
+                { "index": 0, "relevance_score": 0.5 },
+                { "index": 0, "relevance_score": 0.6 }
+            ]
+        });
+        assert!(parse_rerank_items(&v, 2).unwrap_err().contains("重复"));
+        // 空 results
+        let v = serde_json::json!({ "results": [] });
+        assert!(parse_rerank_items(&v, 2).is_err());
+        // 没有 results / data
+        let v = serde_json::json!({ "detail": "model not found" });
+        assert!(parse_rerank_items(&v, 2).unwrap_err().contains("results"));
+    }
+
+    /// 缺分数字段（或 NaN）必须报错，而不是给 0 分把候选悄悄重排一遍。
+    #[test]
+    fn 重排解析_无分数则拒绝() {
+        let v = serde_json::json!({ "results": [{ "index": 0 }] });
+        assert!(parse_rerank_items(&v, 1).unwrap_err().contains("分数"));
+        let v = serde_json::json!({ "results": [{ "index": 0, "score": "0.5" }] });
+        assert!(parse_rerank_items(&v, 1).is_err(), "字符串分数不该被当成数字");
+    }
+
+    /// 超时钳制：0 / 超大值都不能把提问的关键路径拖死。
+    #[test]
+    fn 重排超时钳制() {
+        assert_eq!(clamp_rerank_timeout(None), RERANK_DEFAULT_TIMEOUT_MS);
+        assert_eq!(clamp_rerank_timeout(Some(0)), RERANK_MIN_TIMEOUT_MS);
+        assert_eq!(clamp_rerank_timeout(Some(999_999)), RERANK_MAX_TIMEOUT_MS);
+        assert_eq!(clamp_rerank_timeout(Some(8000)), 8000);
+    }
+
+    /// 按**字符**截断（不是字节）：中文不能被切成半个字。
+    #[test]
+    fn 重排文档截断按字符不切坏中文() {
+        let s = truncate_chars("一二三四五", 3);
+        assert_eq!(s, "一二三…");
+        assert_eq!(truncate_chars("abc", 10), "abc");
     }
 }

@@ -21,6 +21,8 @@ const RECENT_MAX = 10;
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 8;
 const TILE = 256;
+/** 速度换算粗细的满程：屏幕 px/ms，到这个速度就收到最细 */
+const SPEED_FULL = 2.6;
 const DOCK_MIN = 224;
 const DOCK_MAX = 420;
 const LS = {
@@ -34,6 +36,8 @@ const LS = {
   spacing: 'huihua.brush.spacing',
   curve: 'huihua.brush.curve',
   bezier: 'huihua.brush.curveBezier',
+  taper: 'huihua.brush.taper',
+  velocity: 'huihua.brush.velocity',
   stabilizer: 'huihua.brush.stabilizer',
   presets: 'huihua.brush.presets',
   feather: 'huihua.selection.feather',
@@ -44,9 +48,9 @@ function clampNum(value: number, min: number, max: number): number {
 }
 
 const DEFAULT_PRESETS: BrushPreset[] = [
-  { name: '硬圆', size: 8, opacity: 1, hardness: 1, flow: 1, spacing: 0.15, pressureCurve: 1, pressureBezier: null, stabilizer: 0 },
-  { name: '软笔', size: 24, opacity: 0.75, hardness: 0.15, flow: 0.8, spacing: 0.1, pressureCurve: 1, pressureBezier: null, stabilizer: 0.2 },
-  { name: '铅笔', size: 3, opacity: 0.9, hardness: 0.85, flow: 0.7, spacing: 0.12, pressureCurve: 1.4, pressureBezier: null, stabilizer: 0.3 },
+  { name: '硬圆', size: 8, opacity: 1, hardness: 1, flow: 1, spacing: 0.15, pressureCurve: 1, pressureBezier: null, taper: 0, velocity: 0, stabilizer: 0 },
+  { name: '软笔', size: 24, opacity: 0.75, hardness: 0.15, flow: 0.8, spacing: 0.1, pressureCurve: 1, pressureBezier: null, taper: 0, velocity: 0, stabilizer: 0.2 },
+  { name: '铅笔', size: 3, opacity: 0.9, hardness: 0.85, flow: 0.7, spacing: 0.12, pressureCurve: 1.4, pressureBezier: null, taper: 0, velocity: 0, stabilizer: 0.3 },
 ];
 
 function loadPresets(): BrushPreset[] {
@@ -69,6 +73,8 @@ function loadPresets(): BrushPreset[] {
         spacing: clampNum(Number(v.spacing), 0.05, 2),
         pressureCurve: clampNum(Number(v.pressureCurve), 0.3, 2.5),
         pressureBezier: normalizeBezier(v.pressureBezier),
+        taper: clampNum(Number(v.taper) || 0, 0, 100),
+        velocity: clampNum(Number(v.velocity) || 0, 0, 1),
         stabilizer: clampNum(Number(v.stabilizer), 0, 1),
       });
     }
@@ -117,6 +123,49 @@ function storedBezier(key: string): Bezier4 | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * 二值 mask 的形态学处理（可分离：先横向再纵向 = 方形结构元）。
+ * 窗口内命中即跳出，实际远快于 O(r)。
+ */
+function morphBinary(src: Uint8Array, w: number, h: number, r: number, dilate: boolean): Uint8Array {
+  const tmp = new Uint8Array(src.length);
+  const out = new Uint8Array(src.length);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      const a = Math.max(0, x - r);
+      const b = Math.min(w - 1, x + r);
+      let v = dilate ? 0 : 1;
+      for (let k = a; k <= b; k++) {
+        const on = src[row + k] === 1;
+        if (dilate ? on : !on) { v = dilate ? 1 : 0; break; }
+      }
+      tmp[row + x] = v;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    const a = Math.max(0, y - r);
+    const b = Math.min(h - 1, y + r);
+    for (let x = 0; x < w; x++) {
+      let v = dilate ? 0 : 1;
+      for (let k = a; k <= b; k++) {
+        const on = tmp[k * w + x] === 1;
+        if (dilate ? on : !on) { v = dilate ? 1 : 0; break; }
+      }
+      out[y * w + x] = v;
+    }
+  }
+  return out;
+}
+
+/** mask 减去「腐蚀 1 像素」= 内侧 1px 边界带，位图选区用它画边界 */
+function binaryEdgeBand(bin: Uint8Array, w: number, h: number): Uint8Array {
+  const inner = morphBinary(bin, w, h, 1, false);
+  const band = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) band[i] = bin[i] === 1 && inner[i] === 0 ? 1 : 0;
+  return band;
 }
 
 function makeLayer(id: string, name: string, w: number, h: number, white: boolean): Layer {
@@ -172,6 +221,10 @@ interface SelectionState {
   bounds: Rect;
   evenodd: boolean;
   feather: number;
+  /** true = 以位图 mask 为准（做过收缩/扩展），裁剪与边界显示都走 mask */
+  bitmap: boolean;
+  /** bitmap 模式下的 1px 边界带，用于画选区边界 */
+  outline: HTMLCanvasElement | null;
 }
 
 interface SelectionDraft {
@@ -206,6 +259,8 @@ interface SelectionSnapshot {
   bounds: Rect;
   evenodd: boolean;
   feather: number;
+  /** 收缩/扩展过的选区没有可回放的几何路径，改存二值 mask */
+  bin: Uint8Array | null;
 }
 
 type HistoryEntry =
@@ -292,6 +347,8 @@ class EditorStore {
     spacing: clampNum(storedNum(LS.spacing, 0.15), 0.05, 2),
     pressureCurve: clampNum(storedNum(LS.curve, 1), 0.3, 2.5),
     pressureBezier: storedBezier(LS.bezier),
+    taper: clampNum(storedNum(LS.taper, 0), 0, 100),
+    velocity: clampNum(storedNum(LS.velocity, 0), 0, 1),
     stabilizer: clampNum(storedNum(LS.stabilizer, 0), 0, 1),
     zoom: 1,
     transparent: false,
@@ -345,6 +402,12 @@ class EditorStore {
   private strokeBounds: Rect | null = null;
   private strokeResidual = 0;
   private lastMoveRect: Rect | null = null;
+  /** 本笔已落下的 dab（收笔渐细要按路径总长回算），仅 taper>0 时记录 */
+  private strokeDabs: Array<{ x: number; y: number; w: number; len: number }> = [];
+  private strokeStart = { x: 0, y: 0 };
+  private pointerTime = 0;
+  private lastPointer = { x: 0, y: 0 };
+  private speed = 0;
   private selection: SelectionState | null = null;
   private selectionDraft: SelectionDraft | null = null;
   private selectionVersion = 0;
@@ -798,8 +861,92 @@ class EditorStore {
     const maskData = new Uint8Array(this.docW * this.docH);
     const total = this.docW * this.docH;
     for (let i = 0; i < total; i++) maskData[i] = img[i * 4 + 3] >= 128 ? 1 : 0;
-    return { path, maskCanvas: mask, maskData, bounds, evenodd, feather: radius };
+    return { path, maskCanvas: mask, maskData, bounds, evenodd, feather: radius, bitmap: false, outline: null };
   }
+
+  /** 由二值 mask 重建选区（收缩/扩展的结果）；羽化仍在 mask 上二次模糊 */
+  private buildSelectionFromBinary(bin: Uint8Array, feather: number): SelectionState | null {
+    let minX = this.docW, minY = this.docH, maxX = -1, maxY = -1;
+    for (let y = 0; y < this.docH; y++) {
+      const row = y * this.docW;
+      for (let x = 0; x < this.docW; x++) {
+        if (bin[row + x] === 1) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < 0) return null;
+    const radius = Math.max(0, Math.min(50, Math.round(feather)));
+    const hard = document.createElement('canvas');
+    hard.width = this.docW;
+    hard.height = this.docH;
+    const hctx = hard.getContext('2d')!;
+    const data = hctx.createImageData(this.docW, this.docH);
+    for (let i = 0; i < bin.length; i++) {
+      if (bin[i] !== 1) continue;
+      const o = i * 4;
+      data.data[o] = 255; data.data[o + 1] = 255; data.data[o + 2] = 255; data.data[o + 3] = 255;
+    }
+    hctx.putImageData(data, 0, 0);
+
+    const mask = document.createElement('canvas');
+    mask.width = this.docW;
+    mask.height = this.docH;
+    const mctx = mask.getContext('2d', { willReadFrequently: true })!;
+    if (radius > 0) {
+      mctx.filter = `blur(${(radius / 3).toFixed(2)}px)`;
+      mctx.drawImage(hard, 0, 0);
+      mctx.filter = 'none';
+    } else {
+      mctx.drawImage(hard, 0, 0);
+    }
+    const img = mctx.getImageData(0, 0, this.docW, this.docH).data;
+    const maskData = new Uint8Array(this.docW * this.docH);
+    for (let i = 0; i < maskData.length; i++) maskData[i] = img[i * 4 + 3] >= 128 ? 1 : 0;
+
+    const band = binaryEdgeBand(maskData, this.docW, this.docH);
+    const outline = document.createElement('canvas');
+    outline.width = this.docW;
+    outline.height = this.docH;
+    const octx = outline.getContext('2d')!;
+    const odata = octx.createImageData(this.docW, this.docH);
+    for (let i = 0; i < band.length; i++) {
+      if (band[i] !== 1) continue;
+      const o = i * 4;
+      odata.data[o] = 0; odata.data[o + 1] = 0; odata.data[o + 2] = 0; odata.data[o + 3] = 220;
+    }
+    octx.putImageData(odata, 0, 0);
+
+    const path = new Path2D();
+    path.rect(minX, minY, maxX - minX + 1, maxY - minY + 1);
+    const bounds = { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+    return { path, maskCanvas: mask, maskData, bounds, evenodd: false, feather: radius, bitmap: true, outline };
+  }
+
+  /** 收缩（负）/扩展（正）选区边界，单位 px；改的是选区不是像素，所以不进撤销栈 */
+  shiftSelectionBoundary = (delta: number): void => {
+    const sel = this.selection;
+    const step = Math.round(delta);
+    if (!sel) { this.setStatus('没有选区可调整'); return; }
+    if (step === 0) return;
+    const r = Math.min(50, Math.abs(step));
+    const bin = morphBinary(sel.maskData, this.docW, this.docH, r, step > 0);
+    const next = this.buildSelectionFromBinary(bin, sel.feather);
+    if (!next) {
+      this.selection = null;
+      this.syncSelection('选区已收缩到消失');
+      return;
+    }
+    this.selection = next;
+    this.syncSelection(step > 0 ? `选区扩展 ${r}px` : `选区收缩 ${r}px`);
+    this.notifyView();
+  };
+
+  getSelectionOutline = (): HTMLCanvasElement | null =>
+    this.selection && this.selection.bitmap ? this.selection.outline : null;
 
   private clipSelection(ctx: CanvasRenderingContext2D): void {
     if (!this.selection) return;
@@ -894,6 +1041,14 @@ class EditorStore {
       this.selectAll();
       return;
     }
+    if (this.selection.bitmap) {
+      const flipped = new Uint8Array(this.selection.maskData.length);
+      for (let i = 0; i < flipped.length; i++) flipped[i] = this.selection.maskData[i] === 1 ? 0 : 1;
+      const next = this.buildSelectionFromBinary(flipped, this.selection.feather);
+      if (next) this.selection = next;
+      this.syncSelection('已反选');
+      return;
+    }
     const path = new Path2D();
     path.rect(0, 0, this.docW, this.docH);
     path.addPath(this.selection.path);
@@ -917,7 +1072,7 @@ class EditorStore {
     const before = this.captureTiles(layer.canvas, bounds);
     const ctx = layer.canvas.getContext('2d')!;
     ctx.save();
-    if (sel.feather > 0) {
+    if (this.maskDriven) {
       ctx.globalCompositeOperation = 'destination-out';
       ctx.drawImage(sel.maskCanvas, 0, 0);
       ctx.globalCompositeOperation = 'source-over';
@@ -959,7 +1114,7 @@ class EditorStore {
     ctx.save();
     if (sel) {
       ctx.translate(-bounds.x, -bounds.y);
-      if (sel.feather > 0) {
+      if (this.maskDriven) {
         ctx.drawImage(layer.canvas, 0, 0);
         ctx.globalCompositeOperation = 'destination-in';
         ctx.drawImage(sel.maskCanvas, 0, 0);
@@ -1058,6 +1213,7 @@ class EditorStore {
           bounds: { ...this.selection.bounds },
           evenodd: this.selection.evenodd,
           feather: this.selection.feather,
+          bin: this.selection.bitmap ? this.selection.maskData.slice() : null,
         }
       : null;
   }
@@ -1071,7 +1227,9 @@ class EditorStore {
       return;
     }
     this.state = { ...this.state, feather: snap.feather };
-    this.selection = this.buildSelection(snap.path, snap.bounds, snap.evenodd, snap.feather);
+    this.selection = snap.bin
+      ? this.buildSelectionFromBinary(snap.bin, snap.feather) ?? this.selection
+      : this.buildSelection(snap.path, snap.bounds, snap.evenodd, snap.feather);
     this.syncSelection();
     this.emit({ feather: snap.feather });
   }
@@ -1082,7 +1240,9 @@ class EditorStore {
     this.emit({ feather: next });
     if (this.selection) {
       const s = this.selection;
-      this.selection = this.buildSelection(s.path, s.bounds, s.evenodd, next);
+      this.selection = s.bitmap
+        ? this.buildSelectionFromBinary(s.maskData, next) ?? s
+        : this.buildSelection(s.path, s.bounds, s.evenodd, next);
       this.syncSelection();
     }
   };
@@ -1111,7 +1271,7 @@ class EditorStore {
     fctx.save();
     if (sel) {
       fctx.translate(-sourceBounds.x, -sourceBounds.y);
-      if (sel.feather > 0) {
+      if (this.maskDriven) {
         fctx.drawImage(layer.canvas, 0, 0);
         fctx.globalCompositeOperation = 'destination-in';
         fctx.drawImage(sel.maskCanvas, 0, 0);
@@ -1128,7 +1288,7 @@ class EditorStore {
     const preview = cloneCanvas(layer.canvas);
     const pctx = preview.getContext('2d')!;
     pctx.save();
-    if (sel && sel.feather > 0) {
+    if (sel && this.maskDriven) {
       pctx.globalCompositeOperation = 'destination-out';
       pctx.drawImage(sel.maskCanvas, 0, 0);
       pctx.globalCompositeOperation = 'source-over';
@@ -1302,11 +1462,24 @@ class EditorStore {
   }
 
   private dabWidth(pressure: number, isPen: boolean): number {
-    const raw = isPen && pressure > 0 ? Math.min(1, pressure) : 1;
+    let raw: number;
+    if (isPen && pressure > 0) raw = Math.min(1, pressure);
+    else if (this.state.velocity > 0) raw = 1 - this.state.velocity * Math.min(1, this.speed / SPEED_FULL);
+    else raw = 1;
     const curved = this.state.pressureBezier
       ? sampleBezier(this.state.pressureBezier, raw)
       : Math.pow(raw, this.state.pressureCurve);
     return Math.max(0.5, this.state.size * curved);
+  }
+
+  /**
+   * 首尾渐细的宽度系数：距离起点和终点都越近越细。
+   * 绘制中还不知道总长，传 Infinity 即退化为「只看起笔」。
+   */
+  private taperFactor(len: number, total: number): number {
+    const t = this.state.taper;
+    if (t <= 0) return 1;
+    return Math.max(0, Math.min(1, Math.min(len, total - len) / t));
   }
 
   private applyStroke(ctx: CanvasRenderingContext2D, width: number): void {
@@ -1340,7 +1513,13 @@ class EditorStore {
   }
 
   private clipForPaint(ctx: CanvasRenderingContext2D): void {
-    if (this.selection && this.selection.feather === 0) this.clipSelection(ctx);
+    if (this.selection && !this.maskDriven) this.clipSelection(ctx);
+  }
+
+  /** 羽化或收缩/扩展过的选区以位图 mask 为准，此时裁剪与取区都走 mask 而不是路径 */
+  private get maskDriven(): boolean {
+    const s = this.selection;
+    return !!s && (s.feather > 0 || s.bitmap);
   }
 
   private stampDab(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, eraser: boolean): void {
@@ -1385,8 +1564,17 @@ class EditorStore {
       const ratio = t / dist;
       const x = x0 + (x1 - x0) * ratio;
       const y = y0 + (y1 - y0) * ratio;
-      this.stampDab(ctx, x, y, width, eraser);
-      bounds = this.unionRect(bounds, this.dabRect(x, y, width));
+      let w = width;
+      if (this.state.taper > 0) {
+        const prev = this.strokeDabs[this.strokeDabs.length - 1];
+        const len = prev
+          ? prev.len + Math.hypot(x - prev.x, y - prev.y)
+          : Math.hypot(x - this.strokeStart.x, y - this.strokeStart.y);
+        this.strokeDabs.push({ x, y, w: width, len });
+        w = Math.max(0.5, width * this.taperFactor(len, Infinity));
+      }
+      this.stampDab(ctx, x, y, w, eraser);
+      bounds = this.unionRect(bounds, this.dabRect(x, y, w));
       last = t;
       t += step;
     }
@@ -1409,7 +1597,7 @@ class EditorStore {
     pctx.drawImage(layer.canvas, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
 
     let source = this.strokeBuf;
-    if (this.selection && this.selection.feather > 0) {
+    if (this.selection && this.maskDriven) {
       if (!this.strokeMasked) {
         this.strokeMasked = makeLayer('masked', 'masked', this.docW, this.docH, false).canvas;
       }
@@ -1443,12 +1631,17 @@ class EditorStore {
     this.strokeBounds = null;
     this.strokeResidual = 0;
     this.lastMoveRect = null;
+    this.strokeDabs = [];
+    this.strokeStart = { x, y };
+    const inTaper = this.state.taper > 0;
+    const firstWidth = inTaper ? Math.max(0.5, width * this.taperFactor(0, Infinity)) : width;
+    if (inTaper) this.strokeDabs.push({ x, y, w: width, len: 0 });
     const target = this.strokeBuf.getContext('2d')!;
     target.save();
     this.clipForPaint(target);
-    this.stampDab(target, x, y, width, eraser);
+    this.stampDab(target, x, y, firstWidth, eraser);
     target.restore();
-    this.lastMoveRect = this.dabRect(x, y, width);
+    this.lastMoveRect = this.dabRect(x, y, firstWidth);
     this.strokeBounds = this.lastMoveRect;
     this.refreshStrokePreview(layer, this.lastMoveRect);
     this.render(this.lastMoveRect);
@@ -1519,10 +1712,49 @@ class EditorStore {
     this.render(dirty);
   }
 
+  /**
+   * 收笔渐细：总长度只有抬笔才知道，所以回算尾段、只重画受影响的脏区。
+   * 脏区里既有尾段 dab 也有穿过它的全宽 dab，两类都要重 stamp，否则会出现缺口。
+   */
+  private applyEndTaper(layer: Layer): void {
+    const dabs = this.strokeDabs;
+    const taper = this.state.taper;
+    if (taper <= 0 || !this.strokeBuf || dabs.length < 3) return;
+    const total = dabs[dabs.length - 1].len;
+    if (total <= taper * 2) return;
+    const windowStart = total - taper;
+    let rect: Rect | null = null;
+    for (const d of dabs) {
+      if (d.len >= windowStart) rect = this.unionRect(rect, this.dabRect(d.x, d.y, d.w));
+    }
+    if (!rect) return;
+    const dirty = this.clampRect({ x: rect.x - 1, y: rect.y - 1, w: rect.w + 2, h: rect.h + 2 });
+    if (dirty.w <= 0 || dirty.h <= 0) return;
+    const eraser = this.draw.tool === 'eraser';
+    const ctx = this.strokeBuf.getContext('2d')!;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(dirty.x, dirty.y, dirty.w, dirty.h);
+    ctx.clip();
+    this.clipForPaint(ctx);
+    ctx.clearRect(dirty.x, dirty.y, dirty.w, dirty.h);
+    for (const d of dabs) {
+      const r = this.dabRect(d.x, d.y, d.w);
+      if (r.x > dirty.x + dirty.w || r.x + r.w < dirty.x) continue;
+      if (r.y > dirty.y + dirty.h || r.y + r.h < dirty.y) continue;
+      this.stampDab(ctx, d.x, d.y, Math.max(0.5, d.w * this.taperFactor(d.len, total)), eraser);
+    }
+    ctx.restore();
+    this.refreshStrokePreview(layer, dirty);
+    this.strokeBounds = this.unionRect(this.strokeBounds, dirty);
+    this.render(dirty);
+  }
+
   private endStroke(): void {
     if (this.strokeBounds && this.strokePreview && this.strokeLayerId) {
       const layer = this.layers.find((l) => l.id === this.strokeLayerId) ?? null;
       if (layer) {
+        this.applyEndTaper(layer);
         const bounds = this.strokeBounds;
         const before = this.captureTiles(layer.canvas, bounds);
         const lctx = layer.canvas.getContext('2d')!;
@@ -1538,12 +1770,17 @@ class EditorStore {
     this.strokeBounds = null;
     this.strokeResidual = 0;
     this.lastMoveRect = null;
+    this.strokeDabs = [];
   }
 
   pointerDown = (clientX: number, clientY: number, pressure: number, button: number, isPen: boolean): void => {
     if (button === 2) return;
     const p = this.toDoc(clientX, clientY);
     this.updateCursor(clientX, clientY, pressure);
+    // 落笔先按静止（满宽）算，之后每次移动再更新速度
+    this.speed = 0;
+    this.pointerTime = 0;
+    this.lastPointer = { x: clientX, y: clientY };
     this.draw = {
       active: true,
       tool: this.state.tool,
@@ -1649,6 +1886,15 @@ class EditorStore {
       const eraser = d.tool === 'eraser';
       const target = this.strokeBuf?.getContext('2d') ?? null;
       if (!target) return;
+      if (this.state.velocity > 0) {
+        const now = performance.now();
+        const dt = this.pointerTime ? Math.max(1, now - this.pointerTime) : 16;
+        const raw = Math.hypot(clientX - this.lastPointer.x, clientY - this.lastPointer.y) / dt;
+        // 指针事件本身抖，用 EMA 平滑后再当速度用
+        this.speed += (raw - this.speed) * 0.35;
+        this.pointerTime = now;
+        this.lastPointer = { x: clientX, y: clientY };
+      }
       d.isPen = isPen;
       d.pressure = pressure;
       d.targetX = p.x;
@@ -2024,6 +2270,18 @@ class EditorStore {
     this.emit({ stabilizer: next });
   };
 
+  setTaper = (taper: number): void => {
+    const next = clampNum(taper, 0, 100);
+    storeNum(LS.taper, next);
+    this.emit({ taper: next });
+  };
+
+  setVelocity = (velocity: number): void => {
+    const next = clampNum(velocity, 0, 1);
+    storeNum(LS.velocity, next);
+    this.emit({ velocity: next });
+  };
+
   private persistPresets(presets: BrushPreset[]): void {
     storeJson(LS.presets, presets);
   }
@@ -2040,6 +2298,8 @@ class EditorStore {
       spacing: this.state.spacing,
       pressureCurve: this.state.pressureCurve,
       pressureBezier: this.state.pressureBezier,
+      taper: this.state.taper,
+      velocity: this.state.velocity,
       stabilizer: this.state.stabilizer,
     };
     const exists = this.state.presets.some((p) => p.name === n);
@@ -2061,6 +2321,8 @@ class EditorStore {
     storeNum(LS.spacing, p.spacing);
     storeNum(LS.curve, p.pressureCurve);
     storeJson(LS.bezier, p.pressureBezier);
+    storeNum(LS.taper, p.taper);
+    storeNum(LS.velocity, p.velocity);
     storeNum(LS.stabilizer, p.stabilizer);
     this.emit({
       size: p.size,
@@ -2070,6 +2332,8 @@ class EditorStore {
       spacing: p.spacing,
       pressureCurve: p.pressureCurve,
       pressureBezier: p.pressureBezier,
+      taper: p.taper,
+      velocity: p.velocity,
       stabilizer: p.stabilizer,
     });
     this.setStatus(`已应用预设「${name}」`);

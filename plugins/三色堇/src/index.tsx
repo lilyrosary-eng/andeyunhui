@@ -5,6 +5,7 @@ import { ReadingView } from './ReadingView';
 import { ReadingStatsPage } from './ReadingStatsPage';
 import { getReadingProgress, saveReadingProgress, type ReadingProgress } from './readingProgress';
 import { setCurrentBookPath, getCurrentBookPath } from './readingStore';
+import { getHighlight, listBooksWithPath, listHighlights } from './readingHighlights';
 import { useRootPaths, EmptyState, NoResultsState, useStreamingOpen, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 
@@ -140,6 +141,29 @@ try {
         });
         if (results.length >= 40) break;
       }
+      // 高亮/批注条目：navigate 携带 props {chapterIndex, highlightId}，
+      // 阅读导航处理器据此「打开书 → 定位章节 → 滚动到该高亮」
+      try {
+        let hlCount = 0;
+        for (const bp of listBooksWithPath()) {
+          const owner = paletteBooks.find((b) => b.filePath.replace(/\\/g, '/').toLowerCase() === bp.replace(/\\/g, '/').toLowerCase());
+          for (const r of listHighlights(bp)) {
+            const hay = `${r.quote} ${r.note}`.toLowerCase();
+            if (!hay.includes(q)) continue;
+            results.push({
+              id: `hl:${r.id}`,
+              title: `「${(r.quote || '').slice(0, 24)}」`,
+              subtitle: [owner?.title, r.note ? `✎ ${r.note.slice(0, 20)}` : ''].filter(Boolean).join(' · '),
+              path: [owner?.parentDir || T('reading.title'), T('reading.tab.notes')],
+              iconName: 'BookOpen',
+              rank: 6,
+              navigate: { module: 'reading', entity: bp, props: { filePath: bp, chapterIndex: r.chapterIndex, highlightId: r.id } },
+            });
+            if (++hlCount >= 8) break;
+          }
+          if (hlCount >= 8) break;
+        }
+      } catch { /* 高亮索引失败不影响书籍搜索 */ }
       return results;
     },
   });
@@ -223,6 +247,10 @@ function ReadingModule() {
   // 恢复用一次性标记：章内滚动百分比（竖版）/ 章内页码偏移（分页），由 ReadingView apply 后清空
   const [restoreScrollPercent, setRestoreScrollPercent] = useState<number | null>(null);
   const [restorePageInChapter, setRestorePageInChapter] = useState<number | null>(null);
+  // 一次性外部高亮跳转（侧栏笔记点击/命令面板/其他模块 navigate）：ReadingView 消费后清空
+  const [extHighlightId, setExtHighlightId] = useState<string | null>(null);
+  // 外部导航待定位意图（props 携带 chapterIndex/highlightId）：书打开、章节就绪后消费
+  const pendingReadingNavRef = useRef<{ filePath: string; chapterIndex?: number; highlightId?: string } | null>(null);
   const [scanComplete, setScanComplete] = useState(false);
 
   // 阅读进度统计面板 + 持久化（内嵌常驻，无需开关）
@@ -328,6 +356,7 @@ function ReadingModule() {
           chapters: [],
         });
         setSelectedChapterIndex(0);
+        setExtHighlightId(null);
         loadedPathRef.current = null;
         setOpeningFilePath(meta.filePath);
         setShowSettings(false);
@@ -390,6 +419,16 @@ function ReadingModule() {
     const off = hostApi.registerNavigator?.((target) => {
       const filePath = (target.props?.filePath as string | undefined) || target.entity;
       if (!filePath) return false;
+      // props 可携带定位意图（provider 高亮条目 / 其他模块跳转）：
+      // chapterIndex=章节序号，highlightId=高亮 id（缺 chapterIndex 时按记录反查章节）
+      const rawCh = target.props?.chapterIndex;
+      const chapterIndex = typeof rawCh === 'number' && Number.isFinite(rawCh) ? Math.max(0, Math.floor(rawCh)) : undefined;
+      const highlightId = typeof target.props?.highlightId === 'string' ? (target.props.highlightId as string) : undefined;
+      if (chapterIndex != null || highlightId) {
+        pendingReadingNavRef.current = { filePath, chapterIndex, highlightId };
+      } else {
+        pendingReadingNavRef.current = null;
+      }
       void openByPathRef.current(filePath);
       return true;
     });
@@ -487,6 +526,34 @@ function ReadingModule() {
     return () => clearTimeout(t);
   }, [currentBook, openingFilePath, restoreScrollPercent, restorePageInChapter]);
 
+  // ===== 外部导航定位（props.chapterIndex / props.highlightId）=====
+  // 书打开且目标章节已随流加载到达时消费：定位章节 + 下发一次性高亮跳转。
+  // 显式定位优先于进度恢复（同步 progressRef，防止恢复夹紧把位置拉回旧章节）。
+  useEffect(() => {
+    const pend = pendingReadingNavRef.current;
+    if (!pend || !currentBook) return;
+    const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase();
+    if (norm(pend.filePath) !== norm(currentBook.filePath)) return;
+    let idx = pend.chapterIndex;
+    if (idx == null && pend.highlightId) {
+      const rec = getHighlight(currentBook.filePath, pend.highlightId);
+      if (rec) idx = rec.chapterIndex;
+      else { pendingReadingNavRef.current = null; setExtHighlightId(null); return; }
+    }
+    // 目标章节尚未随流到达：等下一批章节（openingFilePath 仍非空）再消费
+    if (idx != null && currentBook.chapters.length <= idx && openingFilePath !== null) return;
+    pendingReadingNavRef.current = null;
+    if (idx != null) {
+      const clamped = Math.max(0, Math.min(idx, currentBook.chapters.length - 1));
+      if (progressRef.current) progressRef.current.chapterIndex = clamped;
+      setSelectedChapterIndex(clamped);
+      // 清除恢复期章内位置标记：章内定位交给高亮跳转（避免恢复的页码把视图按回别处）
+      setRestoreScrollPercent(null);
+      setRestorePageInChapter(null);
+    }
+    if (pend.highlightId) setExtHighlightId(pend.highlightId);
+  }, [currentBook, openingFilePath]);
+
   // 章节切换 → 记录并标记脏
   useEffect(() => {
     if (!currentBookRef.current || !progressRef.current) return;
@@ -563,11 +630,28 @@ function ReadingModule() {
       setCurrentBook(null);
       setSelectedChapterIndex(0);
     });
+    setExtHighlightId(null);
+    pendingReadingNavRef.current = null;
     setCurrentBookPath(null);
+  }, []);
+
+  // ReadingView 消费完一次性高亮跳转（定位成功 / 记录失效 / 超时）后清空
+  const handleExternalHighlightConsumed = useCallback(() => {
+    setExtHighlightId(null);
   }, []);
 
   const handleChapterClick = useCallback((index: number) => {
     setSelectedChapterIndex(index);
+  }, []);
+
+  // 侧栏「笔记」tab 点击：跳到原文章节并一次性下发 highlightId（ReadingView 滚动定位 + 闪现）
+  const handleHighlightJump = useCallback((chapterIndex: number, highlightId: string) => {
+    setShowStats(false);
+    setShowSettings(false);
+    pendingReadingNavRef.current = null;
+    if (progressRef.current) progressRef.current.chapterIndex = chapterIndex;
+    setSelectedChapterIndex(chapterIndex);
+    setExtHighlightId(highlightId);
   }, []);
 
   const handleOpenSettings = useCallback(() => {
@@ -628,12 +712,13 @@ function ReadingModule() {
         currentBook={currentBook}
         currentChapterIndex={selectedChapterIndex}
         onChapterClick={handleChapterClick}
+        onHighlightJump={handleHighlightJump}
         onBackToBooks={handleBackToList}
         onOpenStats={() => { setShowSettings(false); setShowStats((v) => !v); }}
       />
       <div className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917] relative">
         {currentBook ? (
-          <ReadingView book={currentBook} onBack={handleBackToList} externalChapterIndex={selectedChapterIndex} onChapterChange={setSelectedChapterIndex} onScrollProgress={handleScrollProgress} externalScrollPercent={restoreScrollPercent} externalPageInChapter={restorePageInChapter} onPageProgress={handlePageProgress} />
+          <ReadingView book={currentBook} onBack={handleBackToList} externalChapterIndex={selectedChapterIndex} onChapterChange={setSelectedChapterIndex} onScrollProgress={handleScrollProgress} externalScrollPercent={restoreScrollPercent} externalPageInChapter={restorePageInChapter} onPageProgress={handlePageProgress} externalHighlightId={extHighlightId} onExternalHighlightConsumed={handleExternalHighlightConsumed} />
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center h-full gap-3 text-neutral-400 dark:text-stone-500">
             <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="opacity-40">

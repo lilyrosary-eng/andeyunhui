@@ -3,15 +3,49 @@ import { T } from '../../_shared/pluginRuntime';
 // 平台判定统一走 src/platform/isLinux.ts 单例（禁止各自 UA 嗅探；此前本文件内联过一份，
 // 与 RoamView/NowPlayingView/PlayerBar 的 HEAVY_FX 判据同源，避免双实现漂移）。
 import { isLinux } from '@/platform/isLinux';
+// ===== 无缝播放（第一阶段：本地预缓冲）配置 =====
+// localStorage key：与 music_online_lyrics / music_show_album 同一套模式，缺省视为开启。
+const SEAMLESS_STORAGE_KEY = 'music_seamless_prefetch';
+// 交叉淡化时长（ms）：预缓冲命中换曲时旧元素淡出、新元素淡入，可被后续操作取消（cancelCrossfade）。
+const CROSSFADE_MS = 120;
+// 预缓冲触发窗口：剩余 ≤ min(该上限, duration*0.15) 秒时开始预取下一曲。
+const PREFETCH_READAHEAD_CAP_SEC = 8;
+
+/**
+ * 非关键任务调度：debug_log / SMTC 状态推送等「不该出现在切歌热路径上」的 IPC
+ * 统一延迟到 requestIdleCallback（不支持时退 setTimeout(0)，即下一宏任务）执行。
+ * 错误日志仍然发送，只是错峰，不再与 audio.play() 争同一轮同步执行预算。
+ */
+type IdleCapableWindow = Window & {
+  requestIdleCallback?: (cb: () => void, opts?: { timeout?: number }) => number;
+};
+const scheduleNonCritical = (fn: () => void): void => {
+  try {
+    const w = window as unknown as IdleCapableWindow;
+    if (typeof w.requestIdleCallback === 'function') {
+      w.requestIdleCallback(fn, { timeout: 500 });
+      return;
+    }
+  } catch { /* 退到 setTimeout */ }
+  try { setTimeout(fn, 0); } catch { /* 忽略 */ }
+};
+
+const readSeamlessFlag = (): boolean => {
+  try { return localStorage.getItem(SEAMLESS_STORAGE_KEY) !== 'false'; } catch { return true; }
+};
+
 // debugLog 现在双写：①直接 console.log（在 WebView DevTools 控制台可见，不经 Rust 桥、
 // 永不被沙箱/ACL 吞掉，是最可靠的排查手段）；②再经 debug_log 命令转发到 Rust 终端。
+// ②不再同步发起：经 scheduleNonCritical 错峰，切歌热路径上只剩本地 console.error。
 const debugLog = (m: string) => {
   try { console.error('[music-smtc]', m); } catch { /* 忽略 */ }
-  try {
-    window.__HOST_API__?.invoke('debug_log', { msg: `[music] ${m}` }).catch(() => {});
-  } catch {
-    /* 忽略 */
-  }
+  scheduleNonCritical(() => {
+    try {
+      window.__HOST_API__?.invoke('debug_log', { msg: `[music] ${m}` }).catch(() => {});
+    } catch {
+      /* 忽略 */
+    }
+  });
 };
 // 一次性模块加载探针（console.error 不受沙箱 safe-console 吞没，dev/prod 均可见）
 try {
@@ -40,6 +74,7 @@ type PlayMode = 'list' | 'single' | 'random';
 type PlayerEvent = 'play' | 'pause' | 'trackChange' | 'progress' | 'end' | 'queueChange';
 
 class MusicPlayer {
+  /** 当前**活动**元素（正在出声/被控制的那条）。无缝换曲时与 prefetchEl 交换引用。 */
   private audio: HTMLAudioElement;
   private tracks: Track[] = [];
   private currentIndex: number = -1;
@@ -53,6 +88,28 @@ class MusicPlayer {
   private volume: number = 0.7;
   private playMode: PlayMode = 'list';
   private shuffleIndices: number[] = [];
+  // ===== 无缝播放（第一阶段：本地预缓冲）=====
+  // 配置开关（localStorage 'music_seamless_prefetch'，默认开）：控制第二元素预缓冲、
+  // 命中交换与交叉淡化整套链路；关闭时行为回到「单 audio 元素 + playAt」。
+  private seamlessEnabled: boolean = readSeamlessFlag();
+  /** 预缓冲专用第二个元素（惰性创建；与 audio 交换引用后旧元素回收复用）。 */
+  private prefetchEl: HTMLAudioElement | null = null;
+  /** 正在预缓冲的队列索引（-1 = 无）。交换命中要求它与目标索引一致。 */
+  private prefetchIndex = -1;
+  /** 预缓冲目标已解析出的 src（空 = URL 还没解析完，不可交换）。 */
+  private prefetchSrc = '';
+  /** 预缓冲序号守卫：取消/换目标时 ++，作废在途的异步 resolvePlayableSrc。 */
+  private prefetchSeq = 0;
+  /** 交叉淡化定时器（16ms 步进）；换曲/暂停/销毁时可取消并立即收尾。 */
+  private crossfadeTimer: number | null = null;
+  /** 交叉淡化兜底定时器：细步进被节流时也能强制收尾，防新元素停在低音量。 */
+  private crossfadeSafetyTimer: number | null = null;
+  /** 正在淡出的旧元素（同一时刻至多一个）。 */
+  private fadingOutEl: HTMLAudioElement | null = null;
+  /** SMTC 推送合并标记：一次切歌窗口内的多次 push 只落一次 IPC。 */
+  private smtcPushQueued = false;
+  /** destroy 之后所有延迟任务一律作废，防止孤儿回调打到已释放元素上。 */
+  private disposed = false;
   // 系统媒体键（smtc-control 事件）监听的注销函数
   private smtcUnlisten: (() => void) | null = null;
   // 持久化：当前播放的歌单 ID，组件重载时恢复选中状态
@@ -87,6 +144,8 @@ class MusicPlayer {
   //   另：整段包在 try/catch 里，异常一律回退伪律动。
   private webAudioCtx: AudioContext | null = null;
   private webAnalyser: AnalyserNode | null = null;
+  /** createMediaElementSource 绑定的元素（终其一生至多一个；无缝交换后频谱继续监听它）。 */
+  private mediaSourceEl: HTMLAudioElement | null = null;
   /** 复用的频域缓冲，避免每帧分配（128 bin）。 */
   private webBins: Uint8Array | null = null;
   /** 是否已尝试过建 Web Analyser（失败不再重试，避免每帧抛错）。 */
@@ -103,14 +162,24 @@ class MusicPlayer {
   };
 
   constructor() {
-    this.audio = new Audio();
-    this.audio.volume = this.volume;
-    this.audio.preload = 'metadata';
-    this.bindEvents();
-    this.bindMediaDiagnostics();
+    this.audio = this.createAudioElement('metadata');
     // MediaSession 动作改为「首次 play 时」再注册 —— 见 setupMediaSessionHandlers 注释
     this.setupSmtc();
     this.setupSpectrumListener();
+  }
+
+  /**
+   * 媒体元素工厂：统一「new Audio + 音量 + preload + 播放事件 + 诊断事件」的装配。
+   * 活动元素与预缓冲元素都从这里出来；bindEvents 内部以 `el === this.audio` 为闸，
+   * 预缓冲元素在交换成活动元素之前不会触发 play/pause/ended 等业务事件。
+   */
+  private createAudioElement(preload: 'metadata' | 'auto'): HTMLAudioElement {
+    const el = new Audio();
+    el.volume = this.volume;
+    el.preload = preload;
+    this.bindEvents(el);
+    this.bindMediaDiagnostics(el);
+    return el;
   }
 
   /**
@@ -126,8 +195,7 @@ class MusicPlayer {
    * 顺带把 `currentSrc` 截断打出来（能看出 `convertFileSrc` 产出的 asset:// URL
    * 是否被正确编码，文件名含空格/中文时尤其容易在这里出问题）。
    */
-  private bindMediaDiagnostics(): void {
-    const a = this.audio;
+  private bindMediaDiagnostics(a: HTMLAudioElement): void {
     const short = (s: string | undefined) => (s || '').slice(0, 160);
     const snap = (tag: string) =>
       debugLog(
@@ -148,8 +216,13 @@ class MusicPlayer {
     a.addEventListener('error', () => snap('error'));
   }
 
-  private bindEvents(): void {
-    this.audio.addEventListener('play', () => {
+  private bindEvents(a: HTMLAudioElement): void {
+    // ⚠ 元素闸：活动元素与预缓冲元素共用这套处理器。预缓冲元素在未交换成
+    // `this.audio` 之前（以及交换后被淡出释放的旧元素）触发的事件一律忽略，
+    // 否则交叉淡化里旧元素的 pause、预取元素的 canplay 等会污染播放状态。
+    const isActive = () => a === this.audio;
+    a.addEventListener('play', () => {
+      if (!isActive()) return;
       this.isPlaying = true;
       void this.setupMediaSessionHandlers();
       this.startPseudoAnalyser();
@@ -157,21 +230,24 @@ class MusicPlayer {
       this.pushSmtc();
       this.emit('play', null);
     });
-    this.audio.addEventListener('pause', () => {
+    a.addEventListener('pause', () => {
+      if (!isActive()) return;
       this.isPlaying = false;
       this.setMediaSessionState('paused');
       this.pushSmtc();
       this.emit('pause', null);
     });
-    this.audio.addEventListener('ended', () => {
+    a.addEventListener('ended', () => {
+      if (!isActive()) return;
       this.emit('end', null);
       this.handleEnded();
     });
-    this.audio.addEventListener('timeupdate', () => {
+    a.addEventListener('timeupdate', () => {
+      if (!isActive()) return;
       // 实际听歌时长累计：仅播放中按 tick 增量累加，单次 delta 封顶 5s（seek 掠过不算「听」）。
       // 用于切歌时结算上一曲的真实播放量（trackChange 时 audio.currentTime 已被重置为 0，
       // 直接读 getCurrentTime 会把整首听完记成 0ms —— 累计听歌时长虚低的根因）。
-      const now = this.audio.currentTime;
+      const now = a.currentTime;
       if (this.playRequested && now > this.lastTickTime) {
         this.pendingPlayedMs += Math.min(now - this.lastTickTime, 5) * 1000;
       }
@@ -180,9 +256,11 @@ class MusicPlayer {
       // 让系统媒体卡片的进度条跟着走（节流 ~1s，见 pushSmtcProgress）
       this.pushSmtcProgress();
       this.emit('progress', {
-        currentTime: this.audio.currentTime,
-        duration: this.audio.duration || 0,
+        currentTime: a.currentTime,
+        duration: a.duration || 0,
       });
+      // 无缝播放：接近曲尾时尝试给下一曲起预缓冲（开关关闭时第一行即返回，零成本）
+      this.maybeStartPrefetch();
     });
   }
 
@@ -240,11 +318,15 @@ class MusicPlayer {
   // 见 setupSmtc() 中监听的 "smtc-control"。若此处再用 JS 注册媒体键处理器，会与 Rust 路径
   // 重复触发（同一按键执行两次），故刻意留空。
   private msHandlersBound = false;
+  /** debug.json noMediasession 是否生效过（Linux 崩溃二分排查留痕）。 */
+  private msSkipped = false;
   /** 媒体元数据诊断（每首只打一次日志） */
   private lastMsDiagKey = '';
 
   private async setupMediaSessionHandlers(): Promise<void> {
     if (this.msHandlersBound) return;
+    // 已被 noMediasession 判过关闭 ⇒ 不再重复问 debug_flags（此前每次 play 事件都会重入）
+    if (this.msSkipped) return;
 
     // Windows / 其它平台：媒体键由 Rust SMTC 回传（smtc-control），这里必须留空，
     // 否则同一次按键会被处理两次。
@@ -263,7 +345,9 @@ class MusicPlayer {
     // 即可跳过注册（用于判断 MediaSession 是否与音乐模块崩溃有关）。
     let skipped = false;
     try {
-      const f = await invoke<{ noMediasession?: boolean }>('debug_flags');
+      // 走宿主注入 API（此前这里裸调 `invoke` —— 运行时碰巧命中 esbuild external，
+      // 类型层面一直是坏的；统一成 __HOST_API__.invoke 后行为不变且类型正确）。
+      const f = await window.__HOST_API__?.invoke<{ noMediasession?: boolean }>('debug_flags');
       skipped = !!f?.noMediasession;
     } catch { /* ignore */ }
     if (skipped) {
@@ -389,16 +473,31 @@ class MusicPlayer {
       if (this.lastMsDiagKey !== diagKey) {
         this.lastMsDiagKey = diagKey;
         const back = (ms.mediaSession.metadata as { title?: string; artwork?: { src?: string }[] } | null);
-        window.__HOST_API__?.invoke?.('debug_log', {
-          msg: `MS_META set title=${back?.title ?? '<null>'} art=${back?.artwork?.[0]?.src ?? '<none>'}`,
-        }).catch(() => {});
+        // debugLog 的 IPC 侧已延迟到非关键任务；切歌热路径只剩媒体会话赋值本身。
+        debugLog(`MS_META set title=${back?.title ?? '<null>'} art=${back?.artwork?.[0]?.src ?? '<none>'}`);
       }
     } catch {
       /* 元数据失败不影响播放 */
     }
   }
 
+  /**
+   * 切歌热路径入口：不再同步发 IPC，合并后延迟到 idle/下一宏任务（scheduleNonCritical）。
+   * 一次切歌里 play/trackChange 会多次调用 pushSmtc —— 合并成一次真实推送，
+   * 所有 debug_log / smtc_update / smtc_status 及其错误日志全部保留，只是错峰发出。
+   */
   private pushSmtc(): void {
+    if (this.disposed) return;
+    if (this.smtcPushQueued) return;
+    this.smtcPushQueued = true;
+    scheduleNonCritical(() => {
+      this.smtcPushQueued = false;
+      if (this.disposed) return;
+      this.pushSmtcNow();
+    });
+  }
+
+  private pushSmtcNow(): void {
     this.syncMediaSessionMetadata();
     const track = this.getCurrentTrack();
     const has = !!track && this.tracks.length > 0;
@@ -514,6 +613,8 @@ class MusicPlayer {
 
   setTracks(tracks: Track[], startIndex: number = 0): void {
     this.tracks = tracks;
+    // 队列整体更换 ⇒ 旧预取目标失效（索引语义已变），立即作废第二缓冲
+    this.resetPrefetch();
     // 切换歌单时必须重置随机序列：旧 shuffleIndices 基于旧歌单长度，
     // 若新歌单更长则超出旧长度的歌曲永远不会被随机到，反之则索引越界。
     this.shuffleIndices = [];
@@ -544,7 +645,7 @@ class MusicPlayer {
     this.loadedIndex = -1;
     const track = this.tracks[index];
     const api = window.__HOST_API__;
-    try { api?.invoke('debug_log', { msg: `MUSIC_LOAD_TRACK idx=${index} file=${track.filePath}` }).catch(()=>{}); } catch {}
+    debugLog(`MUSIC_LOAD_TRACK idx=${index} file=${track.filePath}`);
     // Linux 上本地文件要 fetch 成 blob 才是异步的 ⇒ 用序号守卫防止竞态：
     // 快速连点切歌时，先发后到的旧请求不能覆盖新歌。
     const seq = ++this.loadSeq;
@@ -706,9 +807,265 @@ class MusicPlayer {
     });
   }
 
+  // ==============================================================
+  // 无缝播放（第一阶段）：本地预缓冲 + 元素交换 + 交叉淡化
+  // ==============================================================
+  //
+  // 设计约束（与调研结论一一对应）：
+  //  1) 第二个 Audio 元素只做预缓冲（preload=auto 起缓冲，永不提前 play）。
+  //  2) 命中条件：同索引 + readyState>=3 + 无 error ⇒ 交换 audio / prefetchEl 引用
+  //     并立即 play()；任何一环不满足都**原样回退**旧的 playAt 异步链路。
+  //  3) ⚠ 不新建第二个 createMediaElementSource：WebAudio 频谱源绑定的是
+  //     「首次建源时的那个元素」；交换元素后 spectrum 继续监听旧元素（数据会平直），
+  //     这是刻意的取舍 —— 改道第二源会触碰本项目历史上「createMediaElementSource
+  //     静音/崩溃」的雷区，宁可频谱降级，也不引入静音。MediaSession/SMTC 走
+  //     `this.audio` 动态引用 + 事件闸，随交换自然切换，无需重建。
+  //  4) 竞态：预缓冲有独立序号守卫 prefetchSeq（解析在途被取消/换目标即作废）；
+  //     交换同时 bump loadSeq，让在途 loadTrack 结果被既有守卫丢弃。
+  //  5) 「同曲不重载」：目标==当前已加载索引、或预取 src 与活动 src 相同 ⇒ 跳过。
+
+  /** 随机序初始化（getNextIndex 与预缓冲 peek 共用，行为与原实现一致）。 */
+  private ensureShuffleIndices(): number[] {
+    if (this.shuffleIndices.length === 0) {
+      this.shuffleIndices = this.tracks.map((_, i) => i);
+      for (let i = this.shuffleIndices.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [this.shuffleIndices[i], this.shuffleIndices[j]] = [this.shuffleIndices[j], this.shuffleIndices[i]];
+      }
+    }
+    return this.shuffleIndices;
+  }
+
+  /**
+   * 预缓冲目标索引：与 ended 自动连播（getNextIndex）同一套判据 ——
+   * list→下一首、random→随机序下一首（single 单曲循环 = 同曲，无需预取返回 -1）。
+   * 手动 next/prev 走的是 getNextIndex/getPrevIndex 的目标；trySeamlessSwitch 只在
+   * 「预取索引 === 本次切歌目标」时交换，模式切换/跳曲都会让旧预取自然 miss 回退。
+   */
+  private peekNextIndex(): number {
+    if (this.tracks.length === 0) return -1;
+    switch (this.playMode) {
+      case 'single': return -1;
+      case 'random': {
+        const order = this.ensureShuffleIndices();
+        const cur = order.indexOf(this.currentIndex);
+        return order[(cur + 1) % order.length];
+      }
+      default: return (this.currentIndex + 1) % this.tracks.length;
+    }
+  }
+
+  /** timeupdate 驱动：剩余 ≤ min(8s, duration*0.15) 且开关开启时，为下一曲起预缓冲。 */
+  private maybeStartPrefetch(): void {
+    if (!this.seamlessEnabled || this.disposed) return;
+    if (!this.isPlaying && !this.playRequested) return;
+    const dur = this.audio.duration;
+    if (!Number.isFinite(dur) || dur <= 0) return;
+    const remaining = dur - this.audio.currentTime;
+    const threshold = Math.min(PREFETCH_READAHEAD_CAP_SEC, dur * 0.15);
+    if (remaining > threshold) return;
+    const target = this.peekNextIndex();
+    if (target < 0 || target === this.currentIndex) return;
+    // 同目标已在预取（解析中/已缓冲）⇒ 不重复触发（也顺带挡住队列里的同曲重复条目）
+    if (this.prefetchIndex === target) return;
+    const track = this.tracks[target];
+    // 本地曲目：整条预缓冲链路由第二元素负责。
+    // 在线曲目：仍走既有取地址异步链路 —— 地址未就绪（filePath 为空的占位曲）一律不预加载，
+    // 待 updateTrackUrl 补完地址后，下一次接近曲尾的 tick 才会命中预加载。
+    if (!track || !track.filePath) return;
+    this.startPrefetch(target, track.filePath);
+  }
+
+  /** 解析下一曲 URL 并交给预缓冲元素（preload=auto）起缓冲。带 prefetchSeq 竞态守卫。 */
+  private startPrefetch(index: number, filePath: string): void {
+    const seq = ++this.prefetchSeq;
+    this.prefetchIndex = index;
+    this.prefetchSrc = '';
+    if (!this.prefetchEl) {
+      this.prefetchEl = this.createAudioElement('metadata');
+    }
+    const el = this.prefetchEl;
+    // 先清掉旧目标：避免「上一首歌已就绪」被误判成「新歌已就绪」的交换竞态
+    try { el.pause(); el.removeAttribute('src'); el.load(); } catch { /* 忽略 */ }
+    const api = window.__HOST_API__;
+    const isLocal = !/^https?:\/\//i.test(filePath);
+    void this.resolvePlayableSrc(api, filePath).then((src) => {
+      if (seq !== this.prefetchSeq) {
+        debugLog(`music prefetch 竞态丢弃 idx=${index} (seq=${seq} 当前=${this.prefetchSeq})`);
+        return;
+      }
+      if (this.disposed || !src) { this.prefetchIndex = -1; return; }
+      if (src === this.loadedSrc) {
+        // 下一曲 src 与活动元素已加载的完全相同（同曲重复条目）⇒ 无需第二份缓冲
+        this.prefetchIndex = -1;
+        return;
+      }
+      // 要求：URL 解析完成后才把预取元素升到 preload=auto（先 preload 后 src 才会按 auto 起缓冲）
+      el.preload = 'auto';
+      el.src = src;
+      this.prefetchSrc = src;
+      debugLog(`music prefetch start idx=${index} local=${isLocal ? 1 : 0}`);
+      // 就绪度不单独记标志：交换时直接读 el.readyState（元素自身是准绳，error 也一并检查）
+    }).catch((e) => {
+      if (seq === this.prefetchSeq) {
+        this.prefetchIndex = -1;
+        this.prefetchSrc = '';
+        debugLog('music prefetch resolve 失败: ' + String(e));
+      }
+    });
+  }
+
+  /** 作废当前预缓冲（换曲/换播放模式/重建队列/destroy）。元素本体保留复用。 */
+  private resetPrefetch(): void {
+    this.prefetchSeq++;
+    this.prefetchIndex = -1;
+    this.prefetchSrc = '';
+    if (this.prefetchEl) {
+      try {
+        this.prefetchEl.pause();
+        this.prefetchEl.removeAttribute('src');
+        this.prefetchEl.load();
+      } catch { /* 忽略 */ }
+    }
+  }
+
+  /**
+   * 切歌统一入口：预缓冲命中 ⇒ 交换元素无缝续播；未命中 ⇒ 回退既有 playAt。
+   * （ended 自动连播 / 手动 next / prev / 队列点选都走这里。）
+   */
+  private switchTrack(index: number): void {
+    if (this.trySeamlessSwitch(index)) return;
+    this.playAt(index);
+  }
+
+  /** 命中条件：开关开 + 同索引 + URL 已就位 + readyState>=3 + 无 error + 非「已加载同曲」。 */
+  private trySeamlessSwitch(index: number): boolean {
+    if (this.disposed || !this.seamlessEnabled) return false;
+    const el = this.prefetchEl;
+    if (!el || this.prefetchIndex !== index || !this.prefetchSrc) return false;
+    // 活动元素已经装着这首歌（prev 后又 next 回来的场景）⇒ 不交换，交 playAt 的
+    // 「同曲不重载」路径原地续播，避免把正在播的进度重启。
+    if (index === this.currentIndex && this.loadedIndex === index) return false;
+    if (el.error || el.readyState < 3) {
+      debugLog(`music seamless miss idx=${index} rs=${el.readyState} err=${el.error ? el.error.code : 'null'}`);
+      return false;
+    }
+    const track = this.tracks[index];
+    if (!track) return false;
+
+    const old = this.audio;
+    const nextSrc = this.prefetchSrc;
+    // 先把预取簿记摘干净，再交换（防止中途事件读到半新半旧状态）
+    this.cancelCrossfade();          // 快速连切：上一轮没走完的淡化立即收尾
+    this.prefetchEl = null;
+    this.prefetchIndex = -1;
+    this.prefetchSrc = '';
+    this.prefetchSeq++;              // 作废任何还在 resolve 的预取（含本元素旧在途）
+    this.loadSeq++;                  // 作废在途 loadTrack：交换后它若再设 this.audio.src 会把新元素 reset 掉
+
+    this.audio = el;
+    this.loadedSrc = nextSrc;
+    this.loadedIndex = index;
+    this.currentIndex = index;
+
+    // 立即 play：play 事件经 bindEvents(el) 闸后走既有管线（MediaSession 状态、
+    // SMTC 推送、伪律动/频谱唤醒），不需要任何针对「新元素」的重建。
+    el.volume = CROSSFADE_MS > 0 ? 0 : this.volume;
+    try { el.currentTime = 0; } catch { /* ignore */ }
+    el.play().catch((err) => this.reportPlayFailure(err));
+
+    if (CROSSFADE_MS > 0) {
+      this.startCrossfadeRelease(old);
+    } else {
+      this.releaseElement(old);
+    }
+    // 频谱说明：若 WebAudio 源绑在旧元素上（Linux 非 Rust 频谱路径），交换后频谱
+    // 继续监听旧元素 ⇒ 新曲期间数据平直。刻意不建第二 MediaElementSource（静音雷区）。
+    if (this.mediaSourceEl && this.mediaSourceEl === old) {
+      debugLog('music seamless: analyser 保持旧元素监听（不新建第二 MediaElementSource）');
+    }
+
+    debugLog(`music seamless swap idx=${index} crossfade=${CROSSFADE_MS}`);
+    this.emit('trackChange', track);
+    this.updateMediaSessionMeta(track);
+    this.pushSmtc();                 // 合并 + 延迟到非关键任务，不阻塞本次 play
+    return true;
+  }
+
+  /**
+   * ~120ms 交叉淡化：旧元素音量渐弱到 0 后释放，新活动元素同步从 0 渐起到当前音量。
+   * 可取消 —— cancelCrossfade 会在下一次交换 / 暂停 / 关闭开关 / destroy 时立即收尾。
+   * ⚠ 防「半音量卡死」：除 16ms 细步进外还挂一个粗粒度兜底定时器 —— 后台窗口里
+   * setInterval 可能被节流到秒级，若无兜底，新元素会长时间停在低音量（准静音）。
+   */
+  private startCrossfadeRelease(old: HTMLAudioElement): void {
+    const startV = old.volume;
+    const t0 = performance.now();
+    const finalize = () => {
+      if (this.crossfadeTimer !== null) { clearInterval(this.crossfadeTimer); this.crossfadeTimer = null; }
+      if (this.crossfadeSafetyTimer !== null) { clearTimeout(this.crossfadeSafetyTimer); this.crossfadeSafetyTimer = null; }
+      if (this.fadingOutEl !== old) return; // 已被新的交换/取消接管
+      this.fadingOutEl = null;
+      this.releaseElement(old);
+      if (this.audio) this.audio.volume = this.volume; // 定格最新音量（含淡化期间用户改动）
+    };
+    this.fadingOutEl = old;
+    this.crossfadeTimer = window.setInterval(() => {
+      const k = Math.min(1, (performance.now() - t0) / CROSSFADE_MS);
+      try {
+        old.volume = startV * (1 - k);
+        // 用实时的 this.volume：淡化期间用户拖音量也能收敛到新值
+        if (this.audio && this.audio !== old) this.audio.volume = this.volume * k;
+      } catch { /* 忽略 */ }
+      if (k >= 1) finalize();
+    }, 16);
+    // 兜底：即使细步进被饿死，也在 CROSSFADE_MS+60ms 内强制收尾到满音量
+    this.crossfadeSafetyTimer = window.setTimeout(finalize, CROSSFADE_MS + 60);
+  }
+
+  /** 取消/结束当前交叉淡化：淡出元素立即释放，活动元素音量定格到目标值。 */
+  private cancelCrossfade(): void {
+    if (this.crossfadeTimer !== null) {
+      clearInterval(this.crossfadeTimer);
+      this.crossfadeTimer = null;
+    }
+    if (this.crossfadeSafetyTimer !== null) {
+      clearTimeout(this.crossfadeSafetyTimer);
+      this.crossfadeSafetyTimer = null;
+    }
+    const old = this.fadingOutEl;
+    this.fadingOutEl = null;
+    if (old) this.releaseElement(old);
+    if (this.audio) this.audio.volume = this.volume;
+  }
+
+  /** 释放不再活动的元素资源：静音位归零、暂停、摘 src。对象留给复用/回收。 */
+  private releaseElement(el: HTMLAudioElement): void {
+    try {
+      el.pause();
+      el.volume = this.volume; // 复位，供日后作为预取元素复用
+      el.removeAttribute('src');
+      el.load();
+    } catch { /* 忽略：元素已处于异常态 */ }
+  }
+
+  /** 开关：持久化到 localStorage（与 music_online_lyrics 等同模式，默认开）。 */
+  setSeamlessPrefetchEnabled(v: boolean): void {
+    this.seamlessEnabled = v;
+    try { localStorage.setItem(SEAMLESS_STORAGE_KEY, String(v)); } catch { /* 忽略 */ }
+    if (!v) {
+      // 关闭即清场：释放第二份缓冲并结束任何在途淡化
+      this.resetPrefetch();
+      this.cancelCrossfade();
+    }
+    debugLog(`music seamless prefetch=${v ? 'on' : 'off'}`);
+  }
+
+  getSeamlessPrefetchEnabled(): boolean { return this.seamlessEnabled; }
+
   play(): void {
     this.playRequested = true;  // 标记用户已请求播放
-    try { window.__HOST_API__?.invoke('debug_log', { msg: `MUSIC_PLAY idx=${this.currentIndex}` }).catch(()=>{}); } catch {}
+    debugLog(`MUSIC_PLAY idx=${this.currentIndex}`);
 
     // ⚠⚠ 必须先等 loadTrack 把 audio.src 设好，再调 play()。
     //
@@ -736,12 +1093,11 @@ class MusicPlayer {
       : (this.loadedIndex !== this.currentIndex || !this.loadedSrc);
     // 决策留痕：这条日志能直接回答「这次点击为什么播不出」——
     // needLoad=0 且 loadedIndex!=idx 就是旧 bug 的签名。
-    try {
-      window.__HOST_API__?.invoke('debug_log', {
-        msg: `MUSIC_PLAY_DECIDE idx=${this.currentIndex} loadedIndex=${this.loadedIndex}`
-          + ` hasSrc=${this.loadedSrc ? 1 : 0} hasPath=${cur?.filePath ? 1 : 0} needLoad=${needLoad ? 1 : 0}`,
-      }).catch(() => {});
-    } catch { /* 忽略 */ }
+    // （debugLog 的 IPC 部分已延迟到非关键任务，不再挡在 audio.play() 前面。）
+    debugLog(
+      `MUSIC_PLAY_DECIDE idx=${this.currentIndex} loadedIndex=${this.loadedIndex}` +
+      ` hasSrc=${this.loadedSrc ? 1 : 0} hasPath=${cur?.filePath ? 1 : 0} needLoad=${needLoad ? 1 : 0}`,
+    );
     if (needLoad) {
       const idx = this.currentIndex >= 0 ? this.currentIndex : 0;
       this.currentIndex = idx;
@@ -854,6 +1210,8 @@ class MusicPlayer {
       this.webAudioCtx = ctx;
       this.webAnalyser = analyser;
       this.webBins = new Uint8Array(analyser.frequencyBinCount);
+      // 记录唯一 MediaElementSource 绑定的元素：此后无缝交换不会新建第二源（静音防线之一）。
+      this.mediaSourceEl = this.audio;
       debugLog('music: Web Audio 频谱已启用（非 Windows 真实频域数据）');
       return true;
     } catch (e) {
@@ -961,6 +1319,8 @@ class MusicPlayer {
 
   pause(): void {
     this.playRequested = false; // 用户主动暂停
+    // 淡化在途时暂停：立即收尾（音量定格），避免新元素停在半音量、旧元素继续偷跑
+    this.cancelCrossfade();
     this.audio.pause();
   }
 
@@ -971,7 +1331,8 @@ class MusicPlayer {
   private handleEnded(): void {
     const nextIndex = this.getNextIndex();
     if (nextIndex >= 0) {
-      this.playAt(nextIndex);
+      // 无缝播放：预缓冲就绪时交换元素立即续播；未命中回退 playAt 既有链路
+      this.switchTrack(nextIndex);
     } else {
       this.pause();
     }
@@ -981,16 +1342,12 @@ class MusicPlayer {
     if (this.tracks.length === 0) return -1;
     switch (this.playMode) {
       case 'single': return this.currentIndex;
-      case 'random':
-        if (this.shuffleIndices.length === 0) {
-          this.shuffleIndices = this.tracks.map((_, i) => i);
-          for (let i = this.shuffleIndices.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [this.shuffleIndices[i], this.shuffleIndices[j]] = [this.shuffleIndices[j], this.shuffleIndices[i]];
-          }
-        }
-        const cur = this.shuffleIndices.indexOf(this.currentIndex);
-        return this.shuffleIndices[(cur + 1) % this.shuffleIndices.length];
+      case 'random': {
+        // 与预缓冲 peekNextIndex 共用同一随机序（ensureShuffleIndices），保证目标一致
+        const order = this.ensureShuffleIndices();
+        const cur = order.indexOf(this.currentIndex);
+        return order[(cur + 1) % order.length];
+      }
       default: return (this.currentIndex + 1) % this.tracks.length;
     }
   }
@@ -1009,22 +1366,22 @@ class MusicPlayer {
 
   next(): void {
     const idx = this.getNextIndex();
-    if (idx >= 0) { this.playAt(idx); }
+    if (idx >= 0) { this.switchTrack(idx); }
   }
 
   prev(): void {
     const idx = this.getPrevIndex();
-    if (idx >= 0) { this.playAt(idx); }
+    if (idx >= 0) { this.switchTrack(idx); }
   }
   // 跳转到队列中指定索引播放（漫游队列点击切歌用）
   playIndex(index: number): void {
     if (index < 0 || index >= this.tracks.length) return;
-      this.playAt(index);
+      this.switchTrack(index);
   }
 
   seek(time: number): void { this.audio.currentTime = time; }
   setVolume(vol: number): void { this.volume = Math.max(0, Math.min(1, vol)); this.audio.volume = this.volume; }
-  setPlayMode(mode: PlayMode): void { this.playMode = mode; if (mode !== 'random') this.shuffleIndices = []; }
+  setPlayMode(mode: PlayMode): void { this.playMode = mode; if (mode !== 'random') this.shuffleIndices = []; /* 模式变化 ⇒ 下一曲目标变化，作废旧预取 */ this.resetPrefetch(); }
   getIsPlaying(): boolean { return this.isPlaying; }
   getCurrentTrack(): Track | null { return this.tracks[this.currentIndex] || null; }
   getCurrentIndex(): number { return this.currentIndex; }
@@ -1052,6 +1409,19 @@ class MusicPlayer {
    * 避免复用「已销毁」的旧实例（audio.src 已清空、监听器已清空）导致功能失效。
    */
   destroy(): void {
+    this.disposed = true;
+    // 无缝播放收尾：取消在途交叉淡化、作废预取解析并彻底释放第二元素
+    try {
+      this.cancelCrossfade();
+      this.resetPrefetch();
+      const pel = this.prefetchEl;
+      this.prefetchEl = null;
+      if (pel) {
+        pel.removeAttribute('src');
+        pel.load();
+      }
+      this.mediaSourceEl = null;
+    } catch { /* 忽略 */ }
     try {
       this.spectrumUnlisten?.();
       this.spectrumUnlisten = null;

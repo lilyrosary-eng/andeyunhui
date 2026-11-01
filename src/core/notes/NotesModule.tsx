@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useAppStore } from '@/stores/appStore';
 import { useNotesStore } from '@/stores/notesStore';
 import { registerNavigator } from '@/core/navigation/navigation';
+import { api } from '@/lib/api';
 import { NotesEditor } from '@/core/notes/NotesEditor';
 import { NotesSidebar } from '@/core/notes/NotesSidebar';
 import { NoteSettingsPanel } from '@/core/notes/NoteSettingsPanel';
@@ -21,6 +22,18 @@ export function NotesModule() {
     void useNotesStore.getState().loadNoteContent(noteId);
     return true;
   }), []);
+
+  // 外部模块（如阅读「导出读书笔记」）保存笔记后的列表刷新广播：
+  // 事件契约 'andy:notes-refresh'，插件侧只 dispatch，不直接 import 本 store。
+  useEffect(() => {
+    const onRefresh = () => {
+      api.getAllNotes()
+        .then((notes) => useNotesStore.getState().refreshNotes(notes))
+        .catch(() => { /* 刷新失败不影响主流程 */ });
+    };
+    window.addEventListener('andy:notes-refresh', onRefresh);
+    return () => window.removeEventListener('andy:notes-refresh', onRefresh);
+  }, []);
 
   return (
     <div className="flex flex-1 h-full overflow-hidden">

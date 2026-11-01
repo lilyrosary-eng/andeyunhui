@@ -85,6 +85,10 @@ export interface BrushPreset {
   pressureCurve: number;
   /** 拖拽精调的压感曲线；null 表示用 pressureCurve 的 gamma 模式 */
   pressureBezier: Bezier4 | null;
+  /** 首尾渐细窗口（沿路径长度 px，0=关） */
+  taper: number;
+  /** 无压感输入时，把速度换算成粗细的强度 0–1 */
+  velocity: number;
   stabilizer: number;
 }
 
@@ -104,6 +108,10 @@ export interface EditorState {
   pressureCurve: number;
   /** 拖拽精调的压感曲线；null 表示用 pressureCurve 的 gamma 模式 */
   pressureBezier: Bezier4 | null;
+  /** 首尾渐细窗口（沿路径长度 px，0=关） */
+  taper: number;
+  /** 无压感输入时，把速度换算成粗细的强度 0–1 */
+  velocity: number;
   stabilizer: number;
   zoom: number;
   transparent: boolean;

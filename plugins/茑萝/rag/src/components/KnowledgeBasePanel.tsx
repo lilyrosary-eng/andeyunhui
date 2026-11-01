@@ -16,6 +16,7 @@ import { IngestDialog } from './IngestDialog';
 import { CitedChat } from './CitedChat';
 import { HitGraph } from './HitGraph';
 import { EmbedSettingsCard } from './EmbedSettingsCard';
+import { RetrieveSettingsCard } from './RetrieveSettingsCard';
 
 function formatTime(iso: string): string {
   try {
@@ -198,6 +199,8 @@ export function KnowledgeBasePanel() {
       </div>
 
       <EmbedSettingsCard />
+
+      <RetrieveSettingsCard />
 
       {stats && stats.dims.length > 1 && (
         <div className="text-[11px] text-amber-600 dark:text-amber-400 rounded-lg border border-amber-200/60 dark:border-amber-800/40 bg-amber-50/60 dark:bg-amber-900/20 px-3 py-2">

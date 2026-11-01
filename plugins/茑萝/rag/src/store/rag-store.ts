@@ -15,12 +15,27 @@ export interface LastResult {
   hits: RagHit[];
   /** 被阈值过滤掉的条数（图谱里显示"有 N 条被丢弃"）。 */
   dropped: number;
+  /**
+   * 本次检索是否真的走了重排（2026-11-01）。
+   * 图谱据此决定「节点半径/线宽」用重排分还是向量分，并在标题里标出排序方式。
+   * 可选：老调用方（不传）按向量排序处理。
+   */
+  reranked?: boolean;
   at: number;
 }
 
 type Listener = (sources: RagSourceInfo[]) => void;
 type ErrorListener = (error: string | null) => void;
 type LastResultListener = (r: LastResult | null) => void;
+
+/** 当前检索排序模式（侧栏灰字用；由检索设置卡片在保存/探测后广播）。 */
+export interface RerankInfo {
+  /** 一句话：「重排 20 → 6（…）」或「已降级为向量排序」。 */
+  text: string;
+  /** 是否真的启用了重排。 */
+  usable: boolean;
+}
+type RerankInfoListener = (info: RerankInfo | null) => void;
 
 /** 主面板视图（侧栏也能切换，所以状态放 store 而不是组件内）。 */
 export type RagView = 'chat' | 'graph' | 'manage';
@@ -42,6 +57,26 @@ class RagStore {
   private askListeners = new Set<AskListener>();
   private focusId: string | null = null;
   private focusListeners = new Set<FocusListener>();
+  private rerankInfo: RerankInfo | null = null;
+  private rerankListeners = new Set<RerankInfoListener>();
+
+  /** 检索排序模式（侧栏读；未设置时返回 null，由侧栏自己解析一次）。 */
+  getRerankInfo(): RerankInfo | null {
+    return this.rerankInfo;
+  }
+
+  /** 检索设置卡片保存/探测后广播当前模式。 */
+  setRerankInfo(info: RerankInfo | null): void {
+    this.rerankInfo = info;
+    for (const l of this.rerankListeners) l(info);
+  }
+
+  subscribeRerank(l: RerankInfoListener): () => void {
+    this.rerankListeners.add(l);
+    return () => {
+      this.rerankListeners.delete(l);
+    };
+  }
 
   getView(): RagView {
     return this.view;

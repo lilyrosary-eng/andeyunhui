@@ -14,6 +14,15 @@
 
 export type HighlightColor = 'yellow' | 'green' | 'blue' | 'pink';
 
+/** 高亮背景色（mark 仅允许背景着色；点色供侧栏/工具条复用）。顺序即工具条展示顺序 */
+export const HIGHLIGHT_COLORS: HighlightColor[] = ['yellow', 'green', 'blue', 'pink'];
+export const HIGHLIGHT_BG: Record<HighlightColor, string> = {
+  yellow: 'rgba(250, 204, 21, 0.45)',
+  green: 'rgba(74, 222, 128, 0.42)',
+  blue: 'rgba(96, 165, 250, 0.42)',
+  pink: 'rgba(244, 114, 182, 0.42)',
+};
+
 export interface HighlightRecord {
   id: string;
   /** 主锚：章节 id（与 ReadingBook.chapters[i].id 对齐） */
@@ -40,9 +49,10 @@ export interface HighlightRecord {
   stale?: boolean;
 }
 
-/** 新建高亮的输入（id/时间戳由存储层补齐） */
-export type NewHighlight = Omit<HighlightRecord, 'id' | 'createdAt' | 'updatedAt' | 'stale'> &
-  Partial<Pick<HighlightRecord, 'id' | 'noteId'>>;
+/** 新建高亮的输入（id/时间戳由存储层补齐；note/color 可省略取默认值） */
+export type NewHighlight =
+  Omit<HighlightRecord, 'id' | 'createdAt' | 'updatedAt' | 'stale' | 'note' | 'color' | 'noteId'> &
+  Partial<Pick<HighlightRecord, 'id' | 'noteId' | 'note' | 'color'>>;
 
 // ============ hash 与分片 key ============
 
@@ -182,10 +192,10 @@ export function addHighlights(filePath: string, inputs: NewHighlight[]): Highlig
   const now = Date.now();
   const created = inputs.map((input) => {
     const rec: HighlightRecord = {
-      note: '',
-      noteId: null,
-      color: 'yellow',
       ...input,
+      note: input.note ?? '',
+      color: input.color ?? 'yellow',
+      noteId: input.noteId ?? null,
       id: input.id || genId(),
       createdAt: now,
       updatedAt: now,
@@ -254,8 +264,6 @@ export function listBooksWithPath(): string[] {
 }
 
 // ============ quote 漂移校验 ============
-
-const CONTEXT_LEN = 30;
 
 /**
  * 在章节纯文本中定位高亮。返回命中起点；彻底找不到返回 null（调用方标 stale，不删除）。

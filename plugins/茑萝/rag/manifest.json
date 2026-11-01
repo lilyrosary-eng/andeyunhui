@@ -16,6 +16,7 @@
       "pick_file",
       "rag_delete_source",
       "rag_embed_api",
+      "rag_rerank_api",
       "rag_ingest",
       "rag_init_db",
       "rag_list_chunks",

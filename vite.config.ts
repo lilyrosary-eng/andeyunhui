@@ -63,7 +63,9 @@ export default defineConfig(() => ({
   test: {
     globals: false,
     environment: "node",
-    include: ["src/**/*.test.{ts,tsx}"],
+    // plugins/**：插件侧的纯逻辑单测（如 三色堇/readingHighlights），同样在 node 环境跑，
+    // 被测模块须无宿主全局依赖（localStorage 等已有内存回退）。
+    include: ["src/**/*.test.{ts,tsx}", "plugins/**/*.test.{ts,tsx}"],
   },
 
   // === 多页入口：截图覆盖窗使用独立轻量 HTML（不加载主应用），实现「秒开」 ===

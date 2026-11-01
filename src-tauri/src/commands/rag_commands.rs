@@ -9,7 +9,8 @@
 //! （表现为窗口白屏/无响应，用户会以为卡死）。
 //!
 //! 所以：同步 IO 一律 `spawn_blocking` 丢到阻塞线程池，命令本身声明成 `async`。
-//! 例外是 `rag_embed_api`：它本来就是 reqwest 的 async IO，不需要线程。
+//! 例外是 `rag_embed_api` 与 `rag_rerank_api`：它们本来就是 reqwest 的 async IO，不需要线程，
+//! 而且**只读**（不碰 SQLite），不存在「卡主线程」的问题。
 //!
 //! 错误分两层：`spawn_blocking` 的 JoinError（线程 panic/取消）与业务 Err，都要显式区分，
 //! 否则 panic 会被当成"空结果"静默吞掉。
@@ -21,10 +22,10 @@ use crate::services::rag_service::{
     rag_embed_api as svc_rag_embed_api, rag_ingest as svc_rag_ingest,
     rag_init_db as svc_rag_init_db, rag_list_chunks as svc_rag_list_chunks,
     rag_list_sources as svc_rag_list_sources, rag_prune as svc_rag_prune,
-    rag_query as svc_rag_query,
+    rag_query as svc_rag_query, rag_rerank_api as svc_rag_rerank_api,
     rag_stats as svc_rag_stats, rag_update_vectors as svc_rag_update_vectors, RagChunkInput,
-    RagChunkRow, RagEmbedRequest, RagEmbedResponse, RagIngestResult, RagQueryResult, RagSourceInfo,
-    RagSourceInput, RagStats, RagVecUpdate,
+    RagChunkRow, RagEmbedRequest, RagEmbedResponse, RagIngestResult, RagQueryResult,
+    RagRerankRequest, RagRerankResponse, RagSourceInfo, RagSourceInput, RagStats, RagVecUpdate,
 };
 
 /// 把阻塞任务丢到线程池并统一处理 JoinError。
@@ -126,6 +127,32 @@ pub async fn rag_embed_api(
         endpoint,
         api_key,
         model,
+    })
+    .await
+}
+
+/// 重排代理：把「查询 + 候选文档」发给配置的 rerank 端点（`/v1/rerank` / Ollama `/api/rerank`），
+/// 返回 `(index, score)` 列表。与 `rag_embed_api` 同一条安全边界：
+/// 纯 HTTP、只读、**不碰数据库**（无 AppHandle、无写路径），默认 3s 超时。
+///
+/// 参数同样用**扁平字段**（camelCase 键：`query` / `documents` / `endpoint` / `apiKey` /
+/// `model` / `timeoutMs`），理由见 `rag_embed_api` 上方注释。
+#[tauri::command]
+pub async fn rag_rerank_api(
+    query: String,
+    documents: Vec<String>,
+    endpoint: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+    timeout_ms: Option<u64>,
+) -> Result<RagRerankResponse, String> {
+    svc_rag_rerank_api(RagRerankRequest {
+        query,
+        documents,
+        endpoint,
+        api_key,
+        model,
+        timeout_ms,
     })
     .await
 }
