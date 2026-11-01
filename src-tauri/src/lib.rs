@@ -93,6 +93,12 @@ pub mod overlay_drag;
 #[path = "pal/mpris_player.rs"]
 pub mod mpris_player;
 
+/// Linux 全局热键：xdg-desktop-portal `GlobalShortcuts`。
+/// Wayland 下 X11 的 `XGrabKey` 抓不到全局按键，这是唯一跨桌面路径（GNOME/KDE 都支持）。
+#[cfg(target_os = "linux")]
+#[path = "pal/hotkeys_portal.rs"]
+pub mod hotkeys_portal;
+
 /// Linux 本地媒体 HTTP 服务（带 Range），解决 WebKitGTK 媒体加载器
 /// 不接管 asset:// 自定义 scheme、而整首读成 blob 又会撑爆 page cache 的问题。
 #[cfg(target_os = "linux")]

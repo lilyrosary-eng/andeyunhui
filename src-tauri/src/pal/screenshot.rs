@@ -854,8 +854,24 @@ pub fn clipboard_diagnose(
     }))
 }
 
-pub fn read_screenshot_shortcut(_app: &AppHandle) -> String {
-    "Ctrl+Shift+S".into()
+pub const DEFAULT_SCREENSHOT_SHORTCUT: &str = "Ctrl+Shift+S";
+
+/// Linux 走真实后端（portal GlobalShortcuts / 持久化），其余平台保持原桩。
+///
+/// 为什么必须换成真实现：`tauri-plugin-global-shortcut` 的 Linux 后端是 X11 `XGrabKey`，
+/// **Wayland 下抓不到全局按键**；而这四个热键是截屏/剪贴板/中转站/收藏的唯一免鼠标入口。
+/// 详见 `pal/hotkeys_portal.rs` 头注释。
+pub fn read_screenshot_shortcut(app: &AppHandle) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        crate::hotkeys_portal::load_once(app);
+        crate::hotkeys_portal::get(crate::hotkeys_portal::Which::Screenshot)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        DEFAULT_SCREENSHOT_SHORTCUT.into()
+    }
 }
 
 /// 解析 `"Ctrl+Shift+S"` 这类字符串为 `Shortcut`。
@@ -868,18 +884,30 @@ pub fn parse_shortcut(s: &str) -> Result<Shortcut, String> {
     Shortcut::from_str(s).map_err(|e| format!("快捷键字符串无效: {e}"))
 }
 
-pub fn register_screenshot_shortcut(_app: &AppHandle, _sc: &str) -> Result<(), String> {
-    Ok(())
+pub fn register_screenshot_shortcut(app: &AppHandle, sc: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::hotkeys_portal::set_and_sync(
+            app,
+            crate::hotkeys_portal::Which::Screenshot,
+            sc.to_string(),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, sc);
+        Ok(())
+    }
 }
 
 #[tauri::command]
-pub fn get_screenshot_shortcut(_app: AppHandle) -> String {
-    "Ctrl+Shift+S".into()
+pub fn get_screenshot_shortcut(app: AppHandle) -> String {
+    read_screenshot_shortcut(&app)
 }
 
 #[tauri::command]
-pub fn set_screenshot_shortcut(_app: AppHandle, _shortcut: String) -> Result<(), String> {
-    Ok(())
+pub fn set_screenshot_shortcut(app: AppHandle, shortcut: String) -> Result<(), String> {
+    register_screenshot_shortcut(&app, &shortcut)
 }
 
 pub const DEFAULT_CLIPBOARD_SHORTCUT: &str = "Ctrl+Alt+C";
@@ -889,22 +917,43 @@ pub fn clipboard_shortcut_state() -> &'static Mutex<String> {
     &S
 }
 
-pub fn read_clipboard_shortcut(_app: &AppHandle) -> String {
-    DEFAULT_CLIPBOARD_SHORTCUT.into()
+pub fn read_clipboard_shortcut(app: &AppHandle) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        crate::hotkeys_portal::get(crate::hotkeys_portal::Which::Clipboard)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        DEFAULT_CLIPBOARD_SHORTCUT.into()
+    }
 }
 
-pub fn register_clipboard_shortcut(_app: &AppHandle, _sc: &str) -> Result<(), String> {
-    Ok(())
+pub fn register_clipboard_shortcut(app: &AppHandle, sc: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::hotkeys_portal::set_and_sync(
+            app,
+            crate::hotkeys_portal::Which::Clipboard,
+            sc.to_string(),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, sc);
+        Ok(())
+    }
 }
 
 #[tauri::command]
-pub fn get_clipboard_shortcut(_app: AppHandle) -> String {
-    DEFAULT_CLIPBOARD_SHORTCUT.into()
+pub fn get_clipboard_shortcut(app: AppHandle) -> String {
+    read_clipboard_shortcut(&app)
 }
 
 #[tauri::command]
-pub fn set_clipboard_shortcut(_app: AppHandle, _shortcut: String) -> Result<(), String> {
-    Ok(())
+pub fn set_clipboard_shortcut(app: AppHandle, shortcut: String) -> Result<(), String> {
+    register_clipboard_shortcut(&app, &shortcut)
 }
 
 pub const DEFAULT_DROPZONE_SHORTCUT: &str = "Ctrl+Alt+V";
@@ -914,22 +963,43 @@ pub fn dropzone_shortcut_state() -> &'static Mutex<String> {
     &S
 }
 
-pub fn read_dropzone_shortcut(_app: &AppHandle) -> String {
-    DEFAULT_DROPZONE_SHORTCUT.into()
+pub fn read_dropzone_shortcut(app: &AppHandle) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        crate::hotkeys_portal::get(crate::hotkeys_portal::Which::Dropzone)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        DEFAULT_DROPZONE_SHORTCUT.into()
+    }
 }
 
-pub fn register_dropzone_shortcut(_app: &AppHandle, _sc: &str) -> Result<(), String> {
-    Ok(())
+pub fn register_dropzone_shortcut(app: &AppHandle, sc: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::hotkeys_portal::set_and_sync(
+            app,
+            crate::hotkeys_portal::Which::Dropzone,
+            sc.to_string(),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, sc);
+        Ok(())
+    }
 }
 
 #[tauri::command]
-pub fn get_dropzone_shortcut(_app: AppHandle) -> String {
-    DEFAULT_DROPZONE_SHORTCUT.into()
+pub fn get_dropzone_shortcut(app: AppHandle) -> String {
+    read_dropzone_shortcut(&app)
 }
 
 #[tauri::command]
-pub fn set_dropzone_shortcut(_app: AppHandle, _shortcut: String) -> Result<(), String> {
-    Ok(())
+pub fn set_dropzone_shortcut(app: AppHandle, shortcut: String) -> Result<(), String> {
+    register_dropzone_shortcut(&app, &shortcut)
 }
 
 pub const DEFAULT_FAVORITE_SHORTCUT: &str = "Ctrl+Shift+N";
@@ -939,22 +1009,43 @@ pub fn favorite_shortcut_state() -> &'static Mutex<String> {
     &S
 }
 
-pub fn read_favorite_shortcut(_app: &AppHandle) -> String {
-    DEFAULT_FAVORITE_SHORTCUT.into()
+pub fn read_favorite_shortcut(app: &AppHandle) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        crate::hotkeys_portal::get(crate::hotkeys_portal::Which::Favorite)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        DEFAULT_FAVORITE_SHORTCUT.into()
+    }
 }
 
-pub fn register_favorite_shortcut(_app: &AppHandle, _sc: &str) -> Result<(), String> {
-    Ok(())
+pub fn register_favorite_shortcut(app: &AppHandle, sc: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::hotkeys_portal::set_and_sync(
+            app,
+            crate::hotkeys_portal::Which::Favorite,
+            sc.to_string(),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, sc);
+        Ok(())
+    }
 }
 
 #[tauri::command]
-pub fn get_favorite_shortcut(_app: AppHandle) -> String {
-    DEFAULT_FAVORITE_SHORTCUT.into()
+pub fn get_favorite_shortcut(app: AppHandle) -> String {
+    read_favorite_shortcut(&app)
 }
 
 #[tauri::command]
-pub fn set_favorite_shortcut(_app: AppHandle, _shortcut: String) -> Result<(), String> {
-    Ok(())
+pub fn set_favorite_shortcut(app: AppHandle, shortcut: String) -> Result<(), String> {
+    register_favorite_shortcut(&app, &shortcut)
 }
 
 /// 命中测试：返回屏幕坐标 (x, y) 下最顶层窗口的标题。

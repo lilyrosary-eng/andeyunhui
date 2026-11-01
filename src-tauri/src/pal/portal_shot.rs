@@ -170,11 +170,15 @@ mod tests {
             return;
         }
         match capture_png(false, false).await {
-            Ok(shot) => {
+            // `capture_png` 的返回是 `Option`：用户取消（Esc）时给 None。
+            // 这个测试是非交互的，None 本身就是失败信号，不能直接取字段（原来写的是
+            // `Ok(shot)`，编译不过 —— 说明这组测试从落地起就没在 Linux 上跑过）。
+            Ok(Some(shot)) => {
                 println!("portal PNG {} bytes, {}x{}", shot.png.len(), shot.width, shot.height);
                 assert_eq!(&shot.png[1..4], b"PNG", "应是 PNG");
                 assert!(shot.width >= 640 && shot.height >= 480, "尺寸异常");
             }
+            Ok(None) => panic!("portal 返回 None（非交互模式不应被取消）"),
             Err(e) => panic!("portal 截图失败: {e}"),
         }
     }
