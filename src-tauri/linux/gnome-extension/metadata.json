@@ -1,0 +1,7 @@
+{
+  "uuid": "andeyunhui-pin@rosary",
+  "name": "Andeyunhui Pin (prototype)",
+  "description": "Prototype: enumerate and pin 安得云荟 overlay windows (capsule / deskpet) at fixed positions and keep them above, on native Wayland.",
+  "shell-version": ["48", "49", "50"],
+  "version": 1
+}

@@ -34,6 +34,21 @@ enum Call {
     Rect(String, mpsc::Sender<Option<(i32, i32, i32, i32)>>),
 }
 
+/// 合成器通道不可用时只喊一次：前端每秒可能触发多次拖动判定，重复打印会淹没日志。
+fn warn_channel_unavailable(err: &str) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        eprintln!(
+            "[overlay-drag] 合成器通道不可用 —— 浮窗将无法拖动/定位/读取位置。\n\
+             最常见原因：GNOME 扩展 andeyunhui-pin 未安装或未启用。\n\
+             · 检查：gnome-extensions list | grep andeyunhui\n\
+             · 启用：gnome-extensions enable andeyunhui-pin@rosary\n\
+             · 注意：GNOME 50 上新装扩展需注销重新登录才出现。\n\
+             原始错误: {err}"
+        );
+    });
+}
+
 fn tx() -> Option<&'static mpsc::Sender<Call>> {
     static TX: OnceLock<mpsc::Sender<Call>> = OnceLock::new();
     if let Some(t) = TX.get() {
@@ -84,11 +99,19 @@ fn worker(rx: mpsc::Receiver<Call>) {
         while let Some(call) = arx.recv().await {
             match call {
                 Call::Begin(title, reply) => {
-                    let r = conn
+                    let res = conn
                         .call_method(Some(DEST), PATH, Some(IFACE), "BeginDrag", &(title.as_str(),))
-                        .await
-                        .map(|m| m.body().deserialize::<bool>().unwrap_or(false))
-                        .unwrap_or(false);
+                        .await;
+                    let r = match res {
+                        Ok(m) => m.body().deserialize::<bool>().unwrap_or(false),
+                        Err(e) => {
+                            // 以前这里静默 `false`：用户只看得到「拖不动」，日志里一句话没有。
+                            // 扩展没装/没启用是最常见原因（deb 装到 /usr/share 后仍需 enable，
+                            // 且 GNOME 50 新装扩展要重新登录才出现）。
+                            warn_channel_unavailable(&e.to_string());
+                            false
+                        }
+                    };
                     let _ = reply.send(r);
                 }
                 Call::Move { title, x, y } => {
