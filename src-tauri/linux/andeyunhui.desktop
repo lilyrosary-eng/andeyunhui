@@ -1,0 +1,21 @@
+[Desktop Entry]
+# Tauri 的 desktop_template 只提供 categories / comment / exec / icon / name 五个变量，
+# 没有 exec_arg —— 所以「以安得云荟打开」必需的文件参数（%U）只能写死在这里。
+#
+# 用 %U 而不是 %f：%U 会传 file:// URI，正好对应 main.rs 的 is_supported_file_assoc
+# （已按平台处理前导斜杠：Linux 保留 /，Windows 剥掉）。
+#
+# MimeType 也必须写死：tauri 的 bundle.fileAssociations 在 Linux 不会生成这一行
+# （实测产出的 .desktop 里没有），不补的话右键「打开方式」里根本没有本应用。
+Categories=Utility;Office;Graphics;AudioVideo;
+Comment=安得云荟 · 笔记 / 媒体 / 工具
+Exec={{exec}} %U
+Icon={{icon}}
+MimeType=image/png;image/jpeg;image/gif;image/webp;image/bmp;image/tiff;video/mp4;video/x-matroska;video/quicktime;video/x-msvideo;video/webm;video/x-flv;audio/mpeg;audio/flac;audio/x-wav;audio/ogg;audio/mp4;audio/aac;application/pdf;application/epub+zip;text/plain;text/markdown;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.openxmlformats-officedocument.presentationml.presentation;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;text/csv;
+Name=安得云荟
+Name[en]=Andeyunhui
+Keywords=note;notes;music;video;image;ai;笔记;音乐;视频;图片;
+StartupNotify=true
+StartupWMClass=andeyunhui
+Terminal=false
+Type=Application
