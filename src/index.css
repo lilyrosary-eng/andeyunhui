@@ -25,6 +25,13 @@
 
 @layer base {
   :root {
+    /* 原生控件（<select> 弹层、滚动条、checkbox、日期选择器）的配色由 color-scheme 决定，
+       不跟网页 CSS 走。之前整个项目没设，于是：
+         · 深色主题 + 浅色系统 ⇒ 下拉弹层是白底，和页面完全违和；
+         · Windows 上没有 color-scheme 时 WebView2 的原生控件同样会跟系统。
+       Linux 的 WebKitGTK 下 <select> 的**弹层**由 GTK 绘制，CSS 管不到 option，
+       唯一能影响的入口就是这里 —— 所以这一行比任何 select 样式都关键。 */
+    color-scheme: light;
     --background: oklch(1 0 0);
     --foreground: oklch(0.145 0 0);
     --card: oklch(1 0 0);
@@ -220,6 +227,7 @@
     50% { opacity: 1; }
   }
   .dark {
+    color-scheme: dark;
     --background: oklch(0.18 0.005 60);
     --foreground: oklch(0.95 0.005 80);
     --card: oklch(0.22 0.005 60);
