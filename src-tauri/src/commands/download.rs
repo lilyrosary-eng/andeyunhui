@@ -7,6 +7,28 @@
 #![allow(dead_code)] // 部分命令仅在特定平台/配置下被 invoke_handler 引用
 
 use super::*;
+
+/// 随包 ffmpeg 的二进制名：Windows 是 `ffmpeg.exe`，Linux/macOS 是无扩展名的 `ffmpeg`。
+///
+/// 之前两处合并逻辑都写死 `join("ffmpeg.exe")` —— Linux 上包里明明有可用的 `ffmpeg`，
+/// 却必定报「ffmpeg.exe 不存在」，分段拼接与 HLS 转封装整条链路走不通（2026-11-01 核查）。
+///
+/// 顺带补一次 0755：`.mujin` 解压不保留执行位（zip 语义），否则「文件在，spawn 报
+/// permission denied」。口径与 `services::recording_service_linux::get_ffmpeg_path` 一致。
+fn ffmpeg_bin(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&bin) {
+            if meta.permissions().mode() & 0o111 == 0 {
+                let _ = std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+    bin
+}
+
 // ================= 音乐下载命令 =================
 /// 流式下载一个 URL 到本地文件（用于「下载歌曲」）。复用项目 reqwest 风格：
 /// rustls-tls + no_proxy（禁用系统代理避免被拦截），带浏览器 UA 与大小上限保护。
@@ -226,9 +248,9 @@ pub(crate) fn ffmpeg_concat_segments(
     }
     let ffmpeg_dir = get_ffmpeg_dir(app)
         .ok_or_else(|| "未找到 ffmpeg（外部依赖未就绪），无法拼接分段视频".to_string())?;
-    let ffmpeg = ffmpeg_dir.join("ffmpeg.exe");
+    let ffmpeg = ffmpeg_bin(&ffmpeg_dir);
     if !ffmpeg.exists() {
-        return Err("ffmpeg.exe 不存在，无法拼接分段视频".to_string());
+        return Err("ffmpeg 不存在，无法拼接分段视频".to_string());
     }
     let list_path = out.with_extension("concat.txt");
     let mut list = String::new();
@@ -441,9 +463,9 @@ pub(crate) fn run_ffmpeg_hls(
     use std::io::Read;
     use std::process::{Command, Stdio};
     let ffmpeg_dir = get_ffmpeg_dir(app).ok_or_else(|| "未找到 ffmpeg（外部依赖未就绪）".to_string())?;
-    let ffmpeg = ffmpeg_dir.join("ffmpeg.exe");
+    let ffmpeg = ffmpeg_bin(&ffmpeg_dir);
     if !ffmpeg.exists() {
-        return Err("ffmpeg.exe 不存在，无法转封装 HLS".to_string());
+        return Err("ffmpeg 不存在，无法转封装 HLS".to_string());
     }
     let path = PathBuf::from(save_path);
     if let Some(parent) = path.parent() {

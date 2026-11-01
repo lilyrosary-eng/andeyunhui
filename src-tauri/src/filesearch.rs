@@ -475,23 +475,50 @@ fn index_exists() -> bool {
 /// 仅监视 C 盘用户媒体库的变更（实时性），不递归 watch 其他盘根，避免整盘监听的句柄/性能问题。
 /// 其他盘仍会被一次性索引、可被搜索到，只是其变更不会实时重建索引（可手动触发 fs_index_build）。
 fn watch_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Ok(home) = std::env::var("USERPROFILE") {
-        for name in [
-            "Desktop",
-            "Documents",
-            "Downloads",
-            "Pictures",
-            "Music",
-            "Videos",
-        ] {
-            let p = Path::new(&home).join(name);
-            if p.is_dir() {
-                roots.push(p);
+    // 非 Windows 没有 USN 增量，索引的后续维护**全靠 notify**。
+    // 原来这里读 `USERPROFILE`（Windows 变量），Linux 上恒为空 ⇒ `start_watcher()`
+    // 直接 return ⇒ 首次建库之后新建/删除的文件永远搜不到（2026-11-01 核查）。
+    //
+    // 这里刻意**不监听 /mnt、/media**：那是其它盘/移动盘的挂载点，递归监听会吃满
+    // inotify watch 配额（`/mnt` 下常挂着整个 Windows 盘）。这些盘的内容由下次启动的
+    // 全量重建覆盖，可接受。
+    #[cfg(not(windows))]
+    {
+        let mut roots = Vec::new();
+        if let Ok(home) = std::env::var("HOME") {
+            for name in [
+                "Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos",
+                "桌面", "文档", "下载", "图片", "音乐", "视频",
+            ] {
+                let p = Path::new(&home).join(name);
+                if p.is_dir() {
+                    roots.push(p);
+                }
             }
         }
+        roots
     }
-    roots
+
+    #[cfg(windows)]
+    {
+        let mut roots = Vec::new();
+        if let Ok(home) = std::env::var("USERPROFILE") {
+            for name in [
+                "Desktop",
+                "Documents",
+                "Downloads",
+                "Pictures",
+                "Music",
+                "Videos",
+            ] {
+                let p = Path::new(&home).join(name);
+                if p.is_dir() {
+                    roots.push(p);
+                }
+            }
+        }
+        roots
+    }
 }
 
 /// 判断路径是否落在被监视的 C 盘用户媒体库（及其子目录）内。
@@ -500,7 +527,9 @@ fn is_under_watch(p: &Path) -> bool {
     let s = p.to_string_lossy().to_lowercase();
     watch_roots().iter().any(|r| {
         let rs = r.to_string_lossy().to_lowercase();
-        s == rs || s.starts_with(&format!("{}\\", rs))
+        // 用平台分隔符拼前缀：原来是写死的 `\\`，Linux 上子目录判定恒 false
+        // ⇒ notify 送来的增量事件全被当成「监视外」丢掉。
+        s == rs || s.starts_with(&format!("{}{}", rs, std::path::MAIN_SEPARATOR))
     })
 }
 

@@ -557,7 +557,12 @@ fn is_supported_file_assoc(arg: &str) -> Option<std::path::PathBuf> {
     ];
     // Windows 文件关联启动时会把文件路径作为启动参数传入（也可能是 file:// 形式）
     let path = if let Some(rest) = arg.strip_prefix("file://") {
-        std::path::PathBuf::from(rest.strip_prefix('/').unwrap_or(rest))
+        // Windows 的 `file:///C:/x` 必须去掉前导 `/` 才是 `C:/x`；
+        // 而 Linux 的 `file:///home/x` 前导 `/` 就是路径的根，剥掉会变成相对路径
+        // `home/x` ⇒ is_file() 恒 false ⇒ 文件关联静默失效（2026-11-01 核查）。
+        #[cfg(windows)]
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        std::path::PathBuf::from(rest)
     } else {
         std::path::PathBuf::from(arg)
     };

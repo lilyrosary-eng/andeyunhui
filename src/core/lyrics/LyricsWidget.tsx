@@ -4,6 +4,9 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isLinux } from '@/platform/isLinux';
+// 原生 Wayland 下 tao 的 startDragging 传 serial=0，合成器会忽略（见 lib/overlayDrag.ts 头注释）；
+// Linux 统一先走合成器通道，拿不到（X11 / 扩展未装）再回退原生。
+import { beginOverlayDrag } from '@/lib/overlayDrag';
 import { LogicalSize, PhysicalPosition } from '@tauri-apps/api/dpi';
 import { invoke } from '@tauri-apps/api/core';
 import { storage } from '@/core/storage';
@@ -89,7 +92,11 @@ export function LyricsWidget() {
       if (locked) return;
       e.preventDefault();
       const win = getCurrentWindow();
-      win.startDragging().catch(() => {});
+      // 与 FloatingDropzoneView 同一套：先问合成器（Wayland），拿不到再原生（X11）。
+      // 之前直接 startDragging()，原生 Wayland 上等于拖不动。
+      void beginOverlayDrag(e.nativeEvent).then((handled) => {
+        if (!handled) void win.startDragging();
+      });
     },
     [locked],
   );

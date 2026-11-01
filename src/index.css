@@ -307,7 +307,13 @@
     color: var(--foreground);
     @apply antialiased;
     background-color: var(--main-panel-bg);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    /* 末尾这几个 CJK 字体是为 Linux 补的：Windows 有微软雅黑兜底，Linux 上
+       Segoe UI / Roboto / Arial 全不存在，若不点名就会掉到 fontconfig 默认
+       （可能是无中文字形的 DejaVu Sans）⇒ 中文糊/豆腐块。
+       顺序保持「拉丁优先、CJK 兜底」，对 Windows/macOS 是零影响（前面的字体先命中）。 */
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+      "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei",
+      "Microsoft YaHei", sans-serif;
   }
   html {
     @apply font-sans;
