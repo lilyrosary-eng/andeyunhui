@@ -1799,6 +1799,7 @@ fn main() {
             load_image_cache,
             delete_image_cache,
             get_folder_images,
+            get_image_metadata,
             generate_thumbnail,
             andeyunhui_lib::services::plugin_access::plugin_capability_rules,
             andeyunhui_lib::services::plugin_access::plugin_grants_all,

@@ -58,6 +58,65 @@ fn get_mtime(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageFileInfo {
+    pub size: u64,
+    pub modified_at: u64,
+    pub format: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+fn image_format_label(format: Option<image::ImageFormat>, path: &Path) -> String {
+    match format {
+        Some(image::ImageFormat::Jpeg) => "JPEG".to_string(),
+        Some(image::ImageFormat::Png) => "PNG".to_string(),
+        Some(image::ImageFormat::Gif) => "GIF".to_string(),
+        Some(image::ImageFormat::WebP) => "WebP".to_string(),
+        Some(image::ImageFormat::Bmp) => "BMP".to_string(),
+        Some(f) => format!("{f:?}").to_uppercase(),
+        None => path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_uppercase())
+            .unwrap_or_else(|| "未知".to_string()),
+    }
+}
+
+/// 读取图片的磁盘元数据与图片头尺寸。
+/// 只读文件，不生成缓存、不改写原图；图片头解析失败时仍返回文件大小与时间，尺寸归零。
+pub fn get_image_file_info(path_str: &str) -> Result<ImageFileInfo, String> {
+    let path = Path::new(path_str);
+    let metadata = std::fs::metadata(path).map_err(|e| format!("读取文件信息失败: {e}"))?;
+    if !metadata.is_file() {
+        return Err("目标不是文件".to_string());
+    }
+
+    let mut width = 0u32;
+    let mut height = 0u32;
+    let mut format = image_format_label(None, path);
+
+    if let Ok(reader) = image::ImageReader::open(path) {
+        if let Ok(mut reader) = reader.with_guessed_format() {
+            let guessed = reader.format();
+            format = image_format_label(guessed, path);
+            if let Ok((w, h)) = reader.into_dimensions() {
+                width = w;
+                height = h;
+            }
+        }
+    }
+
+    Ok(ImageFileInfo {
+        size: metadata.len(),
+        modified_at: get_mtime(path),
+        format,
+        width,
+        height,
+    })
+}
+
 fn count_recursive_images(folder_path: &Path) -> usize {
     let mut count = 0;
     for entry in WalkDir::new(folder_path).max_depth(1) {

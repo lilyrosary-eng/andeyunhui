@@ -1310,6 +1310,18 @@ export const zhCN: Record<string, string> = {
   'image.viewer.random': '随机',
   'image.viewer.slideshow': '幻灯片',
   'image.viewer.interval': '间隔',
+  'image.viewer.info': '信息',
+  'image.viewer.info.title': '图片信息',
+  'image.viewer.info.name': '文件名',
+  'image.viewer.info.resolution': '分辨率',
+  'image.viewer.info.aspect': '宽高比',
+  'image.viewer.info.megapixels': '像素量',
+  'image.viewer.info.format': '格式',
+  'image.viewer.info.size': '大小',
+  'image.viewer.info.modified': '修改时间',
+  'image.viewer.info.zoom': '显示缩放',
+  'image.viewer.info.loading': '读取中…',
+  'image.viewer.info.error': '文件信息读取失败',
 
   // ============ 玉兰 · 视频模块 ============
   'video.title': '玉兰',

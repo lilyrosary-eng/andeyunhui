@@ -2336,10 +2336,12 @@ class EditorStore {
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
     const url = ex.toDataURL(fmt === 'png' ? 'image/png' : 'image/jpeg', 0.92);
+    // 宿主的剪贴板把收到的字节原样挂到注册名为 "PNG" 的格式上，因此剪贴板那一路只能给 PNG
+    const clipUrl = fmt === 'png' ? url : ex.toDataURL('image/png');
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const name = `绘画_${stamp}.${fmt === 'png' ? 'png' : 'jpg'}`;
     try {
-      await window.__HOST_API__.invoke('clipboard_write_image', { base64Png: url });
+      await window.__HOST_API__.invoke('clipboard_write_image', { base64Png: clipUrl });
       await window.__HOST_API__.invoke('add_bytes_to_dropzone', { base64: url, originalName: name });
       this.setStatus(`已导出 ${fmt.toUpperCase()}${transparent ? '（透明）' : ''} 并存入中转站`);
     } catch (err) {

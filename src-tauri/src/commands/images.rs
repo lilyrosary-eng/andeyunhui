@@ -99,6 +99,16 @@ pub fn get_folder_images(folder_path: String) -> Result<Vec<String>, String> {
     image_service::get_folder_images(&folder_path)
 }
 
+/// 读取图片文件元数据。
+/// 异步 + spawn_blocking：文件元数据与图片头解析都可能落在网络盘/机械盘上，
+/// 不应阻塞 Tauri 主线程；只读，不修改原文件。
+#[tauri::command]
+pub async fn get_image_metadata(file_path: String) -> Result<image_service::ImageFileInfo, String> {
+    tokio::task::spawn_blocking(move || image_service::get_image_file_info(&file_path))
+        .await
+        .map_err(|e| format!("图片信息任务失败: {e}"))?
+}
+
 /// 生成缩略图（200px 宽 JPEG，首次生成后缓存复用）
 /// 异步 + spawn_blocking：图像解码/编码是 CPU 密集操作，同步命令会在主线程执行，
 /// 大文件夹批量生成缩略图时会直接把 UI 卡死。

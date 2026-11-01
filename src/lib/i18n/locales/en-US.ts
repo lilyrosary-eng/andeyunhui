@@ -1306,6 +1306,18 @@ export const enUS: Record<string, string> = {
   'image.viewer.random': 'Random',
   'image.viewer.slideshow': 'Slideshow',
   'image.viewer.interval': 'Interval',
+  'image.viewer.info': 'Info',
+  'image.viewer.info.title': 'Image info',
+  'image.viewer.info.name': 'File name',
+  'image.viewer.info.resolution': 'Resolution',
+  'image.viewer.info.aspect': 'Aspect ratio',
+  'image.viewer.info.megapixels': 'Megapixels',
+  'image.viewer.info.format': 'Format',
+  'image.viewer.info.size': 'File size',
+  'image.viewer.info.modified': 'Modified',
+  'image.viewer.info.zoom': 'Zoom',
+  'image.viewer.info.loading': 'Loading…',
+  'image.viewer.info.error': 'File information unavailable',
 
   // ============ Magnolia · Video Module ============
   'video.title': 'Videos',

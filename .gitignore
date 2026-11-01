@@ -168,3 +168,5 @@ tmp_*
 # 不会被忽略，一不留神就 `git add -A` 提交进去。这里补成仓库级规则。
 .codebuddy/
 .superpowers/
+# 绘画插件的临时浏览器 harness（本地验证用，不是交付物）。
+.huihua-harness.html

@@ -17,6 +17,7 @@
       "generate_thumbnail",
       "get_blacklist_paths",
       "get_folder_images",
+      "get_image_metadata",
       "import_to_openwith_dir",
       "load_image_cache",
       "pick_directory",

@@ -47,6 +47,7 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("check_file_exists", "fs.read"),
     ("list_directory", "fs.read"),
     ("get_folder_images", "fs.read"),
+    ("get_image_metadata", "fs.read"),
     ("get_folder_videos", "fs.read"),
     ("get_dir_mtime", "fs.read"),
     ("load_image_cache", "fs.read"),

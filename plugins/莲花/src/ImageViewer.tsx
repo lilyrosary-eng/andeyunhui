@@ -21,6 +21,32 @@ interface ImageViewerProps {
   initialPath?: string;
 }
 
+interface ImageFileMetadata {
+  size: number;
+  modifiedAt: number;
+  format: string;
+  width: number;
+  height: number;
+}
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '-';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatFileTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '-';
+  const date = new Date(seconds * 1000);
+  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
+}
+
+function fileNameFromPath(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
 const ModeLabels: Record<ViewMode, string> = {
   'full': 'image.viewer.full',
   'vertical': 'image.viewer.vertical',
@@ -46,6 +72,11 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
   const [menuOpen, setMenuOpen] = useState(false);
   // 完整模式沉浸：隐藏顶部工具栏与缩略图条（点击中心切换）
   const [chromeHidden, setChromeHidden] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [fileInfo, setFileInfo] = useState<ImageFileMetadata | null>(null);
+  const [fileInfoLoading, setFileInfoLoading] = useState(false);
+  const [fileInfoError, setFileInfoError] = useState(false);
+  const [loadedSize, setLoadedSize] = useState<{ width: number; height: number } | null>(null);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const fullImageRef = useRef<HTMLDivElement>(null);
@@ -289,7 +320,39 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
   // 切图/切模式/换文件夹：缩放复位，避免带着上一张的缩放看下一张。
   useEffect(() => {
     resetZoom();
+    setLoadedSize(null);
   }, [currentIndex, viewMode, folderPath, resetZoom]);
+
+  // 信息卡属于当前图片的临时浮层：换图、退出完整模式或进入沉浸态时自动收起。
+  useEffect(() => {
+    if (viewMode !== 'full' || chromeHidden) setInfoOpen(false);
+  }, [viewMode, chromeHidden]);
+
+  useEffect(() => {
+    if (!infoOpen) {
+      setFileInfo(null);
+      setFileInfoError(false);
+      return;
+    }
+    const path = shuffledImages[currentIndex];
+    if (!path) {
+      setFileInfo(null);
+      return;
+    }
+    let cancelled = false;
+    setFileInfoLoading(true);
+    setFileInfoError(false);
+    hostApi.invoke<ImageFileMetadata>('get_image_metadata', { filePath: path })
+      .then((info) => { if (!cancelled) setFileInfo(info); })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn('[ImageViewer] 读取图片信息失败:', path, err);
+        setFileInfo(null);
+        setFileInfoError(true);
+      })
+      .finally(() => { if (!cancelled) setFileInfoLoading(false); });
+    return () => { cancelled = true; };
+  }, [infoOpen, currentIndex, shuffledImages]);
 
   // 滚轮驱动滚动（横版/竖版）：即时滚动保证每帧位移与滚轮量成正比
   const scrollByWheel = useCallback((deltaY: number) => {
@@ -598,7 +661,27 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
           </select>
         </div>
 
-        {/* 右侧：缩放比例（点击复位）+ 序号（点击可输入页码跳转） */}
+        {/* 右侧：信息 + 缩放比例（点击复位）+ 序号（点击可输入页码跳转） */}
+        {viewMode === 'full' && (
+          <button
+            type="button"
+            onClick={() => setInfoOpen((open) => !open)}
+            className={`mr-1 btn-press p-1.5 rounded-md transition-colors text-xs ${
+              infoOpen
+                ? 'bg-[var(--element-muted)] text-[var(--element-color-raw)] shadow-sm'
+                : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'
+            }`}
+            title={T('image.viewer.info')}
+            aria-label={T('image.viewer.info')}
+            aria-pressed={infoOpen}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="16" x2="12" y2="12" />
+              <line x1="12" y1="8" x2="12.01" y2="8" />
+            </svg>
+          </button>
+        )}
         {viewMode === 'full' && Math.abs(zoomCamera.scale - 1) > 0.001 && (
           <button
             onClick={() => resetZoom()}
@@ -629,6 +712,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
             onResetZoom={() => resetZoom()}
             containerRef={fullImageRef}
             onToggleChrome={() => setChromeHidden(v => !v)}
+            onImageLoaded={(size) => setLoadedSize(size)}
           />
         )}
         {viewMode === 'vertical' && (
@@ -671,6 +755,58 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
             </div>
           </div>
         )}
+        {/* 图片信息浮层（仅完整模式；点击空白处或右上角关闭，不改变缩放/翻页手势） */}
+        {viewMode === 'full' && infoOpen && !chromeHidden && (() => {
+          const currentPath = shuffledImages[currentIndex] || '';
+          const width = fileInfo?.width || loadedSize?.width || 0;
+          const height = fileInfo?.height || loadedSize?.height || 0;
+          const megapixels = width && height ? (width * height / 1_000_000) : 0;
+          const rows = [
+            { label: T('image.viewer.info.name'), value: fileNameFromPath(currentPath), title: currentPath },
+            { label: T('image.viewer.info.resolution'), value: width && height ? `${width} × ${height} px` : T('image.viewer.info.loading') },
+            { label: T('image.viewer.info.aspect'), value: width && height ? `${(width / height).toFixed(3)} : 1` : '-' },
+            { label: T('image.viewer.info.megapixels'), value: megapixels ? megapixels.toFixed(2) + ' MP' : '-' },
+            { label: T('image.viewer.info.format'), value: fileInfo?.format || fileNameFromPath(currentPath).split('.').pop()?.toUpperCase() || '-' },
+            { label: T('image.viewer.info.size'), value: fileInfo ? formatFileSize(fileInfo.size) : '-' },
+            { label: T('image.viewer.info.modified'), value: fileInfo ? formatFileTime(fileInfo.modifiedAt) : '-' },
+            { label: T('image.viewer.info.zoom'), value: `${Math.round(zoomCamera.scale * 100)}%` },
+          ];
+          return (
+            <div className="absolute inset-0 z-40 pointer-events-none" onClick={() => setInfoOpen(false)}>
+              <div
+                className="pointer-events-auto absolute right-4 bottom-4 w-[min(340px,calc(100%-32px))] rounded-2xl border border-white/70 dark:border-stone-600/50 bg-white/92 dark:bg-stone-800/92 backdrop-blur-sm shadow-2xl shadow-black/20 p-4"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">{T('image.viewer.info.title')}</h3>
+                    <p className="mt-1 text-[11px] text-neutral-500 dark:text-stone-400 break-all leading-relaxed" title={currentPath}>{currentPath}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setInfoOpen(false)}
+                    className="shrink-0 p-1 rounded-md text-neutral-400 hover:bg-black/5 hover:text-neutral-700 dark:text-stone-500 dark:hover:bg-white/5 dark:hover:text-stone-200"
+                    title={T('common.close')}
+                    aria-label={T('common.close')}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                  </button>
+                </div>
+                {fileInfoError && (
+                  <p className="mb-2 text-[11px] text-amber-600 dark:text-amber-400">{T('image.viewer.info.error')}</p>
+                )}
+                <dl className="grid grid-cols-[76px_1fr] gap-x-3 gap-y-2 text-[11px]">
+                  {rows.map((row) => (
+                    <React.Fragment key={row.label}>
+                      <dt className="text-neutral-400 dark:text-stone-500">{row.label}</dt>
+                      <dd className="min-w-0 text-neutral-700 dark:text-stone-200 tabular-nums truncate" title={row.value}>{row.value}</dd>
+                    </React.Fragment>
+                  ))}
+                </dl>
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {/* 底部缩略图条（仅完整模式；沉浸时隐藏） */}
@@ -734,6 +870,7 @@ function FullView({
   onResetZoom,
   containerRef,
   onToggleChrome,
+  onImageLoaded,
 }: {
   imgUrls: string[];
   imgPaths: string[];
@@ -746,6 +883,7 @@ function FullView({
   onResetZoom: () => void;
   containerRef: React.RefObject<HTMLDivElement>;
   onToggleChrome: () => void;
+  onImageLoaded?: (size: { width: number; height: number }) => void;
 }) {
   const dragRef = useRef<{ x: number; y: number; button: number } | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -851,7 +989,13 @@ function FullView({
           alt={`${currentIndex + 1}/${imgUrls.length}`}
           key={currentIndex}
           onError={() => setImgError(true)}
-          onLoad={(e) => { e.currentTarget.style.opacity = '1'; }}
+          onLoad={(e) => {
+            e.currentTarget.style.opacity = '1';
+            onImageLoaded?.({
+              width: e.currentTarget.naturalWidth,
+              height: e.currentTarget.naturalHeight,
+            });
+          }}
           className="max-w-full max-h-full object-contain select-none"
           style={{ opacity: 0, transition: 'opacity 0.15s ease', ...zoomStyle }}
           decoding="async"
