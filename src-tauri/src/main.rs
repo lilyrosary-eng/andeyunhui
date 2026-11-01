@@ -13,7 +13,8 @@ use tauri::http::{Response, StatusCode};
 // 此处按 T2 平台隔离收尾，把托盘专属 API 限定到桌面（#android-v1）。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::tray::TrayIconBuilder;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+// Linux 不走 Click 事件（libappindicator 不派发），改用原生菜单，故这两个类型不用。
+#[cfg(all(not(target_os = "linux"), not(any(target_os = "android", target_os = "ios"))))]
 use tauri::tray::{MouseButton, MouseButtonState};
 use std::net::UdpSocket;
 use std::time::Duration;
@@ -610,6 +611,8 @@ use std::sync::Mutex;
 /// Rust 侧在 setup / 托盘事件回调里同步 `WebviewWindowBuilder::build()` 会因 WebView2
 /// 初始化时序或主线程重入而死锁 / 0x8007139F，前端 API 由 Tauri 正确派发、不会死锁。
 /// 此处仅把光标物理像素位置发给主窗，由前端建窗并定位、显示。
+/// Linux 不走这条路（托盘改用原生菜单），保留 Windows/macOS 行为。
+#[cfg(not(target_os = "linux"))]
 fn open_tray_menu(app: &tauri::AppHandle, pos: tauri::PhysicalPosition<f64>) {
     let _ = app.emit(
         "open-tray-menu",
@@ -1298,7 +1301,33 @@ fn main() {
                 }
                 tauri::image::Image::new(&[0u8; 32 * 32 * 4], 32, 32)
             });
-            let tray = match TrayIconBuilder::new()
+            // Linux 托盘（libappindicator / StatusNotifierItem）与 Windows 不是一套模型：
+            //   · 它**必须有 menu** 才会显示图标；
+            //   · `TrayIconEvent::Click` 不派发（`show_menu_on_left_click` 也明确标 Linux unsupported）。
+            // 所以 Windows 那套「左键唤主窗 / 右键弹自定义 tray-menu 窗口」在这里整块失效
+            // —— 表现就是用户说的「Linux 没有托盘」。Linux 改用原生菜单，只保留两项，
+            // 与 `TrayMenu.tsx` 里的 summon / quit 对齐。
+            #[cfg(target_os = "linux")]
+            let tray_result = {
+                use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+                let show = MenuItem::with_id(app, "tray-summon", "显示主窗口", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "tray-quit", "退出安得云荟", true, None::<&str>)?;
+                let sep = PredefinedMenuItem::separator(app)?;
+                let menu = Menu::with_items(app, &[&show, &sep, &quit])?;
+                TrayIconBuilder::new()
+                    .icon(tray_icon)
+                    .tooltip("安得云荟")
+                    .menu(&menu)
+                    .on_menu_event(|app, ev| match ev.id().as_ref() {
+                        "tray-summon" => tray_summon_main(app.clone()),
+                        "tray-quit" => tray_quit(app.clone()),
+                        _ => {}
+                    })
+                    .build(app)
+            };
+
+            #[cfg(not(target_os = "linux"))]
+            let tray_result = TrayIconBuilder::new()
                 .icon(tray_icon)
                 .tooltip("安得云荟")
                 .on_tray_icon_event(|tray, event| {
@@ -1322,8 +1351,9 @@ fn main() {
                         }
                     }
                 })
-                .build(app)
-            {
+                .build(app);
+
+            let tray = match tray_result {
                 Ok(t) => t,
                 Err(e) => {
                     // 兜底：托盘创建失败（常见于上一次进程未干净退出残留窗口类/
