@@ -51,3 +51,27 @@ pub async fn dev_console_http(
     let text = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
     Ok(format!("HTTP {} {}\n\n{}", status.as_u16(), status.canonical_reason().unwrap_or_default(), text))
 }
+
+/// 实验用：把显示缩放交给 **webview 本身**（WebView2 `SetZoomFactor` / WebKitGTK `set_zoom_level`），
+/// 用来验证能否取代宿主的 CSS `zoom` 包裹层。
+///
+/// 为什么值得试：CSS zoom 包在文档内部，于是 `getBoundingClientRect()`（视觉像素）与
+/// `clientWidth/offsetLeft/scrollTop`（布局像素）分属两个坐标系 —— 全仓已审出 15+ 处混用，
+/// 表现为落笔偏移、浮层错位、画布欠采样、多层平铺底纹出接缝。webview 级缩放让两者回到同一坐标系。
+///
+/// 平台事实（读 wry 源码确认，非推测）：
+/// - Windows / Linux / macOS 均为真实实现；
+/// - **Android 是空实现**（`fn zoom(&self, _) -> Ok(())`），所以移动端仍需保留 CSS zoom 方案。
+#[tauri::command]
+pub fn set_window_zoom(
+    app: tauri::AppHandle,
+    factor: f64,
+    label: Option<String>,
+) -> Result<(), String> {
+    use tauri::Manager;
+    let name = label.unwrap_or_else(|| "main".to_string());
+    let window = app
+        .get_webview_window(&name)
+        .ok_or_else(|| format!("找不到窗口：{name}"))?;
+    window.set_zoom(factor).map_err(|e| format!("set_zoom 失败：{e}"))
+}

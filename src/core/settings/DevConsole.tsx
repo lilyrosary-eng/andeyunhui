@@ -37,7 +37,7 @@ interface LogFileInfo {
 // ========== 开发者控制台：开发调试工具，不设命令白名单/黑名单限制 ==========
 const COMMAND_NAMES = [
   'help', 'clear', 'echo', 'pwd', 'ls',
-  'logs', 'log', 'storage', 'backup', 'install', 'refresh', 'reload', 'http',
+  'logs', 'log', 'storage', 'zoom', 'backup', 'install', 'refresh', 'reload', 'http',
 ];
 
 // ========== 帮助文本 ==========
@@ -51,6 +51,7 @@ const HELP_TEXT = `开发者控制台 · 热指令列表
 :logs                         列出会话日志文件
 :log <name>                  读取指定日志内容（如 :log session_20250101_120000.log）
 :storage                     localStorage 占用排行（排查配额被谁占满）
+:zoom <percent>              把缩放交给 webview 本身（实验：能否取代 CSS zoom 包裹层）
 :backup                       导出数据备份（弹出保存对话框）
 :install                      安装 .mufurong / .mujin 文件（弹出文件选择）
 :refresh                      刷新插件列表（重新扫描 user_plugins / user_external_deps）
@@ -163,6 +164,32 @@ export function DevConsole() {
             );
             pushOutput('out', lines.join('\n'));
           }
+          break;
+        }
+
+        case 'zoom': {
+          const pct = Number(args[0]);
+          if (!Number.isFinite(pct) || pct <= 0) {
+            pushOutput('err', '用法: :zoom <百分比>（如 :zoom 125；:zoom 100 复位）');
+            break;
+          }
+          const before = `devicePixelRatio=${window.devicePixelRatio} innerWidth=${window.innerWidth}`;
+          try {
+            await invoke('set_window_zoom', { factor: pct / 100 });
+          } catch (err) {
+            pushOutput('err', `webview 缩放失败: ${String(err)}`);
+            break;
+          }
+          // 等一帧再读，否则量到的还是旧缩放的度量
+          await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+          const after = `devicePixelRatio=${window.devicePixelRatio} innerWidth=${window.innerWidth}`;
+          pushOutput(
+            'out',
+            `:zoom ${pct}%（webview 级缩放，与现有 CSS zoom 叠加，纯观察用）\n` +
+              `  前  ${before}\n  后  ${after}\n` +
+              `判据：devicePixelRatio 变化 = 缩放确实落在 webview 层，可取代 CSS zoom 包裹层；\n` +
+              `      完全没变 = 该平台不支持（Android 的 wry zoom() 是空实现）。`,
+          );
           break;
         }
 

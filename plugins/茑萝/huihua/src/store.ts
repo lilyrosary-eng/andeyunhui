@@ -41,6 +41,7 @@ const LS = {
   stabilizer: 'huihua.brush.stabilizer',
   presets: 'huihua.brush.presets',
   feather: 'huihua.selection.feather',
+  eraserMode: 'huihua.tool.eraserMode',
 } as const;
 
 function clampNum(value: number, min: number, max: number): number {
@@ -113,6 +114,15 @@ function storeBool(key: string, value: boolean): void {
 
 function storeNum(key: string, value: number): void {
   try { localStorage.setItem(key, String(value)); } catch { /* 忽略存储失败 */ }
+}
+
+/** 橡皮档位：只认 'alpha'，其余（脏值 / 读失败 / 首次）一律退回 SAI 式 'bg' */
+function storedEraserMode(): 'bg' | 'alpha' {
+  try {
+    return localStorage.getItem(LS.eraserMode) === 'alpha' ? 'alpha' : 'bg';
+  } catch {
+    return 'bg';
+  }
 }
 
 function storedBezier(key: string): Bezier4 | null {
@@ -340,6 +350,7 @@ class EditorStore {
     tool: 'pen',
     color: '#111827',
     bgColor: '#ffffff',
+    eraserMode: storedEraserMode(),
     size: Math.round(clampNum(storedNum(LS.size, 4), 1, 60)),
     opacity: clampNum(storedNum(LS.opacity, 1), 0.05, 1),
     hardness: clampNum(storedNum(LS.hardness, 1), 0, 1),
@@ -1543,8 +1554,12 @@ class EditorStore {
   }
 
   private stampDab(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, eraser: boolean): void {
-    const alpha = eraser ? this.state.flow * this.state.opacity : this.state.flow;
-    const color = eraser ? '#000000' : this.state.color;
+    // 'alpha' 档：橡皮在缓冲区里画黑点，提交时用 destination-out 抠像素，
+    //           不透明度只能预先乘进 dab（那条提交路径不设 globalAlpha）。
+    // 'bg'   档：橡皮就是一支用背景色的笔，走正常提交（提交时统一乘 opacity）。
+    const cutsAlpha = eraser && this.state.eraserMode === 'alpha';
+    const alpha = cutsAlpha ? this.state.flow * this.state.opacity : this.state.flow;
+    const color = eraser ? (cutsAlpha ? '#000000' : this.state.bgColor) : this.state.color;
     ctx.globalCompositeOperation = 'source-over';
     const r = Math.max(0.5, width / 2);
     if (this.state.hardness >= 1) {
@@ -1630,7 +1645,7 @@ class EditorStore {
       source = this.strokeMasked;
     }
 
-    if (this.draw.tool === 'eraser') {
+    if (this.eraserCutsAlpha()) {
       pctx.globalCompositeOperation = 'destination-out';
       pctx.drawImage(source, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
       pctx.globalCompositeOperation = 'source-over';
@@ -2235,6 +2250,17 @@ class EditorStore {
   swapColors = (): void => {
     this.emit({ color: this.state.bgColor, bgColor: this.state.color });
   };
+
+  /** 橡皮档位：'bg' 涂背景色（SAI 式）/ 'alpha' 擦成透明（透层用） */
+  setEraserMode = (mode: 'bg' | 'alpha'): void => {
+    this.emit({ eraserMode: mode });
+    try { localStorage.setItem(LS.eraserMode, mode); } catch { /* 忽略存储失败 */ }
+  };
+
+  /** 'alpha' 档才走 destination-out 抠像素；'bg' 档橡皮就是一支用背景色的笔 */
+  private eraserCutsAlpha(): boolean {
+    return this.draw.tool === 'eraser' && this.state.eraserMode === 'alpha';
+  }
 
   setSize = (size: number): void => {
     const next = Math.max(1, Math.min(60, Math.round(size)));

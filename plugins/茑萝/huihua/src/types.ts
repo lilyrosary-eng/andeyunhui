@@ -100,6 +100,14 @@ export interface EditorState {
   tool: Tool;
   color: string;
   bgColor: string;
+  /**
+   * 橡皮行为。SAI/SAI2 的橡皮是「用背景色画」而非抠掉像素
+   * （这正是「消しゴムカマ/橡皮陷阱」的成因：擦掉的像素其实还在）。
+   * 我们有多图层真透明需求，所以做成两档：
+   *   'bg'    涂背景色（SAI 式，默认）—— 适合线稿/平涂在底色层上作画
+   *   'alpha' 擦成透明 —— 上层图层需要抠掉像素时用
+   */
+  eraserMode: 'bg' | 'alpha';
   size: number;
   opacity: number;
   hardness: number;

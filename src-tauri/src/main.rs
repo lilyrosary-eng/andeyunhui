@@ -2216,6 +2216,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             rag_commands::rag_prune,
             // ========== 全局：开发者控制台（关于页面 · 联网/依赖安装）==========
             dev_console_http,
+            set_window_zoom,
             // ========== 模块：局域网传输（黄金棋盘·传输，LocalSend v2 兼容）==========
             transfer::transfer_start,
             transfer::transfer_stop,

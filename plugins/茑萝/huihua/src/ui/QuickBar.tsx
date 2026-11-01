@@ -26,6 +26,24 @@ export function QuickBar() {
       >
         橡皮
       </button>
+      {/* 橡皮两档：SAI 式「涂背景色」为默认；要多图层透层抠像素时切「擦成透明」 */}
+      {s.tool === 'eraser' && (
+        <button
+          className={cx(chip, 'ml-1')}
+          onClick={() => editor.setEraserMode(s.eraserMode === 'bg' ? 'alpha' : 'bg')}
+          title={s.eraserMode === 'bg'
+            ? '橡皮＝涂背景色（SAI 式，像素其实还在）。点击切到「擦成透明」'
+            : '橡皮＝擦成透明（会透出下层图层）。点击切到「涂背景色」'}
+        >
+          <span
+            className="mr-1 inline-block h-2.5 w-2.5 rounded-sm border border-black/20 align-middle dark:border-white/25"
+            style={s.eraserMode === 'bg'
+              ? { backgroundColor: s.bgColor }
+              : { backgroundImage: 'repeating-conic-gradient(#9ca3af 0% 25%, #fff 0% 50%)', backgroundSize: '6px 6px' }}
+          />
+          {s.eraserMode === 'bg' ? '涂背景色' : '擦成透明'}
+        </button>
+      )}
       <span className="mx-1 h-5 w-px bg-black/10 dark:bg-white/10" />
       <button className={chip} onClick={() => editor.setSize(s.size - 1)} title="减小笔刷 ([)">−</button>
       <span className="w-9 text-center text-[11px] tabular-nums text-neutral-600 dark:text-stone-300" title="笔刷粗细">
