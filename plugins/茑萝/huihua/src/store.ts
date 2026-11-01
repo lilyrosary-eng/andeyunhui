@@ -699,12 +699,29 @@ class EditorStore {
   };
 
   // ---------- 坐标 / 相机 ----------
+  /**
+   * 视觉像素 → 布局像素的比例。
+   * 宿主把整个应用包在 CSS `zoom` 包裹层里（ThemeProvider，用户可在设置里改），
+   * 于是 getBoundingClientRect() 拿到的是**缩放后的视觉像素**，而 pan / state.zoom /
+   * clientWidth 全是**未缩放的布局像素**。不除这个比例，光标与落笔点就会错位，
+   * 且偏移量随距画板左上角的距离线性放大（zoom=100% 时比例为 1，看不出问题）。
+   */
+  private viewScale(): number {
+    const c = this.display;
+    if (!c) return 1;
+    const layout = c.clientWidth;
+    if (!layout) return 1;
+    const visual = c.getBoundingClientRect().width;
+    return visual > 0 ? visual / layout : 1;
+  }
+
   private toDoc(clientX: number, clientY: number): { x: number; y: number } {
     const c = this.display;
     if (!c) return { x: 0, y: 0 };
     const rect = c.getBoundingClientRect();
-    const sx = clientX - rect.left;
-    const sy = clientY - rect.top;
+    const s = this.viewScale();
+    const sx = (clientX - rect.left) / s;
+    const sy = (clientY - rect.top) / s;
     return { x: (sx - this.pan.x) / this.state.zoom, y: (sy - this.pan.y) / this.state.zoom };
   }
 
@@ -723,8 +740,11 @@ class EditorStore {
     const next = this.clampZoom(this.state.zoom * factor);
     if (next === this.state.zoom) return;
     const rect = c.getBoundingClientRect();
-    const sx = clientX - rect.left;
-    const sy = clientY - rect.top;
+    // 同 toDoc：滚轮缩放的锚点也要从视觉像素换算回布局像素，否则 zoom≠100% 时
+    // "以光标为中心缩放"会越缩越偏。
+    const s = this.viewScale();
+    const sx = (clientX - rect.left) / s;
+    const sy = (clientY - rect.top) / s;
     const docX = (sx - this.pan.x) / this.state.zoom;
     const docY = (sy - this.pan.y) / this.state.zoom;
     this.pan = { x: sx - docX * next, y: sy - docY * next };

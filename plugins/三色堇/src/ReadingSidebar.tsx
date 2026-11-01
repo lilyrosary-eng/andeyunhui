@@ -4,6 +4,7 @@
 // 第二层：选中书后切换为「目录 / 笔记」双 tab（目录=章节列表；笔记=高亮与批注，可跳转/搜索/删除/编辑/导出）
 const React = window.__HOST_REACT__;
 import { T, useLang } from '../../_shared/pluginRuntime';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   HIGHLIGHT_BG,
   buildReadingNoteMarkdown,
@@ -15,7 +16,14 @@ import {
   updateHighlight,
   type HighlightRecord,
 } from './readingHighlights';
-const { useMemo, useState, useEffect, useCallback } = React;
+const { useMemo, useState, useEffect, useCallback, useRef } = React;
+
+/** 笔记（高亮+批注）列表窗口化参数：与宿主 NestedNavList 同一策略，少量条目一行 DOM 都不变 */
+const NOTE_VIRTUAL_THRESHOLD = 100;
+/** 行高估算：色点行 16 + 引用两行 ~32 + 批注两行 ~30 + 操作行 18 + 边框内边距 ~8 */
+const NOTE_ROW_EST_H = 104;
+/** 与旧 `space-y-1.5` 等价的行间距（虚拟化时折进每行下内边距） */
+const NOTE_ROW_GAP = 6;
 const { ModuleSidebarShell, NestedNavList, BarChart3 } = window.__HOST_UI__ || {};
 const hostApi = window.__HOST_API__;
 
@@ -316,6 +324,28 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
 
+  // ===== 笔记列表的窗口化 =====
+  // 放在条件块之前：钩子进了 `if (currentBook) {}` 就会重演
+  // "Rendered fewer hooks than expected"（本文件上方已有该坑的注释）。
+  const notesScrollRef = useRef<HTMLDivElement | null>(null);
+  const visibleNotes = useMemo(() => {
+    const q = noteQuery.trim().toLowerCase();
+    if (!q) return highlights;
+    return highlights.filter((h) =>
+      (h.quote || '').toLowerCase().includes(q) ||
+      (h.note || '').toLowerCase().includes(q) ||
+      (currentBook?.chapters[h.chapterIndex]?.title || '').toLowerCase().includes(q));
+  }, [highlights, noteQuery, currentBook]);
+  const virtualizeNotes = visibleNotes.length > NOTE_VIRTUAL_THRESHOLD;
+  // 钩子必须无条件调用：不虚拟化时把 count 给 0，virtualizer 就是个惰物
+  const noteVirtualizer = useVirtualizer({
+    count: virtualizeNotes ? visibleNotes.length : 0,
+    getScrollElement: () => notesScrollRef.current,
+    estimateSize: () => NOTE_ROW_EST_H,
+    overscan: 8,
+    getItemKey: (i) => visibleNotes[i]?.id ?? i,
+  });
+
   const bookPath = currentBook?.filePath || null;
   const normPath = (p: string) => p.replace(/\\/g, '/').toLowerCase();
 
@@ -468,13 +498,7 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
     );
 
     // ===== 笔记 tab：高亮 + 批注列表（搜索 / 跳转 / 删除 / 编辑批注 / 导出）=====
-    const q = noteQuery.trim().toLowerCase();
-    const visibleNotes = q
-      ? highlights.filter((h) =>
-          (h.quote || '').toLowerCase().includes(q) ||
-          (h.note || '').toLowerCase().includes(q) ||
-          (currentBook.chapters[h.chapterIndex]?.title || '').toLowerCase().includes(q))
-      : highlights;
+    // visibleNotes / noteVirtualizer 已在条件块之前算好（钩子不能进条件块）
 
     const notesPanel = React.createElement('div', { className: 'flex flex-col min-h-0 flex-1' },
       // 导出行
@@ -501,13 +525,24 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
           className: 'w-full px-2.5 py-1.5 rounded-lg bg-black/5 dark:bg-white/5 border border-transparent focus:border-[var(--element-bg)] outline-none text-xs text-neutral-600 dark:text-stone-300 placeholder:text-neutral-400 dark:placeholder:text-stone-500',
         }),
       ),
-      // 列表
-      React.createElement('div', { className: 'flex-1 min-h-0 overflow-y-auto px-2 pb-2 space-y-1.5' },
+      // 列表：超过 NOTE_VIRTUAL_THRESHOLD 才窗口化，少量高亮的书 DOM 结构不变
+      React.createElement('div', {
+        ref: notesScrollRef,
+        className: 'flex-1 min-h-0 overflow-y-auto px-2 pb-2',
+      },
         visibleNotes.length === 0
           ? React.createElement('div', { className: 'py-8 text-center text-xs text-neutral-400 dark:text-stone-500 px-2 leading-relaxed' }, T('reading.notes.empty'))
-          : visibleNotes.map((h) => {
+          : React.createElement('div', {
+              // 虚拟化时行是绝对定位的，必须有这一层撑到总高，否则滚动条长度为 0、根本滚不动
+              className: virtualizeNotes ? 'relative' : 'space-y-1.5',
+              style: virtualizeNotes ? { height: noteVirtualizer.getTotalSize() } : undefined,
+            }, (virtualizeNotes
+              ? noteVirtualizer.getVirtualItems().map((vi) => ({ index: vi.index, start: vi.start as number | undefined }))
+              : visibleNotes.map((_h, i) => ({ index: i, start: undefined as number | undefined })))
+            .map((row) => {
+              const h = visibleNotes[row.index];
               const chapterLabel = currentBook.chapters[h.chapterIndex]?.title || T('reading.chapterN', { n: h.chapterIndex + 1 });
-              return React.createElement('div', {
+              const card = React.createElement('div', {
                 key: h.id,
                 className: 'group rounded-lg border border-black/5 dark:border-white/10 bg-white/50 dark:bg-white/5 px-2 py-2',
               },
@@ -561,7 +596,17 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
                   ),
                 ),
               );
-            }),
+              if (!virtualizeNotes) return card;
+              // 虚拟化路径：绝对定位 + translateY 摆放，measureElement 回读真实高度
+              return React.createElement('div', {
+                key: h.id,
+                'data-index': row.index,
+                ref: noteVirtualizer.measureElement,
+                className: 'absolute left-0 right-0',
+                style: { top: 0, transform: `translateY(${row.start}px)`, paddingBottom: NOTE_ROW_GAP },
+              }, card);
+            })
+          ),
       ),
     );
 

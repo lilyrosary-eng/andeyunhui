@@ -4,11 +4,11 @@ import { useEditorState, useEditorView } from '../hooks';
 import { editor } from '../store';
 
 const CHECKER: CSSProperties = {
-  backgroundImage:
-    'linear-gradient(45deg,#e3e1da 25%,transparent 25%),linear-gradient(-45deg,#e3e1da 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#e3e1da 75%),linear-gradient(-45deg,transparent 75%,#e3e1da 75%)',
+  // 单层 conic 平铺。原先是 4 层 linear-gradient 拼棋盘：宿主整站套着 CSS zoom 包裹层，
+  // 缩放非整数时**每一层各自被重采样**，四层的对角边对不齐 → 画布上出现一格一格的
+  // 发丝矩形框（用户 2026-11-01 截图那个"像窗口的框"）。单层没有层间错位可产生。
+  backgroundImage: 'repeating-conic-gradient(#e3e1da 0% 25%, #efede6 0% 50%)',
   backgroundSize: '16px 16px',
-  backgroundPosition: '0 0,0 8px,8px -8px,-8px 0',
-  backgroundColor: '#efede6',
 };
 
 export function Board() {
@@ -18,6 +18,21 @@ export function Board() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const lastScreen = useRef({ x: 0, y: 0, visible: false });
+
+  /**
+   * client 视觉像素 → 覆盖层画布的布局像素。
+   * 笔尖环是直接 `ctx.arc(x, y)` 画在覆盖层上的，原先存的是裸 clientX/clientY：
+   * 既没减画布原点（于是整体偏一个「侧栏宽 + DocBar 高」），也没除宿主 zoom，
+   * 结果系统光标与自绘笔尖环同时出现且不重合（用户 2026-11-01 反馈）。
+   */
+  const toOverlayLocal = (clientX: number, clientY: number) => {
+    const c = overlayRef.current ?? canvasRef.current;
+    if (!c) return { x: clientX, y: clientY };
+    const rect = c.getBoundingClientRect();
+    const layout = c.clientWidth || 1;
+    const s = rect.width > 0 ? rect.width / layout : 1;
+    return { x: (clientX - rect.left) / s, y: (clientY - rect.top) / s };
+  };
 
   const drawOverlay = useCallback(() => {
     const c = overlayRef.current;
@@ -188,14 +203,14 @@ export function Board() {
     if (e.button === 2) return;
     e.currentTarget.setPointerCapture?.(e.pointerId);
     const isPen = e.pointerType === 'pen';
-    lastScreen.current = { x: e.clientX, y: e.clientY, visible: true };
+    lastScreen.current = { ...toOverlayLocal(e.clientX, e.clientY), visible: true };
     editor.pointerDown(e.clientX, e.clientY, isPen ? e.pressure : 0, e.button, isPen);
     drawOverlay();
   };
 
   const onPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const isPen = e.pointerType === 'pen';
-    lastScreen.current = { x: e.clientX, y: e.clientY, visible: true };
+    lastScreen.current = { ...toOverlayLocal(e.clientX, e.clientY), visible: true };
     editor.pointerMove(e.clientX, e.clientY, isPen ? e.pressure : 0, isPen, e.shiftKey);
     drawOverlay();
   };

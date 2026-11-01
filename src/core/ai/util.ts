@@ -1,4 +1,6 @@
 // AI 对话共用工具函数：id 生成、标题推断、会话工厂、localStorage 持久化。
+import { invoke } from '@tauri-apps/api/core';
+import { appDataDir } from '@tauri-apps/api/path';
 import type { ChatMsg, Conversation, MsgVersion } from '@/components/capsule/types';
 import { storage } from '@/core/storage';
 
@@ -366,8 +368,53 @@ function serializeConversations(list: Conversation[]): string {
   }
 }
 
+/** 判定"灾难性缩水"至少要一次少掉这么多条：用户手动删一两条不该触发 */
+const SHRINK_MIN_LOST = 3;
+
+/** 数已存原文里有多少条会话；解析不了就按 0 算（调用方据此不做快照，避免误报） */
+function countStoredConversations(raw: string): number {
+  if (!raw) return 0;
+  try {
+    const arr = JSON.parse(raw) as unknown;
+    return Array.isArray(arr) ? arr.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 覆盖前把已存原文快照到 appdata/backups/<key>.prev.json，并在日志里给出确切路径。
+ *
+ * 为什么必须有：`persistConversations` 上面那几道预算防线只挡"写太大 → QuotaExceeded 静默丢整份历史"。
+ * 另一头没人管 —— 上游任何一处把 list 变成 []（最隐蔽的是 localStorage 里那份 JSON 被截断，
+ * `storage.getJSON` 的 catch 直接吞成 `[]`，用户什么都没做），下一次保存就把整份历史覆盖掉，永久没了。
+ * 2026-10-12 那次 `ai_config` 掉到 1.6KB 就是这个形状，而当时留下的 `*.wiped-*.json`
+ * 是人工取证，代码里并没有自动兜底。
+ *
+ * 单槽、固定文件名：每次触发覆盖上一份，因此不需要轮转、不会无限长。快照本身失败也不能挡住写入。
+ */
+async function snapshotBeforeShrink(key: string, prevRaw: string, prevCount: number, nextCount: number): Promise<void> {
+  try {
+    const dir = await appDataDir();
+    const path = `${dir.replace(/[/\\]$/, '')}/backups/${key}.prev.json`;
+    await invoke('write_text_file', { path, content: prevRaw });
+    console.error(
+      `[ai-chat] 会话将从 ${prevCount} 条缩到 ${nextCount} 条，覆盖前的原文已快照到 ${path}。` +
+        `若这不是你本人的删除操作，请从该文件恢复（单槽，再次触发会覆盖它）。`,
+    );
+  } catch (err) {
+    console.error('[ai-chat] 会话缩水快照失败（不影响本次写入）:', err);
+  }
+}
+
 export function persistConversations(key: string, list: Conversation[]): void {
   const top = list.slice(0, 50);
+  // 写盘前的缩水守卫：只在"少掉 ≥ SHRINK_MIN_LOST 条且不足已存的一半"时快照
+  const prevRaw = storage.getString(key, '');
+  const prevCount = countStoredConversations(prevRaw);
+  if (prevRaw && prevCount - top.length >= SHRINK_MIN_LOST && top.length < prevCount / 2) {
+    void snapshotBeforeShrink(key, prevRaw, prevCount, top.length);
+  }
   // 一份预算跨全部会话：否则"每会话 1.5M 字符"的累计值远超 localStorage 配额
   const budget = { left: MEDIA_BUDGET_CHARS };
   const prepared = top.map((c) => sanitizeConv(c, budget));

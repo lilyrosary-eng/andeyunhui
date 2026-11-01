@@ -218,8 +218,12 @@ function CurveEditor() {
 
   const toPlot = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const x = (e.clientX - rect.left - CURVE_PAD) / CURVE_INNER;
-    const y = (CURVE_SIZE - CURVE_PAD - (e.clientY - rect.top)) / CURVE_INNER;
+    // 同 ColorPanel：rect 是缩放后的视觉像素，CURVE_* 是布局像素常量
+    const s = rect.width > 0 ? rect.width / CURVE_SIZE : 1;
+    const lx = (e.clientX - rect.left) / s;
+    const ly = (e.clientY - rect.top) / s;
+    const x = (lx - CURVE_PAD) / CURVE_INNER;
+    const y = (CURVE_SIZE - CURVE_PAD - ly) / CURVE_INNER;
     return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
   };
 

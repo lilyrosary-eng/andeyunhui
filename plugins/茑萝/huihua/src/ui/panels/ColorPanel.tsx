@@ -159,7 +159,10 @@ function ColorWheelView({ color, onChange }: { color: string; onChange: (c: stri
   const ptToXY = (clientX: number, clientY: number) => {
     const c = canvasRef.current!;
     const rect = c.getBoundingClientRect();
-    return { x: clientX - rect.left - SIZE / 2, y: clientY - rect.top - SIZE / 2 };
+    // 宿主整站套 CSS zoom 包裹层：rect 是视觉像素，而 SIZE 是布局像素，
+    // 不除这个比例，取色环/取色方块的命中就会整体偏位（zoom=100% 时看不出来）。
+    const s = rect.width > 0 ? rect.width / SIZE : 1;
+    return { x: (clientX - rect.left) / s - SIZE / 2, y: (clientY - rect.top) / s - SIZE / 2 };
   };
 
   const apply = (mx: number, my: number, region: 'ring' | 'square') => {
