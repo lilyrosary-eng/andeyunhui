@@ -19,7 +19,6 @@
         "decorations": false,
         "transparent": true,
         "dragDropEnabled": true,
-        "backgroundColor": "#f5f5f0",
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,MediaSession,HardwareMediaKeyHandling"
       }
     ],
