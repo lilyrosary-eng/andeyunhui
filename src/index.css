@@ -1016,35 +1016,20 @@ html.is-linux *::after {
    html/body 背景置为透明 —— 这样 #root 的圆角才真的"挖掉"四个角露出桌面，
    而不是在圆角外留一圈不透明的直角。
    浮窗不走这条规则（它们各自已有自己的圆角/透明处理）。 */
-/* 窗口给阴影留出呼吸空间：无边框窗口在 Linux 上没有 WM 阴影，
-   必须自己画。padding 就是阴影可见的那一圈（gtk.js 文档里的 allocateShadow 同理）。 */
-html[data-window="main"] body {
-  padding: 7px;
-  box-sizing: border-box;
-}
-
+/* ===== 主窗圆角（2026-11-02 收敛版） =====
+   Linux/Wayland 无法做到窗口真透明（试过 6 轮，残留的方形底在 WebKitWebView 的
+   合成结果里，应用层够不到）。因此不再给窗口加 padding/阴影 ——
+   内部组件大量使用 100vh/100vw，任何内缩都会造成溢出与错位（已实测）。
+   这里只保留内容层的圆角与裁切：窗口仍是矩形，但四角处的内容被裁圆，
+   与窗口底色（同色）融为一体，视觉上接近直角，不会错位。 */
 html[data-window="main"] #root {
-  height: calc(100vh - 14px);
+  height: 100vh;
   background: var(--background);
-  /* 10px(--radius) 在 1300x740 的窗口上几乎看不出，单独用大一点的半径 */
   border-radius: 16px;
   overflow: hidden;
-  /* 让标题栏（ImmersiveChrome，原本是 fixed）改用 absolute 后能相对这里定位，
-     从而被上面的 overflow:hidden + 圆角裁掉 */
   position: relative;
-  /* 阴影 + 一圈极淡的描边（无描边时圆角边缘会显得发虚） */
-  box-shadow:
-    0 2px 6px rgba(0, 0, 0, 0.10),
-    0 10px 32px rgba(0, 0, 0, 0.16),
-    0 0 0 1px rgba(0, 0, 0, 0.06);
 }
 
-/* 最大化/全屏时：圆角、阴影、留白全部去掉，否则四角和四周都会露出一圈桌面 */
-html[data-window="main"].window-maximized body {
-  padding: 0;
-}
 html[data-window="main"].window-maximized #root {
   border-radius: 0;
-  height: 100vh;
-  box-shadow: none;
 }

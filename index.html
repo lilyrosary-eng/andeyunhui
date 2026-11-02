@@ -6,12 +6,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>安得云荟</title>
     <style>
-      /* html/body 一律透明：每个窗口（主窗 / 中转站浮窗 / 笔记浮窗 / 剪贴板浮窗）
-         都在自己的根容器上画背景和圆角。此前这里铺了不透明的 #f4f2ec，导致**所有窗口
-         的圆角都是"假"的** —— 圆角以内被裁掉了，圆角以外仍是这层米色，视觉上还是方的。
-         （2026-11-02 实测：主窗与各浮窗都这样，Windows 的浮窗同样。）
-         防白屏改由各窗口自己的容器背景承担：#root / 浮窗根 div 都在首帧就有底色。 */
-      html, body { margin: 0; height: 100%; background: transparent; }
+      /* 防白屏：脚本执行前先给页面一个底色（浅色默认，深色由预加载脚本切换）。
+         主窗的"曲线圆角"靠窗口底色 + 内嵌卡片实现（见 index.css 末尾），
+         因此这里不能再置透明 —— 透明会让窗口露出黑底/桌面。 */
+      html, body { margin: 0; height: 100%; background: #f4f2ec; }
       body { overflow: hidden; }
     </style>
     <script>

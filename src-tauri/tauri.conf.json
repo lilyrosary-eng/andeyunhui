@@ -17,7 +17,7 @@
         "height": 740,
         "center": true,
         "decorations": false,
-        "transparent": true,
+        "backgroundColor": "#f5f5f0",
         "dragDropEnabled": true,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,MediaSession,HardwareMediaKeyHandling"
       }

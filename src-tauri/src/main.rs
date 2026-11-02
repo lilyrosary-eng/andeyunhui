@@ -1311,34 +1311,6 @@ fn main() {
             // 与 `TrayMenu.tsx` 里的 summon / quit 对齐。
             #[cfg(target_os = "linux")]
             {
-                // 主窗圆角的前提是窗口真的透明。tauri.conf.json 里主窗同时有
-                // transparent: true 和 backgroundColor: "#f5f5f0"（后者是给 Windows 防首帧白屏用的），
-                // Tauri 会把 background_color 设在 webview 上，把 transparent 的效果覆盖回不透明
-                // ⇒ 圆角只裁掉了内容、圆角外仍是一圈米色（"假圆角"）。
-                // 这里只对 Linux 把 webview 背景清成透明；Windows 保持原样，行为不变。
-                if let Some(w) = app.get_webview_window("main") {
-                    if let Err(e) = w.set_background_color(Some(tauri::webview::Color(0, 0, 0, 0))) {
-                        eprintln!("[window] 清空主窗背景失败（圆角会显示为不透明）: {e}");
-                    }
-                    // 光有 RGBA visual + app_paintable 还不够：GTK 仍会按主题给 `window`
-                    // 节点画一层背景色，于是圆角外是一圈主题底色（看起来就是"假圆角"）。
-                    // tao 在 transparent 时已经设过 visual/paintable（见 tao 的
-                    // platform_impl/linux/window.rs:131-143），这里只补 GTK 的 CSS。
-                    if let Ok(gtk_win) = w.gtk_window() {
-                        use gtk::prelude::*;
-                        let provider = gtk::CssProvider::new();
-                        let _ = provider.load_from_data(
-                            b"window, window.background { background-color: transparent; background-image: none; }",
-                        );
-                        gtk_win
-                            .style_context()
-                            .add_provider(&provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
-                    }
-                }
-            }
-
-            #[cfg(target_os = "linux")]
-            {
                 // 不走 Tauri 的 TrayIconBuilder：muda 的菜单项用自定义 GtkBox 装 label，
                 // GNOME 的 AppIndicator 扩展会把它渲染成空白按钮（见 pal/tray_linux.rs）。
                 let ah1 = app.handle().clone();
