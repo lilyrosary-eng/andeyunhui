@@ -15,6 +15,7 @@ import {
   saveTargetLang,
 } from '@/lib/translateLanguages';
 import { EVENTS } from '@/core/events/schema';
+import { isLinux } from '@/platform/isLinux';
 import { registerNavigator } from '@/core/navigation/navigation';
 
 // 本地 PaddleOCR 引擎懒加载（与 CodeMirror/TipTap 同模式：read_external_dep_file + new Function，
@@ -99,6 +100,8 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
   const [aiResults, setAiResults] = useState<Record<string, { kind: 'ocr' | 'translate'; text: string } | { kind: 'error'; text: string } | { kind: 'loading'; kindLabel: string }>>({});
   // 主站 OCR / 翻译 工作区开关（绝对定位贴左右边缘，不撑宽中间）
   const [ocrOpen, setOcrOpen] = useState(false);
+  /** 拖出失败/不支持时的一次性提示（A10：以前只 console.error，用户完全无感） */
+  const [dragNotice, setDragNotice] = useState<string | null>(null);
   const [translateOpen, setTranslateOpen] = useState(false);
   // 主站 OCR 工作区预填充图片（来自文件行点击 / 选中图片，可为 null = 空，等待拖入 / 粘贴）
   const [ocrPrefill, setOcrPrefill] = useState<string | null>(null);
@@ -210,10 +213,18 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
     const target = e.target as HTMLElement;
     if (target.closest('button')) return; // 让删除/保存等按钮正常工作
     e.preventDefault();
+    // Linux 上根本没有原生拖出：Rust 侧 dropzone.rs 的 `#[cfg(not(windows))]`
+    // 分支直接返回 Err("该平台暂不支持原生文件拖出")。以前这里只 console.error，
+    // 用户把文件拖出窗口后**什么都看不到**，以为功能坏了（A10）。
+    // 这里直接给出可见提示，并指路「保存」（另存为）这条等效路径。
+    if (isLinux()) {
+      setDragNotice('Linux 暂不支持把文件拖到桌面 —— 请点右侧「保存」导出到任意位置');
+      return;
+    }
     // 标记本次为「应用内拖出」，拖回应用内时不重复导入
     (window as unknown as Record<string, unknown>).__andengDragging = true;
     invoke('start_native_file_drag', { files: [file.absolutePath] })
-      .catch((err) => console.error('[Dropzone] 原生拖出失败:', err))
+      .catch((err) => setDragNotice(`拖出失败：${String(err)}`))
       .finally(() => {
         (window as unknown as Record<string, unknown>).__andengDragging = false;
       });
@@ -227,6 +238,7 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
       await api.exportDropzoneFile(file.storedPath, dest);
     } catch (err) {
       console.error('[Dropzone] 导出失败:', err);
+      setDragNotice(`导出失败：${err instanceof Error ? err.message : String(err)}`);
     }
   }, []);
 
@@ -421,6 +433,17 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
 
   return (
     <div className="relative flex-1 h-full overflow-hidden main-panel-bg p-6 fade-in flex flex-col immersive-safe-top">
+      {dragNotice && (
+        <button
+          type="button"
+          onClick={() => setDragNotice(null)}
+          className="absolute left-1/2 -translate-x-1/2 top-3 z-30 max-w-[90%] px-3 py-1.5 rounded-full
+                     bg-amber-500/95 text-white text-xs shadow-lg hover:bg-amber-500 text-left"
+          title="点击关闭"
+        >
+          {dragNotice}
+        </button>
+      )}
       {/* 主站左侧：OCR 工作区（自包含，支持拖入 / 选择 / 粘贴图片）。
           immersive-ocr-panel：绝对定位不吃父级 .immersive-safe-top 的 padding-top，
           沉浸态由 CSS 单独下移（见 index.css），非沉浸态外观不变。 */}
