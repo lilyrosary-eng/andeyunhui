@@ -1,5 +1,7 @@
 import { useRef, useCallback, useState, useEffect } from 'react';
 import { Bold, Italic, Link2, Code, List, Columns2, Maximize2, FileText, Sparkles, Eye, Square } from 'lucide-react';
+import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
+import { pathToFile } from '@/platform/nativeDropFiles';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { api } from '@/lib/api';
@@ -158,11 +160,8 @@ export function NotesEditor() {
   const unusedTags = allTags.filter(t => !tags.includes(t));
 
   // 万能拖拽功能（在编辑卡片容器上）
-  const handleDrop = useCallback(async (e: React.DragEvent) => {
-    e.preventDefault();
-    if ((window as unknown as Record<string, unknown>).__andengDragging) return;
-    if (Array.from(e.dataTransfer.types).includes('application/x-andeng-internal')) return;
-    const files = Array.from(e.dataTransfer.files);
+  // 核心逻辑：接受 File[]，DOM drop（应用内拖拽）和原生拖入（hook）共用
+  const handleFiles = useCallback(async (files: File[]) => {
     if (files.length === 0) return;
 
     const currentContent = contentRef.current;
@@ -238,6 +237,23 @@ export function NotesEditor() {
 
     onContentChange(newContent);
   }, [onContentChange]);
+
+  // 应用内拖拽（x-andeng-internal）：wry 对非文件放行，仍走 DOM drop
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    if ((window as unknown as Record<string, unknown>).__andengDragging) return;
+    if (Array.from(e.dataTransfer.types).includes('application/x-andeng-internal')) return;
+    await handleFiles(Array.from(e.dataTransfer.files));
+  }, [handleFiles]);
+
+  // 系统文件拖入：wry 接管后 DOM drop 不触发，路径走 hook 再还原成 File
+  const noteDropRef = useRef<HTMLDivElement>(null);
+  const handleNotePaths = useCallback(async (paths: string[]) => {
+    const settled = await Promise.all(paths.map((p) => pathToFile(p).catch(() => null)));
+    const files = settled.filter((f): f is File => Boolean(f));
+    if (files.length) await handleFiles(files);
+  }, [handleFiles]);
+  useNativeFileDrop(noteDropRef, handleNotePaths);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -486,6 +502,7 @@ export function NotesEditor() {
 
       {/* 编辑卡 */}
       <div
+        ref={noteDropRef}
         className="flex-1 flex w-full min-h-0 bg-white/90 backdrop-blur-sm rounded-2xl shadow-sm border border-white/50 overflow-hidden dark:bg-stone-800/80 dark:border-stone-600/40"
         onDrop={handleDrop}
         onDragOver={handleDragOver}

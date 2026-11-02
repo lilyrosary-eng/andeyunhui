@@ -33,6 +33,8 @@ import { dispatchOpenWith, registerOpenWithListener } from '../plugins/_shared/o
 import { PhysicalPosition } from '@tauri-apps/api/dpi';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
+import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
+import { basename, pathToDataUrl } from '@/platform/nativeDropFiles';
 import { EVENTS } from '@/core/events/schema';
 
 function App() {
@@ -587,74 +589,47 @@ function App() {
   useEffect(() => {
     openExternalContentRef.current = openExternalContent;
   }, [openExternalContent]);
-  useEffect(() => {
-    const onDragOver = (e: DragEvent) => {
-      // 仅当拖拽内容含文件时允许放下（否则 Explorer 会显示禁止符号）
-      if (e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')) {
-        e.preventDefault();
-      }
-    };
-    const onDrop = async (e: DragEvent) => {
-      const dt = e.dataTransfer;
-      if (!dt) return;
-      // 应用内原生拖出（中转站行按下拖出）拖回应用内时不重复导入
-      if ((window as unknown as Record<string, unknown>).__andengDragging) {
-        e.preventDefault();
-        return;
-      }
-      // 应用内拖出的文件（如从中转站拖来）拖回应用内时不要重复导入，否则会一直复制
-      if (Array.from(dt.types).includes('application/x-andeng-internal')) {
-        e.preventDefault();
-        return;
-      }
-      if (dt.files.length === 0) return;
-      // 始终阻止浏览器默认行为（否则落在编辑器外的文件会被浏览器直接打开/导航）
-      e.preventDefault();
-      // 笔记模块：交给编辑器自身的 onDrop 在光标处插入，避免重复处理
-      if (activeModuleRef.current === 'notes') return;
-      // 处于媒体模块时，把匹配类型的文件收集起来，拖入后一并「以安得云荟打开」（复制进固定临时目录并打开）
-      const activeMod = activeModuleRef.current;
-      const isMediaActive = MEDIA_MODULES.includes(activeMod);
-      const openWithItems: { path: string; name: string }[] = [];
-      for (const file of Array.from(dt.files)) {
-        try {
-          const dataUrl = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          });
-          logger.dropzone.importStart(file.name);
-          const imported = await api.addBytesToDropzone(dataUrl, file.name);
-          logger.dropzone.importSuccess(imported.originalName, imported.isReadable);
-          emitDropzoneChange();
-          if (imported.isReadable) {
-            try {
-              logger.dropzone.readStart(imported.storedPath);
-              const fileContent: string = await invoke('read_dropzone_file', { storedPath: imported.storedPath });
-              logger.dropzone.readSuccess(imported.originalName, fileContent.length);
-              openExternalContentRef.current(imported.originalName.replace(/\.\w+$/, ''), fileContent);
-            } catch (readErr) {
-              logger.dropzone.readFailed(imported.storedPath, readErr);
-            }
+  // 文件拖入的统一入口：主窗口是 dragDropEnabled: true，wry 接管文件拖拽
+  // （handler 返回 true ⇒ WebKit 不导航；真实路径经 onDragDropEvent 给出）。
+  // 应用内拖拽（x-andeng-internal）不带 file URI，wry 返回 false 放行，仍走各组件自己的 DOM drop。
+  const handleNativePaths = useCallback(async (paths: string[]) => {
+    // 传输页自己会消费这些路径（它挂载时置位），不要重复送进中转站
+    if ((window as unknown as Record<string, unknown>).__andengTransferActive) return;
+    // 笔记模块交给 NotesEditor 自己的处理（可定位光标）
+    if (activeModuleRef.current === 'notes') return;
+    const activeMod = activeModuleRef.current;
+    const isMediaActive = MEDIA_MODULES.includes(activeMod);
+    const openWithItems: { path: string; name: string }[] = [];
+    for (const srcPath of paths) {
+      const name = basename(srcPath);
+      try {
+        const dataUrl = await pathToDataUrl(srcPath);
+        logger.dropzone.importStart(name);
+        const imported = await api.addBytesToDropzone(dataUrl, name);
+        logger.dropzone.importSuccess(imported.originalName, imported.isReadable);
+        emitDropzoneChange();
+        if (imported.isReadable) {
+          try {
+            logger.dropzone.readStart(imported.storedPath);
+            const fileContent: string = await invoke('read_dropzone_file', { storedPath: imported.storedPath });
+            logger.dropzone.readSuccess(imported.originalName, fileContent.length);
+            openExternalContentRef.current(imported.originalName.replace(/\.\w+$/, ''), fileContent);
+          } catch (readErr) {
+            logger.dropzone.readFailed(imported.storedPath, readErr);
           }
-          // 媒体模块 + 类型匹配：记录为「以安得云荟打开」项（用中转站落地真实路径作复制源）
-          if (isMediaActive && detectModule(file.name) === activeMod && imported.absolutePath) {
-            openWithItems.push({ path: imported.absolutePath, name: file.name });
-          }
-        } catch (err) {
-          logger.dropzone.importFailed(file.name, err);
         }
+        // 媒体模块 + 类型匹配：记录为「以安得云荟打开」项
+        if (isMediaActive && detectModule(name) === activeMod && imported.absolutePath) {
+          openWithItems.push({ path: imported.absolutePath, name });
+        }
+      } catch (err) {
+        logger.dropzone.importFailed(name, err);
       }
-      if (openWithItems.length) dispatchOpenWith(activeMod, openWithItems);
-    };
-    window.addEventListener('dragover', onDragOver);
-    window.addEventListener('drop', onDrop);
-    return () => {
-      window.removeEventListener('dragover', onDragOver);
-      window.removeEventListener('drop', onDrop);
-    };
-  }, []);
+    }
+    if (openWithItems.length) dispatchOpenWith(activeMod, openWithItems);
+  }, [dispatchOpenWith]);
+  // 整窗兜底：不判坐标，落到任何位置的拖入都由这里收
+  useNativeFileDrop(null, handleNativePaths, true);
 
   // ====== 中转站回调 ======
   const handleOpenReadableFile = useCallback((file: { originalName: string }, fileContent: string) => {

@@ -16,6 +16,8 @@ import {
 } from '@/lib/translateLanguages';
 import { EVENTS } from '@/core/events/schema';
 import { isLinux } from '@/platform/isLinux';
+import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
+import { extOf, pathToDataUrl } from '@/platform/nativeDropFiles';
 import { registerNavigator } from '@/core/navigation/navigation';
 
 // 本地 PaddleOCR 引擎懒加载（与 CodeMirror/TipTap 同模式：read_external_dep_file + new Function，
@@ -767,7 +769,6 @@ function OcrWorkspace({ prefillDataUrl, onClose }: { prefillDataUrl: string | nu
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [dragOver, setDragOver] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // 识别引擎：auto=优先云端视觉 OCR（不支持图片的模型如 DeepSeek 自动降级本地 PaddleOCR）；local=仅本地 PaddleOCR
@@ -881,6 +882,20 @@ function OcrWorkspace({ prefillDataUrl, onClose }: { prefillDataUrl: string | nu
     }
   }, [mode, enhance, applyEnhance, tr]);
 
+  // 拖入走 wry 接管后的真实路径（DOM 的 drop 对文件不再触发）
+  const ocrDropRef = useRef<HTMLDivElement>(null);
+  const handleOcrPaths = useCallback(async (paths: string[]) => {
+    const img = paths.find((p) => isImageFile(extOf(p)));
+    if (!img) return;
+    try {
+      const url = await pathToDataUrl(img);
+      void run(url);
+    } catch (err) {
+      console.error('[OCR] 读取拖入图片失败:', err);
+    }
+  }, [run]);
+  const { isOver: ocrDropOver } = useNativeFileDrop(ocrDropRef, handleOcrPaths);
+
   // 预填充：来自文件行 / 选中图片（prefill 变化时自动识别）
   useEffect(() => {
     if (prefillDataUrl) {
@@ -900,16 +915,6 @@ function OcrWorkspace({ prefillDataUrl, onClose }: { prefillDataUrl: string | nu
     e.target.value = '';
   };
 
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(false);
-    const f = e.dataTransfer.files?.[0];
-    if (!f || !f.type.startsWith('image/')) return;
-    const r = new FileReader();
-    r.onload = () => void run(r.result as string);
-    r.readAsDataURL(f);
-  };
 
   const onPaste = (e: React.ClipboardEvent) => {
     const items = e.clipboardData.items;
@@ -952,13 +957,11 @@ function OcrWorkspace({ prefillDataUrl, onClose }: { prefillDataUrl: string | nu
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto p-3 flex flex-col gap-3">
         <div
+          ref={ocrDropRef}
           data-ocr-drop
           onClick={() => fileRef.current?.click()}
-          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={onDrop}
           onPaste={onPaste}
-          className={`rounded-lg border-2 border-dashed px-3 py-5 text-center cursor-pointer text-xs transition-colors flex-shrink-0 ${dragOver ? 'border-[var(--element-bg)] bg-[var(--element-muted)]' : 'border-[var(--element-border)] text-neutral-400 dark:text-stone-500 hover:border-[var(--element-bg)]'}`}
+          className={`rounded-lg border-2 border-dashed px-3 py-5 text-center cursor-pointer text-xs transition-colors flex-shrink-0 ${ocrDropOver ? 'border-[var(--element-bg)] bg-[var(--element-muted)]' : 'border-[var(--element-border)] text-neutral-400 dark:text-stone-500 hover:border-[var(--element-bg)]'}`}
         >
           {loading ? (
             <span className="inline-flex items-center gap-2 text-[var(--element-bg)]">

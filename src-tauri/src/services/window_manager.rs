@@ -748,15 +748,18 @@ pub async fn overlay_window_get_or_create(
     } else {
         p.resizable.unwrap_or(false)
     };
-    // 中转站浮窗 / 剪贴板浮窗必须关闭原生拖放，改由前端 HTML5 dragover/drop 处理：
-    // 否则原生拖放 handler 会拦截 DOM 拖放事件，导致文件拖入浮窗无法导入/同步主站，
-    // 且“拖拽悬停 OCR 按钮自动进入 OCR 页”也不会触发（DOM 收不到 dragenter/dragover）。
-    // profile.drag_drop_enabled 默认 true，但对这两个 label 强制关闭，避免任何调用方漏传该字段。
-    let drag_drop = if label == "floating-dropzone" || label == "floating-clipboard" {
-        false
-    } else {
-        p.drag_drop_enabled.unwrap_or(true)
-    };
+    // 拖放统一交给 wry 接管（drag_drop_enabled = true），与主窗口保持一致。
+    //
+    // 曾经对 floating-dropzone / floating-clipboard 强制关闭，理由是"原生 handler 会拦截
+    // DOM 拖放事件，导致文件拖入浮窗无法导入"。2026-11-02 在 Linux 上实测后改变结论：
+    //   1. 关闭时（WebKit 自己处理）**拖入图片会让整个窗口导航到该 file://**，
+    //      DOM 里的 preventDefault 拦不住 —— 浮窗直接变成一张图，只能重开进程；
+    //   2. 且 WebKitGTK 的 File 没有 .path，前端根本拿不到路径。
+    // 而 wry 的 handler 只在拖拽**带 file URI** 时返回 true 消费
+    // （见 wry 的 connect_drag_drop：只有 take_paths() 为 Some 才 drop_finish(true)），
+    // 非文件拖拽放行，所以应用内拖拽仍走 DOM 不受影响。
+    // 前端因此改为 useNativeFileDrop 拿真实路径，"悬停 OCR 按钮切页"用该 hook 的 isOver 还原。
+    let drag_drop = p.drag_drop_enabled.unwrap_or(true);
     let hidden = p.hidden.unwrap_or(false);
     let x = p.x.unwrap_or(-4000.0);
     let y = p.y.unwrap_or(-4000.0);

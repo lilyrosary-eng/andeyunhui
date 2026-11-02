@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, type CSSProperties } from 'react';
+import { useCallback, useEffect, useState, useRef, type CSSProperties } from 'react';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { beginOverlayDrag } from '@/lib/overlayDrag';
 import { listen } from '@tauri-apps/api/event';
@@ -8,6 +8,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
 import { TransferStationPanel, emitDropzoneChange } from '@/components/TransferStationPanel';
 import { api, type ImportedFile } from '@/lib/api';
+import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
+import { basename, pathToDataUrl } from '@/platform/nativeDropFiles';
 import {
   SOURCE_LANGS,
   TARGET_LANGS,
@@ -113,7 +115,21 @@ export function FloatingDropzoneView() {
   }, []);
 
   // 浮窗内拖入 / 粘贴文件 → 导入中转站（与主窗口拖放一致）
-  useEffect(() => {
+    // 文件拖入：wry 已接管文件拖拽（见 window_manager.rs 的 drag_drop 说明），
+  // DOM 的 drop 对文件不再触发，真实路径从 hook 拿。
+  const handleDroppedPaths = useCallback(async (paths: string[]) => {
+    for (const srcPath of paths) {
+      try {
+        const dataUrl = await pathToDataUrl(srcPath);
+        await api.addBytesToDropzone(dataUrl, basename(srcPath));
+      } catch (err) {
+        console.error('[浮窗] 导入失败:', err);
+      }
+    }
+  }, []);
+  useNativeFileDrop(null, handleDroppedPaths, true);
+
+useEffect(() => {
     const onDragEnter = (e: DragEvent) => {
       if (e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')) {
         draggingRef.current = true;
@@ -242,6 +258,16 @@ export function FloatingDropzoneView() {
 
   // OCR / 翻译 拓展模式：点击后展开浮窗为独立工作区（不局限于中转站已存文件）
   const [mode, setMode] = useState<'list' | 'ocr' | 'translate'>('list');
+
+  // 「拖文件悬停 OCR 按钮自动进入 OCR 页」：原来靠 DOM 的 dragenter/dragover，
+  // wry 接管后不再触发，改用 hook 的 isOver 还原。
+  const ocrBtnRef = useRef<HTMLButtonElement>(null);
+  const { isOver: ocrHover } = useNativeFileDrop(ocrBtnRef, () => {});
+  useEffect(() => {
+    if (ocrHover && mode !== 'ocr') void switchMode('ocr');
+  }, [ocrHover, mode]);
+
+
   const switchMode = async (m: 'list' | 'ocr' | 'translate') => {
     setMode(m);
     modeRef.current = m;
@@ -308,6 +334,7 @@ export function FloatingDropzoneView() {
           <Inbox size={13} /> 中转站
         </button>
         <button
+          ref={ocrBtnRef}
           data-ocr-trigger
           onClick={() => switchMode(mode === 'ocr' ? 'list' : 'ocr')}
           onDragEnter={(e) => {

@@ -1,11 +1,10 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { FileSearchPanel } from '@/components/FileSearchPanel';
 import { ResourceMonitor } from '@/components/ResourceMonitor';
 import { useI18n } from '@/lib/i18n';
 import { useTransfer } from '@/core/transfer/useTransfer';
 import { storage } from '@/core/storage';
-import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { isLinux } from '@/platform/isLinux';
+import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
 import { KEYS } from '@/core/storage/keys';
 
 // ======== 传输面板（主窗口风格，CSS 变量自适应主题）========
@@ -19,58 +18,44 @@ function TransferTab() {
     applyAlias, sendTo, confirmSend, addFiles,
   } = useTransfer();
 
-  // Windows 路径：WebView2 给 File 对象挂了非标准的 `.path`，能直接拿到真实路径。
-  // **Linux 下这里永远拿不到东西** —— WebKitGTK 的 File 没有 `.path`（标准 Web API 不暴露），
-  // 于是 `paths` 恒为空，被下面的 length 守卫静默吞掉（A10 同款「以为能用其实没接上」）。
-  // Linux 的真实入队走 useEffect 里的 webview 级 onDragDropEvent。
-  const handleDrop = useCallback((e: DragEvent) => {
-    e.preventDefault();
-    if (e.dataTransfer?.files) {
-      const paths: string[] = [];
-      for (const f of Array.from(e.dataTransfer.files)) {
-        const p = (f as unknown as { path?: string }).path;
-        if (p) paths.push(p);
-      }
-      if (paths.length) setStaged((prev) => Array.from(new Set([...prev, ...paths])));
-    }
+  // 文件拖拽由 wry 接管（dragDropEnabled: true）→ 走 useNativeFileDrop；
+  // 应用内拖拽（x-andeng-internal）wry 会返回 false 放行，仍走下面的 DOM drop。
+  const dropZoneRef = useRef<HTMLDivElement>(null);
+  const handlePaths = useCallback((paths: string[]) => {
+    (window as unknown as Record<string, unknown>).__andengDropConsumed = true;
+    setStaged((prev) => Array.from(new Set([...prev, ...paths])));
   }, [setStaged]);
+  const { isOver } = useNativeFileDrop(dropZoneRef, handlePaths);
+  // 告诉 App 的整窗兜底：传输页在，文件归我
+  useEffect(() => {
+    (window as unknown as Record<string, unknown>).__andengTransferActive = true;
+    return () => { (window as unknown as Record<string, unknown>).__andengTransferActive = false; };
+  }, []);
+
+  const handleDrop = useCallback((e: DragEvent) => {
+    // 只处理应用内拖拽；文件拖拽已被 wry 消费，不会走到这里
+    e.preventDefault();
+  }, []);
 
   const handleDragOver = useCallback((e: DragEvent) => {
     e.preventDefault();
   }, []);
 
   useEffect(() => {
-    window.addEventListener('drop', handleDrop);
-    window.addEventListener('dragover', handleDragOver);
-
-    // Linux 补一条真实路径通道：Tauri 的 webview 级拖放事件来自 GTK 的 drop 信号，
-    // payload.paths 是真实文件路径。两条路并存互不干扰——Linux 下 DOM drop 因没有
-    // `.path` 而不做事，Windows 下 onDragDropEvent 这条不注册。
-    // 本组件只在「传输」tab 挂载（见底部三元渲染），所以不需要再按坐标判定落点。
-    let unlisten: (() => void) | null = null;
-    if (isLinux()) {
-      void (async () => {
-        try {
-          unlisten = await getCurrentWebviewWindow().onDragDropEvent(({ payload }) => {
-            if (payload.type !== 'drop') return;
-            const paths = (payload.paths || []).filter((p): p is string => !!p);
-            if (paths.length) setStaged((prev) => Array.from(new Set([...prev, ...paths])));
-          });
-        } catch (err) {
-          console.error('[Transfer] 注册原生拖放失败:', err);
-        }
-      })();
-    }
-
+    // capture 阶段：必须早于 App.tsx 的冒泡监听，否则文件会先被送进中转站
+    window.addEventListener('drop', handleDrop, true);
+    window.addEventListener('dragover', handleDragOver, true);
     return () => {
-      window.removeEventListener('drop', handleDrop);
-      window.removeEventListener('dragover', handleDragOver);
-      unlisten?.();
+      window.removeEventListener('drop', handleDrop, true);
+      window.removeEventListener('dragover', handleDragOver, true);
     };
-  }, [handleDrop, handleDragOver, setStaged]);
+  }, [handleDrop, handleDragOver]);
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden main-panel-bg fade-in immersive-safe-top">
+    <div
+      ref={dropZoneRef}
+      className={`flex-1 flex flex-col h-full overflow-hidden main-panel-bg fade-in immersive-safe-top${isOver ? ' ring-2 ring-inset ring-[var(--element-color-raw)]' : ''}`}
+    >
       {/* 标题栏 */}
       <div className="flex items-center gap-3 px-6 pt-5 pb-2 shrink-0">
         <div className="w-10 h-10 rounded-xl bg-[var(--element-bg)]/10 flex items-center justify-center text-[var(--element-color-raw)] text-lg font-bold">

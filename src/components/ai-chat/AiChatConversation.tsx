@@ -1,6 +1,8 @@
 // 独立「AI 对话」模块 · 主区对话流 —— 大屏 UI，受控于上层共享的 useAiChat 实例。
 // 不持有状态，仅负责把 messages + busy + send 渲染成对话界面（与浮窗紧凑版 UI 解耦）。
-import { memo, useEffect, useState, useRef, useLayoutEffect, useMemo } from 'react';
+import { memo, useEffect, useState, useRef, useLayoutEffect, useMemo, useCallback } from 'react';
+import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
+import { pathToFile } from '@/platform/nativeDropFiles';
 import { invoke } from '@tauri-apps/api/core';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Send, Sparkles, Brain, ChevronDown, ChevronRight, ChevronLeft, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity, Square, Copy, Check, RefreshCw, ThumbsUp, ThumbsDown, Volume2, VolumeX } from 'lucide-react';
@@ -576,6 +578,16 @@ async function fileToChatDataUrl(f: File): Promise<string> {
     }
   };
 
+  // 文件拖入：wry 接管文件拖拽后 DOM drop 不再触发，路径从这里来，
+  // 再还原成 File 喂给已有的 intoPicked（图片/文本各自的分支不用改）。
+  const chatDropRef = useRef<HTMLDivElement>(null);
+  const handleChatPaths = useCallback(async (paths: string[]) => {
+    const settled = await Promise.all(paths.map((p) => pathToFile(p).catch(() => null)));
+    const files = settled.filter((f): f is File => Boolean(f));
+    if (files.length) intoPicked(files);
+  }, [intoPicked]);
+  useNativeFileDrop(chatDropRef, handleChatPaths);
+
   // 粘贴：图片 / 文件直接拾取；纯文本默认进 textarea
   const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const cd = e.clipboardData;
@@ -661,6 +673,7 @@ async function fileToChatDataUrl(f: File): Promise<string> {
 
   return (
     <div
+      ref={chatDropRef}
       className={shellClass}
       style={{
         paddingRight: traceOpen ? tracePanelWidth : 0,
