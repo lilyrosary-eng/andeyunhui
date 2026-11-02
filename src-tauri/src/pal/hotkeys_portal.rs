@@ -177,18 +177,41 @@ pub fn set_and_sync(app: &AppHandle, which: Which, value: String) -> Result<(), 
     save(app);
 
     static REG_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    // 启动阶段 setup 会连调 4 次（截图/剪贴板/中转站/收藏），把它们全部丢后台，
-    // 避免主窗口被 portal 授权框卡住；第 5 次起才是用户在设置里改键，同步等结果。
-    if REG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
-        let app = app.clone();
-        std::thread::spawn(move || {
-            if let Err(e) = sync(&app) {
-                log::warn!("[hotkeys] 启动阶段绑定全局热键失败: {e}");
-            }
-        });
+    // 启动阶段 setup 会连调 4 次（截图/剪贴板/中转站/收藏）。
+    // **只让第一次真正发起同步**：worker 那边有 300ms 合并窗口，会读到最终值。
+    // 原来 4 次各起一个线程 ⇒ 实测 4 个都在等授权框，3 个 30s 后误报「绑定失败」。
+    if REG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 0 {
         return Ok(());
     }
-    sync(app)
+    let app = app.clone();
+    std::thread::spawn(move || {
+        // 启动阶段**不设超时**：portal 的授权框是等人点的，用户可能过一两分钟才看到。
+        // 设 30s 超时只会产出误导性的「失败」日志（实测 15:30:24 报失败、15:31:43 其实成功了）。
+        if let Err(e) = sync_blocking(&app) {
+            log::warn!("[hotkeys] 绑定全局热键失败: {e}");
+        }
+    });
+    Ok(())
+}
+
+/// 不设超时的同步（只给「启动阶段」用：那时没有任何 UI 可以报错，只能等用户点授权框）。
+fn sync_blocking(app: &AppHandle) -> Result<(), String> {
+    ensure_worker(app);
+    let mut waited = 0u32;
+    let tx = loop {
+        if let Some(t) = CMD_TX.get() {
+            break t;
+        }
+        if waited >= 2000 {
+            return Err("热键后端未就绪（portal 线程未启动）".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        waited += 50;
+    };
+    let (rtx, rrx) = mpsc::channel();
+    tx.blocking_send(Cmd::Sync(rtx))
+        .map_err(|_| "热键后端已退出".to_string())?;
+    rrx.recv().map_err(|_| "热键后端异常退出".to_string())?
 }
 
 /// 把当前四个值整组提交给 portal。
