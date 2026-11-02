@@ -1314,7 +1314,7 @@ fn main() {
                 let quit = MenuItem::with_id(app, "tray-quit", "退出安得云荟", true, None::<&str>)?;
                 let sep = PredefinedMenuItem::separator(app)?;
                 let menu = Menu::with_items(app, &[&show, &sep, &quit])?;
-                TrayIconBuilder::new()
+                let built = TrayIconBuilder::new()
                     .icon(tray_icon)
                     .tooltip("安得云荟")
                     .menu(&menu)
@@ -1323,7 +1323,19 @@ fn main() {
                         "tray-quit" => tray_quit(app.clone()),
                         _ => {}
                     })
-                    .build(app)
+                    .build(app);
+                // ⚠ 必须让 menu / 菜单项活到进程结束。
+                //
+                // muda 在 GTK 上的 `impl Drop for Menu`
+                // （muda-0.19.3/src/platform_impl/gtk/mod.rs:69）会
+                // `drop_children_from_menu_and_destroy(...)` 再 `menu.destroy()` ——
+                // 把整个 GTK 菜单连同子项一起销毁。而这些都是 setup 里的普通 Rust 值，
+                // setup 一返回就 drop ⇒ 菜单项变成空壳：
+                // D-Bus 的 GetLayout/GetGroupProperties 仍能读到干净的 label（属性缓存在
+                // libappindicator 侧），界面上却是「两个空白按钮」（2026-11-02 实测定位）。
+                // Tauri 没有提供 keep-alive 的入口，这里按进程级单例主动泄漏（只泄漏一次）。
+                std::mem::forget((menu, show, sep, quit));
+                built
             };
 
             #[cfg(not(target_os = "linux"))]
