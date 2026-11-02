@@ -11,7 +11,7 @@ use tauri::http::{Response, StatusCode};
 // 系统托盘仅桌面概念：TrayIconBuilder / MouseButton / MouseButtonState 在 Android/iOS 不存在。
 // main.rs 是桌面二进制（lib.rs:8-9），本文件整体仅在桌面编译；移动端走 lib crate 的 android 模块。
 // 此处按 T2 平台隔离收尾，把托盘专属 API 限定到桌面（#android-v1）。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "linux")))]
 use tauri::tray::TrayIconBuilder;
 // Linux 不走 Click 事件（libappindicator 不派发），改用原生菜单，故这两个类型不用。
 #[cfg(all(not(target_os = "linux"), not(any(target_os = "android", target_os = "ios"))))]
@@ -577,6 +577,7 @@ fn is_supported_file_assoc(arg: &str) -> Option<std::path::PathBuf> {
         None
     }
 }
+#[cfg(not(target_os = "linux"))]
 use andeyunhui_lib::TrayHolder;
 use andeyunhui_lib::services::lyrics_service;
 use andeyunhui_lib::services::clipboard_history;
@@ -1282,6 +1283,7 @@ fn main() {
             {
             // 托盘图标：优先使用默认窗口图标；若极端情况下为 None，则从资源目录
             // 回退到实际图标文件，避免回退成全透明不可见图标导致"无法交互"
+            #[cfg(not(target_os = "linux"))]
             let tray_icon = app.default_window_icon().cloned().unwrap_or_else(|| {
                 let candidates: Vec<std::path::PathBuf> = app
                     .path()
@@ -1308,35 +1310,20 @@ fn main() {
             // —— 表现就是用户说的「Linux 没有托盘」。Linux 改用原生菜单，只保留两项，
             // 与 `TrayMenu.tsx` 里的 summon / quit 对齐。
             #[cfg(target_os = "linux")]
-            let tray_result = {
-                use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-                let show = MenuItem::with_id(app, "tray-summon", "显示主窗口", true, None::<&str>)?;
-                let quit = MenuItem::with_id(app, "tray-quit", "退出安得云荟", true, None::<&str>)?;
-                let sep = PredefinedMenuItem::separator(app)?;
-                let menu = Menu::with_items(app, &[&show, &sep, &quit])?;
-                let built = TrayIconBuilder::new()
-                    .icon(tray_icon)
-                    .tooltip("安得云荟")
-                    .menu(&menu)
-                    .on_menu_event(|app, ev| match ev.id().as_ref() {
-                        "tray-summon" => tray_summon_main(app.clone()),
-                        "tray-quit" => tray_quit(app.clone()),
-                        _ => {}
-                    })
-                    .build(app);
-                // ⚠ 必须让 menu / 菜单项活到进程结束。
-                //
-                // muda 在 GTK 上的 `impl Drop for Menu`
-                // （muda-0.19.3/src/platform_impl/gtk/mod.rs:69）会
-                // `drop_children_from_menu_and_destroy(...)` 再 `menu.destroy()` ——
-                // 把整个 GTK 菜单连同子项一起销毁。而这些都是 setup 里的普通 Rust 值，
-                // setup 一返回就 drop ⇒ 菜单项变成空壳：
-                // D-Bus 的 GetLayout/GetGroupProperties 仍能读到干净的 label（属性缓存在
-                // libappindicator 侧），界面上却是「两个空白按钮」（2026-11-02 实测定位）。
-                // Tauri 没有提供 keep-alive 的入口，这里按进程级单例主动泄漏（只泄漏一次）。
-                std::mem::forget((menu, show, sep, quit));
-                built
-            };
+            {
+                // 不走 Tauri 的 TrayIconBuilder：muda 的菜单项用自定义 GtkBox 装 label，
+                // GNOME 的 AppIndicator 扩展会把它渲染成空白按钮（见 pal/tray_linux.rs）。
+                let ah1 = app.handle().clone();
+                let ah2 = app.handle().clone();
+                if let Err(e) = andeyunhui_lib::tray_linux::setup(
+                    app.handle(),
+                    "andeyunhui",
+                    move || tray_summon_main(ah1.clone()),
+                    move || tray_quit(ah2.clone()),
+                ) {
+                    eprintln!("[Tray] Linux 托盘创建失败（已跳过，app 继续启动）: {e}");
+                }
+            }
 
             #[cfg(not(target_os = "linux"))]
             let tray_result = TrayIconBuilder::new()
@@ -1365,6 +1352,7 @@ fn main() {
                 })
                 .build(app);
 
+            #[cfg(not(target_os = "linux"))]
             let tray = match tray_result {
                 Ok(t) => t,
                 Err(e) => {
@@ -1375,6 +1363,7 @@ fn main() {
                     return Ok(());
                 }
             };
+            #[cfg(not(target_os = "linux"))]
             app.manage(TrayHolder(tray));
             }
             app.manage(std::sync::Mutex::new(andeyunhui_lib::screenshot::ScreenshotData::default()));

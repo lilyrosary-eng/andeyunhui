@@ -99,6 +99,12 @@ pub mod mpris_player;
 #[path = "pal/hotkeys_portal.rs"]
 pub mod hotkeys_portal;
 
+/// Linux 原生托盘（libappindicator + gtk-rs）。
+/// 绕开 tauri/muda：muda 用自定义 GtkBox 装 label，GNOME 的 AppIndicator 扩展会渲染成空白按钮。
+#[cfg(target_os = "linux")]
+#[path = "pal/tray_linux.rs"]
+pub mod tray_linux;
+
 /// Linux 本地媒体 HTTP 服务（带 Range），解决 WebKitGTK 媒体加载器
 /// 不接管 asset:// 自定义 scheme、而整首读成 blob 又会撑爆 page cache 的问题。
 #[cfg(target_os = "linux")]
@@ -126,5 +132,11 @@ pub struct TrayModeState {
 }
 
 /// 托盘图标持有者：防止 TrayIcon 被 drop 导致图标消失（仅桌面）。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "linux")))]
 pub struct TrayHolder(pub tauri::tray::TrayIcon);
+
+/// Linux：真正的托盘由 `pal::tray_linux`（libappindicator + gtk-rs）持有，
+/// 那里已经 `mem::forget` 到进程结束。这里留一个无字段占位类型，
+/// 让 `manage` / `state` 相关的代码在两个平台保持同形。
+#[cfg(target_os = "linux")]
+pub struct TrayHolder;

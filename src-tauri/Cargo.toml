@@ -311,6 +311,12 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 gtk = "0.18"
 gdk = "0.18"
 cairo-rs = "0.18"
+# 托盘：直接调 libayatana-appindicator，绕开 tauri/muda 的菜单实现。
+# 起因：muda 在 GTK 上用 `MenuItem::builder().child(GtkBox{Image+AccelLabel})`，
+# 菜单项没有 GTK 的 label 属性，GNOME 的 AppIndicator 扩展渲染成空白按钮
+# （2026-11-02 实测；同环境下用 `Gtk.MenuItem(label=...)` 的 omen-tray 正常）。
+# 版本与 tray-icon 依赖树里的保持一致（0.9），不引入第二份 GTK 绑定。
+libappindicator = "0.9"
 # souvlaki 仅保留给非 Linux 平台（macOS 后端）使用
 souvlaki = "0.8"
 x11 = { version = "2.21.0", features = ["xlib", "xinerama"] }
