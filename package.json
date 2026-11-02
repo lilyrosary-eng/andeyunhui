@@ -28,7 +28,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "dev-env.bat && tauri",
-    "build:linux": "bash scripts/build-linux.sh",
+    "build:linux": "tauri build --bundles deb",
     "postinstall": "node scripts/fix-node-modules.mjs",
     "lint": "eslint src --ext .ts,.tsx",
     "lint:fix": "eslint src --ext .ts,.tsx --fix",
@@ -37,7 +37,8 @@
     "test:watch": "vitest",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --lib --features test-manifest",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml",
-    "check:capabilities": "node scripts/check-plugin-capabilities.mjs"
+    "check:capabilities": "node scripts/check-plugin-capabilities.mjs",
+    "dev:linux": "tauri dev"
   },
   "dependencies": {
     "@radix-ui/react-context-menu": "^2.2.0",
