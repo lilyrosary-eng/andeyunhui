@@ -56,7 +56,6 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("load_reading_cache", "fs.read"),
     ("read_track_metadata", "fs.read"),
     ("search_content", "fs.read"),
-    ("sheet_read_xlsx", "fs.read"),
     ("open_book", "fs.read"),
     ("scan_image_root", "fs.read"),
     ("scan_music_root", "fs.read"),
@@ -141,7 +140,6 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("debug_flags", "system"),
     ("check_ffmpeg", "system"),
     ("run_shell_command", "system"),
-    ("sheet_calc", "data"),
     // ---- 数据 / 配置 ----
     ("get_blacklist_paths", "data"),
     ("add_to_blacklist", "data"),
