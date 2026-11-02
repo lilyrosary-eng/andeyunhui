@@ -890,7 +890,8 @@ export default function Capsule() {
           alwaysOnTop: true,
           resizable: false,
           skipTaskbar: true,
-          dragDropEnabled: false,
+          // 交给 wry 接管（与主窗一致），理由见 App.tsx 同名处与 platform/useNativeFileDrop.ts
+          dragDropEnabled: true,
         };
         const w = await ensureOverlayWindow(label, `index.html?floating=${kind}`, profile);
         if (w) {

@@ -230,9 +230,10 @@ function App() {
         transparent: true,
         alwaysOnTop: true,
         resizable: false,
-        // 关闭 Tauri 原生拖放，改由前端 HTML5 dragover/drop 处理，
-        // 否则原生拖放会吞掉 drop 事件，导致文件拖入浮窗无法导入 / 同步主站。
-        dragDropEnabled: false,
+        // 交给 wry 接管（与主窗一致）。曾经这里写 false 让前端走 HTML5 drogover/drop，
+        // 实测代价是：拖图片会让浮窗直接导航到 file://（整窗变图、只能重开），
+        // 且 WebKitGTK 的 File 没有 .path 拿不到路径。文件拖入改走 useNativeFileDrop。
+        dragDropEnabled: true,
       });
       if (w) {
         await w.show();
