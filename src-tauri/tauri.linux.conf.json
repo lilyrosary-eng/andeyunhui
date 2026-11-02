@@ -13,8 +13,8 @@
       "deb": {
         "desktopTemplate": "linux/andeyunhui.desktop",
         "files": {
-          "linux/gnome-extension/extension.js": "/usr/share/gnome-shell/extensions/andeyunhui-pin@rosary/extension.js",
-          "linux/gnome-extension/metadata.json": "/usr/share/gnome-shell/extensions/andeyunhui-pin@rosary/metadata.json"
+          "/usr/share/gnome-shell/extensions/andeyunhui-pin@rosary/extension.js": "linux/gnome-extension/extension.js",
+          "/usr/share/gnome-shell/extensions/andeyunhui-pin@rosary/metadata.json": "linux/gnome-extension/metadata.json"
         },
         "depends": [
           "libwebkit2gtk-4.1-0",
