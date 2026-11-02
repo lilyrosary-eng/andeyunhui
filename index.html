@@ -9,7 +9,19 @@
       /* 防白屏：脚本执行前先给页面一个底色（浅色默认，深色由预加载脚本切换） */
       html, body { margin: 0; height: 100%; background: #f4f2ec; }
       body { overflow: hidden; }
+      /* 主窗要圆角 ⇒ 必须让四角真的透出桌面（浮窗一直这么干，主窗此前是不透明的）。
+         判断放在下面最先执行的脚本里，赶在首帧绘制前把属性挂上。 */
+      html[data-window="main"], html[data-window="main"] body { background: transparent; }
     </style>
+    <script>
+      // 主窗标记：只有主窗需要"透明 + 圆角"，浮窗/托盘菜单/截图覆盖层各自已有处理。
+      (function () {
+        var q = window.location.search || '';
+        if (q.indexOf('floating=') === -1 && q.indexOf('overlay=') === -1) {
+          document.documentElement.dataset.window = 'main';
+        }
+      })();
+    </script>
     <script>
       // ===== 定制加载层（哥特风 · 浅/深双主题） =====
       // 设计目标（按用户要求）：

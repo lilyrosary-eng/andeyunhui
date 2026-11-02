@@ -33,6 +33,7 @@ import { dispatchOpenWith, registerOpenWithListener } from '../plugins/_shared/o
 import { PhysicalPosition } from '@tauri-apps/api/dpi';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
 import { basename, pathToDataUrl } from '@/platform/nativeDropFiles';
 import { EVENTS } from '@/core/events/schema';
@@ -631,6 +632,25 @@ function App() {
   }, [dispatchOpenWith]);
   // 整窗兜底：不判坐标，落到任何位置的拖入都由这里收
   useNativeFileDrop(null, handleNativePaths, true);
+
+  // 主窗圆角：最大化/全屏时去掉圆角，否则四角会露出桌面（见 index.css 末尾规则）
+  useEffect(() => {
+    const w = getCurrentWindow();
+    let unlistenResize: (() => void) | undefined;
+    let unlistenFs: (() => void) | undefined;
+    const sync = async () => {
+      try {
+        const [max, fs] = await Promise.all([w.isMaximized(), w.isFullscreen()]);
+        document.documentElement.classList.toggle('window-maximized', max || fs);
+      } catch { /* 窗口已销毁等，忽略 */ }
+    };
+    void sync();
+    void w.onResized(() => void sync()).then((f) => { unlistenResize = f; }).catch(() => {});
+    return () => {
+      unlistenResize?.();
+      unlistenFs?.();
+    };
+  }, []);
 
   // ====== 中转站回调 ======
   const handleOpenReadableFile = useCallback((file: { originalName: string }, fileContent: string) => {

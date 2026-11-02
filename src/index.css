@@ -1011,3 +1011,19 @@ html.is-linux *::after {
   pointer-events: none;
   z-index: 1;
 }
+/* ===== 主窗圆角（2026-11-02） =====
+   窗口在 tauri.conf.json 里 transparent: true，且 index.html 把主窗的
+   html/body 背景置为透明 —— 这样 #root 的圆角才真的"挖掉"四个角露出桌面，
+   而不是在圆角外留一圈不透明的直角。
+   浮窗不走这条规则（它们各自已有自己的圆角/透明处理）。 */
+html[data-window="main"] #root {
+  height: 100vh;
+  background: var(--background);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+/* 最大化/全屏时去掉圆角：否则四个角会露出桌面，看着像没铺满 */
+html[data-window="main"].window-maximized #root {
+  border-radius: 0;
+}
