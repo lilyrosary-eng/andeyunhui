@@ -4,6 +4,8 @@ import { ResourceMonitor } from '@/components/ResourceMonitor';
 import { useI18n } from '@/lib/i18n';
 import { useTransfer } from '@/core/transfer/useTransfer';
 import { storage } from '@/core/storage';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { isLinux } from '@/platform/isLinux';
 import { KEYS } from '@/core/storage/keys';
 
 // ======== 传输面板（主窗口风格，CSS 变量自适应主题）========
@@ -17,14 +19,17 @@ function TransferTab() {
     applyAlias, sendTo, confirmSend, addFiles,
   } = useTransfer();
 
+  // Windows 路径：WebView2 给 File 对象挂了非标准的 `.path`，能直接拿到真实路径。
+  // **Linux 下这里永远拿不到东西** —— WebKitGTK 的 File 没有 `.path`（标准 Web API 不暴露），
+  // 于是 `paths` 恒为空，被下面的 length 守卫静默吞掉（A10 同款「以为能用其实没接上」）。
+  // Linux 的真实入队走 useEffect 里的 webview 级 onDragDropEvent。
   const handleDrop = useCallback((e: DragEvent) => {
     e.preventDefault();
     if (e.dataTransfer?.files) {
       const paths: string[] = [];
       for (const f of Array.from(e.dataTransfer.files)) {
-        if ((f as unknown as { path?: string }).path) {
-          paths.push((f as unknown as { path: string }).path);
-        }
+        const p = (f as unknown as { path?: string }).path;
+        if (p) paths.push(p);
       }
       if (paths.length) setStaged((prev) => Array.from(new Set([...prev, ...paths])));
     }
@@ -37,11 +42,32 @@ function TransferTab() {
   useEffect(() => {
     window.addEventListener('drop', handleDrop);
     window.addEventListener('dragover', handleDragOver);
+
+    // Linux 补一条真实路径通道：Tauri 的 webview 级拖放事件来自 GTK 的 drop 信号，
+    // payload.paths 是真实文件路径。两条路并存互不干扰——Linux 下 DOM drop 因没有
+    // `.path` 而不做事，Windows 下 onDragDropEvent 这条不注册。
+    // 本组件只在「传输」tab 挂载（见底部三元渲染），所以不需要再按坐标判定落点。
+    let unlisten: (() => void) | null = null;
+    if (isLinux()) {
+      void (async () => {
+        try {
+          unlisten = await getCurrentWebviewWindow().onDragDropEvent(({ payload }) => {
+            if (payload.type !== 'drop') return;
+            const paths = (payload.paths || []).filter((p): p is string => !!p);
+            if (paths.length) setStaged((prev) => Array.from(new Set([...prev, ...paths])));
+          });
+        } catch (err) {
+          console.error('[Transfer] 注册原生拖放失败:', err);
+        }
+      })();
+    }
+
     return () => {
       window.removeEventListener('drop', handleDrop);
       window.removeEventListener('dragover', handleDragOver);
+      unlisten?.();
     };
-  }, [handleDrop, handleDragOver]);
+  }, [handleDrop, handleDragOver, setStaged]);
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden main-panel-bg fade-in immersive-safe-top">
