@@ -9,7 +9,7 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { TransferStationPanel, emitDropzoneChange } from '@/components/TransferStationPanel';
 import { api, type ImportedFile } from '@/lib/api';
 import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
-import { basename, pathToDataUrl } from '@/platform/nativeDropFiles';
+import { basename, extOf, pathToDataUrl } from '@/platform/nativeDropFiles';
 import {
   SOURCE_LANGS,
   TARGET_LANGS,
@@ -90,6 +90,9 @@ const taStyle: CSSProperties = {
  *
  * 浮窗自身也支持拖入 / 粘贴文件（走与主窗口一致的 addBytesToDropzone），并暴露文本文件的「打开」按钮。
  */
+/** OCR 拖入只认图片（按扩展名） */
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic', 'heif', 'tiff']);
+
 export function FloatingDropzoneView() {
   // 是否正在从外部拖入文件（OS 拖放进行中）。用 ref 而非 state，避免触发重渲染。
   // 关键：拖放进行中调用 win.setSize 会让 Windows 取消本次拖放，故切换模式时需跳过 resize。
@@ -118,6 +121,10 @@ export function FloatingDropzoneView() {
     // 文件拖入：wry 已接管文件拖拽（见 window_manager.rs 的 drag_drop 说明），
   // DOM 的 drop 对文件不再触发，真实路径从 hook 拿。
   const handleDroppedPaths = useCallback(async (paths: string[]) => {
+    // 落在 OCR 拖放区时由 OcrBox 自己处理（识别），别在这里抢去导入中转站。
+    // 用 hover 标记而不是 mode：drop 前必有 over，标记此时仍是 true；
+    // 而两个 hook 都会收到 drop，整窗这个注册更早、先执行，所以读得到。
+    if ((window as unknown as Record<string, unknown>).__andengOcrHover) return;
     for (const srcPath of paths) {
       try {
         const dataUrl = await pathToDataUrl(srcPath);
@@ -263,6 +270,7 @@ useEffect(() => {
   // wry 接管后不再触发，改用 hook 的 isOver 还原。
   const ocrBtnRef = useRef<HTMLButtonElement>(null);
   const { isOver: ocrHover } = useNativeFileDrop(ocrBtnRef, () => {});
+
   useEffect(() => {
     if (ocrHover && mode !== 'ocr') void switchMode('ocr');
   }, [ocrHover, mode]);
@@ -401,7 +409,6 @@ function OcrBox() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastDataUrl, setLastDataUrl] = useState<string | null>(null);
-  const [dragOver, setDragOver] = useState(false);
   const [mode, setMode] = useState<'auto' | 'local'>('auto');
   const [enhance, setEnhance] = useState(false);
   const [enhanceLoading, setEnhanceLoading] = useState(false);
@@ -497,6 +504,22 @@ function OcrBox() {
     }
   };
 
+  // 拖放区：wry 接管后 DOM drop 对文件不再触发，图片走 hook 拿真实路径
+  const ocrDropRef = useRef<HTMLDivElement>(null);
+  const { isOver: ocrDropOver } = useNativeFileDrop(ocrDropRef, async (paths) => {
+    const img = paths.find((pp) => IMAGE_EXTS.has(extOf(pp)));
+    if (!img) return;
+    try {
+      run(await pathToDataUrl(img));
+    } catch (err) {
+      console.error('[浮窗 OCR] 读取拖入图片失败:', err);
+    }
+  });
+  // 让外层整窗兜底让路（drop 前必有 over，此时标记为 true）
+  useEffect(() => {
+    (window as unknown as Record<string, unknown>).__andengOcrHover = ocrDropOver;
+  }, [ocrDropOver]);
+
   const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     if (!f) return;
@@ -506,16 +529,6 @@ function OcrBox() {
     e.target.value = '';
   };
 
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(false);
-    const f = e.dataTransfer.files?.[0];
-    if (!f || !f.type.startsWith('image/')) return;
-    const r = new FileReader();
-    r.onload = () => run(r.result as string);
-    r.readAsDataURL(f);
-  };
 
   const store = async () => {
     if (!lastDataUrl) return;
@@ -529,23 +542,18 @@ function OcrBox() {
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8, padding: 10, minHeight: 0 }}>
       <div
+        ref={ocrDropRef}
         data-ocr-drop
         onClick={() => fileRef.current?.click()}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragOver(true);
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={onDrop}
         style={{
-          border: `1.5px dashed ${dragOver ? '#6eaf87' : 'rgba(110,175,135,0.5)'}`,
+          border: `1.5px dashed ${ocrDropOver ? '#6eaf87' : 'rgba(110,175,135,0.5)'}`,
           borderRadius: 12,
           padding: '18px 12px',
           textAlign: 'center',
           cursor: 'pointer',
           color: 'rgba(35,64,47,0.7)',
           fontSize: 12,
-          background: dragOver ? 'rgba(110,175,135,0.12)' : 'transparent',
+          background: ocrDropOver ? 'rgba(110,175,135,0.12)' : 'transparent',
           flexShrink: 0,
         }}
       >
