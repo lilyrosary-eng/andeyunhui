@@ -1022,6 +1022,13 @@ html.is-linux *::after {
    内部组件大量使用 100vh/100vw，任何内缩都会造成溢出与错位（已实测）。
    这里只保留内容层的圆角与裁切：窗口仍是矩形，但四角处的内容被裁圆，
    与窗口底色（同色）融为一体，视觉上接近直角，不会错位。 */
+/* 窗口底色必须和 #root 完全一致：index.html 里铺的是 #f4f2ec（米色），
+   而 #root 用的是 --background（浅色主题下是纯白 oklch(1 0 0)）。
+   两者不同 ⇒ #root 的圆角/边缘露出的是米色，看起来像"外面套了个方框"。 */
+html[data-window="main"], html[data-window="main"] body {
+  background: var(--background);
+}
+
 html[data-window="main"] #root {
   height: 100vh;
   background: var(--background);
