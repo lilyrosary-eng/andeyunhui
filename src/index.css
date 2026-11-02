@@ -1016,27 +1016,32 @@ html.is-linux *::after {
    html/body 背景置为透明 —— 这样 #root 的圆角才真的"挖掉"四个角露出桌面，
    而不是在圆角外留一圈不透明的直角。
    浮窗不走这条规则（它们各自已有自己的圆角/透明处理）。 */
-/* ===== 主窗圆角（2026-11-02 收敛版） =====
-   Linux/Wayland 无法做到窗口真透明（试过 6 轮，残留的方形底在 WebKitWebView 的
-   合成结果里，应用层够不到）。因此不再给窗口加 padding/阴影 ——
-   内部组件大量使用 100vh/100vw，任何内缩都会造成溢出与错位（已实测）。
-   这里只保留内容层的圆角与裁切：窗口仍是矩形，但四角处的内容被裁圆，
-   与窗口底色（同色）融为一体，视觉上接近直角，不会错位。 */
-/* 窗口底色必须和 #root 完全一致：index.html 里铺的是 #f4f2ec（米色），
-   而 #root 用的是 --background（浅色主题下是纯白 oklch(1 0 0)）。
-   两者不同 ⇒ #root 的圆角/边缘露出的是米色，看起来像"外面套了个方框"。 */
-html[data-window="main"], html[data-window="main"] body {
-  background: var(--background);
-}
-
+/* ===== 主窗圆角（2026-11-02 · 按浮岛的结构重做） =====
+   之前一直把圆角加在 #root 上，而 #root 自己铺着不透明背景 ⇒ 圆角外露的就是它自己，
+   怎么调都是方的。浮岛能透出桌面，是因为它「根容器透明、各块自己画背景」。
+   这里改成同样的结构：
+     窗口(transparent) → html/body(transparent) → #root(transparent)
+       → App 根容器（main-panel-bg，真正有背景的那层）← 圆角加在这
+   于是圆角外一路透明到窗口，露出桌面。 */
 html[data-window="main"] #root {
   height: 100vh;
-  background: var(--background);
-  border-radius: 16px;
-  overflow: hidden;
-  position: relative;
+  background: transparent;
 }
 
-html[data-window="main"].window-maximized #root {
+/* App 根容器：真正承载背景与圆角的那一层。
+   背景用半透明，和浮岛（rgba(208,232,214,0.5)）同一个思路 ——
+   下面一路透明到桌面，这层半透明色才会"轻"，而不是一块实心板。
+   color-mix 让深浅主题都自动跟随 --background。 */
+html[data-window="main"] #root > div {
+  height: 100vh;
+  border-radius: 16px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--background) 96%, transparent) !important;
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.10),
+    0 12px 40px rgba(0, 0, 0, 0.18);
+}
+
+html[data-window="main"].window-maximized #root > div {
   border-radius: 0;
 }

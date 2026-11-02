@@ -6,11 +6,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>安得云荟</title>
     <style>
-      /* 防白屏：脚本执行前先给页面一个底色（浅色默认，深色由预加载脚本切换）。
-         主窗的"曲线圆角"靠窗口底色 + 内嵌卡片实现（见 index.css 末尾），
-         因此这里不能再置透明 —— 透明会让窗口露出黑底/桌面。 */
+      /* 防白屏：脚本执行前先给页面一个底色（浅色默认，深色由预加载脚本切换）。 */
       html, body { margin: 0; height: 100%; background: #f4f2ec; }
       body { overflow: hidden; }
+      /* 主窗：三层透明（窗口 → html/body → #root），圆角加在真正有背景的
+         App 根容器上。浮岛一直是这个结构，所以它的圆角能透出桌面。 */
+      html[data-window="main"], html[data-window="main"] body { background: transparent; }
     </style>
     <script>
       // 主窗标记：只有主窗需要"透明 + 圆角"，浮窗/托盘菜单/截图覆盖层各自已有处理。
