@@ -1019,8 +1019,12 @@ html.is-linux *::after {
 html[data-window="main"] #root {
   height: 100vh;
   background: var(--background);
-  border-radius: var(--radius);
+  /* 10px(--radius) 在 1300x740 的窗口上几乎看不出，单独用大一点的半径 */
+  border-radius: 16px;
   overflow: hidden;
+  /* 让标题栏（ImmersiveChrome，原本是 fixed）改用 absolute 后能相对这里定位，
+     从而被上面的 overflow:hidden + 圆角裁掉 */
+  position: relative;
 }
 
 /* 最大化/全屏时去掉圆角：否则四个角会露出桌面，看着像没铺满 */

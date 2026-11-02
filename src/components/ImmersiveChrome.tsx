@@ -23,7 +23,7 @@ export function ImmersiveChrome() {
   const setImmersive = useAppStore(s => s.setImmersive);
 
   return (
-    <div className="group/chrome pointer-events-none fade-in fixed inset-x-0 top-0 z-[60] flex h-[38px] items-center justify-between select-none">
+    <div className="group/chrome pointer-events-none fade-in absolute inset-x-0 top-0 z-[60] flex h-[38px] items-center justify-between select-none">
       {/* 拖拽条：铺满上沿，位于 logo 与控制键之下。鼠标移入整条悬浮带时，这里浮出白色衬底，
           与控制键同步出现/淡出（同一个 group hover 触发，无需 JS） */}
       <div
