@@ -12,9 +12,14 @@ import { EVENTS } from '@/core/events/schema';
 // 与主编辑器共用同一套 Markdown 渲染与样式注入：浮窗是独立 webview，样式得自己注入一次。
 // 打包版 CSP 会拦掉动态 <style>，所以只能复用 injectMarkdownStyles（它走构造样式表）。
 import { renderMarkdown, injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
+import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
+import { basename, extOf, pathToText, pathToDataUrl } from '@/platform/nativeDropFiles';
 
 const appWindow = getCurrentWebviewWindow();
 const AUTO_SAVE_MS = 1000;
+
+/** 拖入时按扩展名判断是否图片（图片走中转站落地 + markdown 引用） */
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic', 'heif']);
 
 /** 浮窗只有单栏，故只保留两种模式（不提供主编辑器那种「双栏」）。 */
 type FloatMode = 'edit-only' | 'preview-only';
@@ -49,6 +54,29 @@ export function FloatingNoteView() {
   });
   const [title, setTitle] = useState(() => t('common.loading'));
   const [content, setContent] = useState('');
+
+  // 拖入文件/图片：浮窗本来没有这个能力（Windows 上也没有，不是迁移丢的）。
+  // 文件拖拽由 wry 接管后 DOM drop 不再触发，路径从 hook 拿；
+  // 追加到 content 后由既有的 1s 防抖自动保存落盘。
+  const dropRef = useRef<HTMLDivElement>(null);
+  const handleDropPaths = useCallback(async (paths: string[]) => {
+    const parts: string[] = [];
+    for (const srcPath of paths) {
+      const name = basename(srcPath);
+      try {
+        if (IMAGE_EXTS.has(extOf(srcPath))) {
+          const ref = await api.addImageBytesToDropzone(await pathToDataUrl(srcPath), name);
+          parts.push(`\n![${name}](${ref})\n`);
+        } else {
+          parts.push(`\n${await pathToText(srcPath)}\n`);
+        }
+      } catch (err) {
+        logger.warn('[FloatingNoteView] 拖入处理失败:', name, err);
+      }
+    }
+    if (parts.length) setContent((prev) => prev + parts.join(''));
+  }, []);
+  useNativeFileDrop(dropRef, handleDropPaths);
   const [isPinned, setIsPinned] = useState(false);
   const [isFixed, setIsFixed] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -245,6 +273,7 @@ export function FloatingNoteView() {
 
   return (
     <div
+      ref={dropRef}
       className={`flex flex-col h-screen rounded-2xl border border-white/40 shadow-lg overflow-hidden ${isFixed ? 'pointer-events-none' : ''}`}
       style={{
         background: NOTE_GRADIENT,
