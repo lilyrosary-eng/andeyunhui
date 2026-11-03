@@ -25,6 +25,8 @@ export interface NeteaseSidebarProps {
   onSelectTemp: (temp: NeteaseTempItem) => void;
   onSelectUserPlaylist: (playlist: NeteasePlaylistItem) => void;
   onCloseNetease: () => void;
+  /** 打开模块抽屉（标题行「网络」入口） */
+  onOpenModuleDrawer?: () => void;
   onOpenModuleSettings?: () => void;
   onOpenStats?: () => void;
   statsActive?: boolean;
@@ -44,6 +46,7 @@ export default function NeteaseSidebar({
   onSelectTemp,
   onSelectUserPlaylist,
   onCloseNetease,
+  onOpenModuleDrawer,
   onOpenModuleSettings,
   onOpenStats,
   statsActive,
@@ -74,6 +77,7 @@ export default function NeteaseSidebar({
     onSelectLiked,
     showUserCover: false, // 网易云用户歌单为纯文字行，不显示封面/占位图（对齐母本布局）
     onClose: onCloseNetease,
+    onOpenModuleDrawer,
     onOpenModuleSettings,
     onOpenStats,
     statsActive,

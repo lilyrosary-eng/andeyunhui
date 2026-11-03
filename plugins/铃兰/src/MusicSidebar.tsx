@@ -2,6 +2,7 @@
 import React from "react";
 // 音乐侧边栏 — 一级导航：歌单列表
 import { T, useLang } from '../../_shared/pluginRuntime';
+import { CloudIcon } from '../../_shared/icons';
 const { useState, useCallback } = React;
 const { ModuleSidebarShell, SecondaryNavShell, BarChart3, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = window.__HOST_UI__ || {};
 
@@ -31,6 +32,8 @@ interface MusicSidebarProps {
   onRenamePlaylist?: (playlist: Playlist, newName: string) => void;
   onDeletePlaylist?: (playlist: Playlist) => void;
   onOpenModuleSettings?: () => void;
+  /** 打开模块抽屉（「网络」入口），与视频/AI 对话模块统一放在侧栏标题行 */
+  onOpenModuleDrawer?: () => void;
   onOpenStats?: () => void;
   statsActive?: boolean;
   searchQuery?: string;
@@ -72,7 +75,7 @@ function PlusIcon() {
   });
 }
 
-export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, onSelectFolder, onCreatePlaylist, onRenamePlaylist, onDeletePlaylist, onOpenModuleSettings, onOpenStats, statsActive, searchQuery, onSearchChange }: MusicSidebarProps) {
+export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, onSelectFolder, onCreatePlaylist, onRenamePlaylist, onDeletePlaylist, onOpenModuleSettings, onOpenModuleDrawer, onOpenStats, statsActive, searchQuery, onSearchChange }: MusicSidebarProps) {
   useLang();
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [showNewInput, setShowNewInput] = useState(false);
@@ -172,6 +175,18 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
       })
     : null;
 
+  // 标题行右侧「网络」入口：与视频/AI 对话模块统一槽位
+  const titleActions = onOpenModuleDrawer
+    ? React.createElement('button', {
+        onClick: onOpenModuleDrawer,
+        title: T('music.moduleDrawer.title'),
+        className: 'btn-press flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)] transition-colors',
+      }, [
+        React.createElement(CloudIcon, { key: 'ico', size: 15 }),
+        React.createElement('span', { key: 'label' }, T('music.moduleDrawer.title')),
+      ])
+    : undefined;
+
   const actionItems = React.createElement(React.Fragment, null,
     React.createElement('div', { className: 'border-t border-neutral-200/30 dark:border-stone-700/30 mt-3 pt-3 space-y-1' },
       React.createElement('button', {
@@ -191,7 +206,8 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
       <div className="w-[260px] h-full flex-shrink-0 nav-secondary-bg backdrop-blur-md border-r border-white/80 dark:border-stone-700/50 immersive-safe-top p-4 overflow-y-auto">
         <div className="flex items-center gap-2 mb-4 px-1">
           <Music2Icon />
-          <span className="font-bold text-lg text-neutral-800 dark:text-stone-100">{T('music.title')}</span>
+          <span className="font-bold text-lg text-neutral-800 dark:text-stone-100 flex-1 truncate">{T('music.title')}</span>
+          {titleActions && <div className="flex items-center gap-1 shrink-0">{titleActions}</div>}
         </div>
         <div className="space-y-0.5">
           {playlistItems}
@@ -207,6 +223,7 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
     collapsedSurfaceClass: 'bg-[#f5f5f0] dark:bg-[#1c1917]',
     icon: React.createElement(Music2Icon),
     title: T('music.title'),
+    titleActions,
     onOpenModuleSettings,
     footerExtra: statsButton,
     searchQuery,

@@ -51,7 +51,6 @@ type KugouTab = 'home' | 'roam' | 'search' | 'mine';
 
 interface KugouViewProps {
   initialTab: KugouTab;
-  onBack: () => void;
   onPlay: (tracks: PlayableTrack[], startIndex: number, sourceName: string) => void;
   onTempPlaylist?: (temp: TempPlaylist) => void;
   onActivePlaylist?: (id: number) => void;
@@ -427,7 +426,7 @@ function formatDuration(ms: number): string {
 }
 
 export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(function KugouView(
-  { initialTab, onBack, onPlay, onTempPlaylist, onActivePlaylist, selectedRankId, onRankListLoaded, onActiveRankChange, onAuthChange, searchQuery, onTabChange, favoriteIds, onToggleFavorite, onPlayMv },
+  { initialTab, onPlay, onTempPlaylist, onActivePlaylist, selectedRankId, onRankListLoaded, onActiveRankChange, onAuthChange, searchQuery, onTabChange, favoriteIds, onToggleFavorite, onPlayMv },
   ref,
 ) {
   const [tab, setTab] = useState<KugouTab>(initialTab);
@@ -950,7 +949,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   // 让顶部标题栏避开沉浸模式悬浮层占用的 38px，否则标题被压住、点击被拖拽条吞掉。
   return (
     <div className="flex flex-col min-h-0 h-full immersive-safe-top">
-      {/* 顶栏：复用通用音乐模块模板（标题 + 登录按钮 + 云按钮） */}
+      {/* 顶栏：复用通用音乐模块模板（标题 + 登录按钮）；「网络」入口在侧栏 */}
       <MusicHeader
         title={playlistMode
           ? playlistMode.name
@@ -970,8 +969,6 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
           setActiveRankId(null);
           setPlaylistMode(null);
         }}
-        onCloudClick={onBack}
-        cloudTitle="音乐模块"
         user={kugouAuth
           ? {
               loggedIn: true,

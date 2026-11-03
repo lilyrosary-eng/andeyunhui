@@ -12,6 +12,7 @@
 
 import React from 'react';
 import { OnlineSidebarShell, SidebarTempSection, Music2Icon, type TempPlaylistItem } from './OnlineSidebarShell';
+import { CloudIcon } from './icons';
 
 const { useState } = React;
 const {
@@ -203,6 +204,10 @@ export interface OnlineMusicSidebarProps {
   searchQuery?: string;
   onSearchChange?: (value: string) => void;
   searchPlaceholder?: string;
+  /** 点击侧栏标题行「网络」按钮（打开模块抽屉） */
+  onOpenModuleDrawer?: () => void;
+  /** 「网络」按钮文案（缺省为「网络」） */
+  moduleDrawerLabel?: string;
 }
 
 export default function OnlineMusicSidebar(props: OnlineMusicSidebarProps) {
@@ -231,6 +236,8 @@ export default function OnlineMusicSidebar(props: OnlineMusicSidebarProps) {
     searchQuery,
     onSearchChange,
     searchPlaceholder,
+    onOpenModuleDrawer,
+    moduleDrawerLabel = '网络',
   } = props;
 
   const likedActive = !!likedPlaylist && activePlaylistId === likedPlaylist.id && activeTempId == null;
@@ -239,6 +246,18 @@ export default function OnlineMusicSidebar(props: OnlineMusicSidebarProps) {
     className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 hover:text-[var(--element-color-raw)] transition-colors flex items-center gap-2',
     title: '返回本地音乐',
   }, brandLabel);
+
+  // 标题行右侧「网络」入口：与视频/AI 对话模块同槽位（ModuleSidebarShell.titleActions）
+  const titleActions = onOpenModuleDrawer
+    ? React.createElement('button', {
+        onClick: onOpenModuleDrawer,
+        title: moduleDrawerLabel,
+        className: 'btn-press flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)] transition-colors',
+      }, [
+        React.createElement(CloudIcon, { key: 'ico', size: 15 }),
+        React.createElement('span', { key: 'label' }, moduleDrawerLabel),
+      ])
+    : undefined;
 
   const content = React.createElement('div', { className: 'space-y-4' },
     React.createElement(SidebarLikedSection, {
@@ -280,6 +299,7 @@ export default function OnlineMusicSidebar(props: OnlineMusicSidebarProps) {
   return React.createElement(OnlineSidebarShell, {
     icon: React.createElement(Music2Icon),
     title: titleEl,
+    titleActions,
     moduleId,
     onClose,
     onOpenModuleSettings,

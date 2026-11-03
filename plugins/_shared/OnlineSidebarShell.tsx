@@ -30,6 +30,8 @@ export interface OnlineSidebarShellProps {
   onSearchChange?: (value: string) => void;
   searchPlaceholder?: string;
   primaryAction?: { label: string; onClick: () => void };
+  /** 标题行右侧动作插槽（与 ModuleSidebarShell 同名 prop 同义），用于放「网络」入口等按钮 */
+  titleActions?: React.ReactNode;
   children: React.ReactNode;
 }
 
@@ -45,6 +47,7 @@ export function OnlineSidebarShell({
   onSearchChange,
   searchPlaceholder,
   primaryAction,
+  titleActions,
   children,
 }: OnlineSidebarShellProps) {
   // 标题兼容：调用方若传字符串（未自带返回按钮），则包一层可点按钮调用 onClose。
@@ -78,7 +81,8 @@ export function OnlineSidebarShell({
     return React.createElement('div', { className: 'w-[260px] h-full flex-shrink-0 nav-secondary-bg backdrop-blur-md border-r border-white/80 dark:border-stone-700/50 immersive-safe-top p-4 overflow-y-auto' },
       React.createElement('div', { className: 'flex items-center gap-2 mb-4 px-1' },
         icon ?? React.createElement(Music2Icon),
-        titleNode
+        titleNode,
+        titleActions && React.createElement('div', { className: 'ml-auto flex items-center gap-1 shrink-0' }, titleActions)
       ),
       children
     );
@@ -92,6 +96,7 @@ export function OnlineSidebarShell({
     collapsedSurfaceClass: 'bg-[#f5f5f0] dark:bg-[#1c1917]',
     icon: icon ?? React.createElement(Music2Icon),
     title: titleNode,
+    titleActions,
     onOpenModuleSettings,
     footerExtra: statsButton,
     searchQuery,

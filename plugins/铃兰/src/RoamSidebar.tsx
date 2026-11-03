@@ -215,22 +215,24 @@ export function RoamSidebar(props: RoamSidebarProps) {
     );
   };
 
-  // 标题行：Sparkles + "漫游电台" + Cloud 返回按钮（同一行）
-  const titleEl = React.createElement('div', { className: 'flex items-center gap-2' },
-    React.createElement('button', {
-      onClick: onClose,
-      className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 hover:text-[var(--element-color-raw)] transition-colors flex items-center gap-2',
-      title: '返回本地音乐',
-    }, [
-      React.createElement(Sparkles, { key: 'icon', size: 18, className: 'text-[#7c4dff] dark:text-[#b388ff]' }),
-      '漫游电台',
-    ]),
-    React.createElement('button', {
-      onClick: onBack,
-      className: 'ml-auto p-1.5 rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 dark:text-stone-500',
-      title: '返回模块抽屉',
-    }, React.createElement(Cloud, { size: 16 })),
-  );
+  // 标题行：Sparkles + "漫游电台"（「网络」入口统一放在 titleActions）
+  const titleEl = React.createElement('button', {
+    onClick: onClose,
+    className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 hover:text-[var(--element-color-raw)] transition-colors flex items-center gap-2',
+    title: '返回本地音乐',
+  }, [
+    React.createElement(Sparkles, { key: 'icon', size: 18, className: 'text-[#7c4dff] dark:text-[#b388ff]' }),
+    '漫游电台',
+  ]);
+
+  const titleActions = React.createElement('button', {
+    onClick: onBack,
+    title: '网络',
+    className: 'btn-press flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)] transition-colors',
+  }, [
+    React.createElement(Cloud, { key: 'ico', size: 15 }),
+    React.createElement('span', { key: 'label' }, '网络'),
+  ]);
 
   const content = React.createElement('div', { className: 'space-y-4' },
     React.createElement('p', { key: 'label', className: 'text-[10px] font-medium text-neutral-400 dark:text-stone-500 uppercase tracking-wider mb-1 px-1' }, '漫游路径'),
@@ -253,6 +255,7 @@ export function RoamSidebar(props: RoamSidebarProps) {
   return React.createElement(OnlineSidebarShell, {
     icon: React.createElement(Sparkles, { size: 22, className: 'text-[#7c4dff] dark:text-[#b388ff]' }),
     title: titleEl,
+    titleActions,
     onClose,
     onOpenModuleSettings: onOpenSettings,
     onOpenStats,

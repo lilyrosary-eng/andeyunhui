@@ -117,7 +117,6 @@ const PRESET_THEMES: PresetTheme[] = [
 
 interface RoamViewProps {
   source: RoamSource;
-  onBack: () => void;
   onPlay: (tracks: PlayableTrack[], startIndex: number, sourceName: string) => void;
   onTempPlaylist?: (temp: TempPlaylist) => void;
   onOpenImmersive?: () => void;

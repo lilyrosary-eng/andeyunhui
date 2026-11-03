@@ -16,6 +16,8 @@ export interface QishuiSidebarProps {
   activePlaylistId?: string | null;
   onSelectPlaylist: (id: string, name: string) => void;
   onClose: () => void;
+  /** 打开模块抽屉（标题行「网络」入口） */
+  onOpenModuleDrawer?: () => void;
   onOpenModuleSettings?: () => void;
   onOpenStats?: () => void;
   statsActive?: boolean;
@@ -31,6 +33,7 @@ export default function QishuiSidebar({
   activePlaylistId,
   onSelectPlaylist,
   onClose,
+  onOpenModuleDrawer,
   onOpenModuleSettings,
   onOpenStats,
   statsActive,
@@ -51,6 +54,7 @@ export default function QishuiSidebar({
     onSelectRank: (pl) => onSelectPlaylist(String(pl.id), pl.name),
     ranksTitle: '推荐歌单',
     onClose: onClose,
+    onOpenModuleDrawer,
     onOpenModuleSettings,
     onOpenStats,
     statsActive,

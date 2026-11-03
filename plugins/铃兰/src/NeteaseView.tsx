@@ -221,7 +221,6 @@ export interface PlayableTrack {
 
 interface NeteaseViewProps {
   initialTab: NeteaseTab;
-  onBack: () => void;
   onPlay: (tracks: PlayableTrack[], startIndex: number, sourceName: string) => void;
   // 在线播放时把当前来源歌单作为「临时歌单」回传给侧栏，挂到「我的收藏」下方
   onTempPlaylist?: (temp: TempPlaylist) => void;
@@ -287,7 +286,7 @@ function formatDuration(ms: number): string {
 }
 
 export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>(function NeteaseView(
-  { initialTab, onBack, onPlay, onTempPlaylist, onUserPlaylists, onActivePlaylist, onProfileChange, likedSongs: likedSongsProp, onLikedSongsChange, onPlayMv, onOpenImmersive },
+  { initialTab, onPlay, onTempPlaylist, onUserPlaylists, onActivePlaylist, onProfileChange, likedSongs: likedSongsProp, onLikedSongsChange, onPlayMv, onOpenImmersive },
   ref,
 ) {
   const [tab, setTab] = useState<NeteaseTab>(initialTab);
@@ -1224,7 +1223,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
 
   return (
     <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden overflow-x-hidden relative bg-white dark:bg-[#1e1e1e] immersive-safe-top">
-      {/* 顶部栏：复用通用音乐模块模板（标题 + 登录按钮 + 云按钮） */}
+      {/* 顶部栏：复用通用音乐模块模板（标题 + 登录按钮）；「网络」入口在侧栏 */}
       <MusicHeader
         title={
           playlistId != null
@@ -1245,8 +1244,6 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
             setTab('login');
           }
         }}
-        onCloudClick={onBack}
-        cloudTitle={T('music.moduleDrawer.title')}
         user={
           loggedIn
             ? {

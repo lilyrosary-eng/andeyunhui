@@ -52,7 +52,6 @@ export interface QishuiViewHandle {
 
 interface QishuiViewProps {
   initialTab: QishuiTab;
-  onBack: () => void;
   onPlay: (tracks: PlayableTrack[], startIndex: number, sourceName: string) => void;
   onTempPlaylist?: (temp: TempPlaylist) => void;
   onActivePlaylist?: (id: string) => void;
@@ -72,7 +71,7 @@ function trackToPlayable(t: QishuiTrack, url: string, quality = ''): PlayableTra
 }
 
 export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(function QishuiView(
-  { initialTab, onBack, onPlay, onTempPlaylist, onActivePlaylist },
+  { initialTab, onPlay, onTempPlaylist, onActivePlaylist },
   ref,
 ) {
   const [tab, setTab] = useState<QishuiTab>(initialTab);
@@ -450,8 +449,6 @@ setQrLoading(false);
         onBackToSub={activePlaylist ? () => { setActivePlaylist(null); setPlaylistInfo(null); setTracks([]); } : undefined}
         onBackToSubTitle="返回"
         onUserClick={() => setTab('about')}
-        onCloudClick={onBack}
-        cloudTitle="音乐模块"
         user={auth ? { loggedIn: true, name: auth.name, avatarUrl: auth.avatar, initial: auth.name.charAt(0) } : { loggedIn: false }}
       />
 

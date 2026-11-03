@@ -1,12 +1,12 @@
 // 网络音乐模块通用顶部栏模板（网易云 / 酷狗 等共用）
 //
-// 结构固定为：左侧「标题 + 可选返回按钮」，右侧「登录态按钮（点击进入用户页）+ 云按钮（点击打开模块抽屉）」。
+// 结构固定为：左侧「标题 + 可选返回按钮」，右侧「登录态按钮（点击进入用户页）」。
 // 各网络音乐模块只需传入对应状态与回调，即可复用同一套布局与设计语言，
 // 无需每个模块重复实现顶部栏。
+// 注：「网络」入口（模块抽屉）统一放在侧边栏标题行，不在本顶栏重复出现。
 
 import React from 'react';
 import { ChevronLeft } from 'lucide-react';
-import { CloudIcon } from '../../_shared/icons';
 
 interface MusicHeaderUser {
   // 是否已登录
@@ -29,10 +29,6 @@ interface MusicHeaderProps {
   onBackToSubTitle?: string;
   // 右侧登录态按钮点击（进入用户页 / 登录页）
   onUserClick: () => void;
-  // 右侧云按钮点击（打开模块抽屉）
-  onCloudClick: () => void;
-  // 云按钮无障碍提示文案
-  cloudTitle?: string;
   // 登录态信息；不传则当成未登录（仅显示「登录」文本）
   user?: MusicHeaderUser;
 }
@@ -81,8 +77,6 @@ export function MusicHeader({
   onBackToSub,
   onBackToSubTitle,
   onUserClick,
-  onCloudClick,
-  cloudTitle,
   user,
 }: MusicHeaderProps) {
   return (
@@ -107,13 +101,6 @@ export function MusicHeader({
         ) : (
           <LoginButton onClick={onUserClick} />
         )}
-        <button
-          onClick={onCloudClick}
-          className="btn-press flex items-center justify-center p-2 rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
-          title={cloudTitle || '音乐模块'}
-        >
-          <CloudIcon size={18} />
-        </button>
       </div>
     </div>
   );

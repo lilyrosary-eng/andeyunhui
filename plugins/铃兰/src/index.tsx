@@ -2624,6 +2624,7 @@ useEffect(() => {
             neteaseViewRef.current?.openPlaylist(playlist.id, playlist.name);
           }}
           onCloseNetease={() => setNeteaseOpen(false)}
+          onOpenModuleDrawer={() => setShowModuleDrawer(true)}
           onOpenModuleSettings={handleOpenModuleSettings}
           onOpenStats={() => setShowStats(v => !v)}
           statsActive={showStats}
@@ -2647,6 +2648,7 @@ useEffect(() => {
             (kugouViewRef.current as any)?.restoreTemp?.(item.payload);
           }}
           onCloseKugou={() => setKugouOpen(false)}
+          onOpenModuleDrawer={() => setShowModuleDrawer(true)}
           onOpenModuleSettings={() => setKugouSettingsOpen(v => !v)}
           onOpenStats={() => setKugouStatsOpen(v => !v)}
           statsActive={kugouStatsOpen}
@@ -2685,6 +2687,7 @@ useEffect(() => {
             (qishuiViewRef.current as any)?.openPlaylist?.(id, name);
           }}
           onClose={() => setQishuiOpen(false)}
+          onOpenModuleDrawer={() => setShowModuleDrawer(true)}
         />
       ) : roamOpen ? (
         <RoamSidebar
@@ -2730,6 +2733,7 @@ useEffect(() => {
           onRenamePlaylist={handleRenamePlaylist}
           onDeletePlaylist={handleDeletePlaylist}
           onOpenModuleSettings={handleOpenModuleSettings}
+          onOpenModuleDrawer={() => setShowModuleDrawer(true)}
           onOpenStats={() => setShowStats(v => !v)}
           statsActive={showStats}
           searchQuery={searchQuery}
@@ -2783,7 +2787,6 @@ useEffect(() => {
             <NeteaseView
               ref={neteaseViewRef}
               initialTab={neteaseTab}
-              onBack={() => setShowModuleDrawer(true)}
               onPlay={(tracks: PlayableTrack[], startIndex: number, sourceName: string) => {
                 musicPlayer.setTracks(tracks, startIndex);
                 musicPlayer.play();
@@ -2830,7 +2833,6 @@ useEffect(() => {
             <KugouView
               ref={kugouViewRef}
               initialTab={kugouTab}
-              onBack={() => setShowModuleDrawer(true)}
               onPlay={(tracks: PlayableTrack[], startIndex: number, sourceName: string) => {
                 musicPlayer.setTracks(tracks, startIndex);
                 musicPlayer.play();
@@ -2865,7 +2867,6 @@ useEffect(() => {
             <QishuiView
               ref={qishuiViewRef}
               initialTab={qishuiTab}
-              onBack={() => setShowModuleDrawer(true)}
               onPlay={(tracks: PlayableTrack[], startIndex: number, sourceName: string) => {
                 musicPlayer.setTracks(tracks, startIndex);
                 musicPlayer.play();
@@ -2887,7 +2888,6 @@ useEffect(() => {
             ) : (
             <RoamView
               source={roamSource}
-              onBack={() => setShowModuleDrawer(true)}
               onPlay={(tracks: PlayableTrack[], startIndex: number, sourceName: string) => {
                 musicPlayer.setTracks(tracks, startIndex);
                 musicPlayer.play();
@@ -2912,7 +2912,6 @@ useEffect(() => {
               playlistName={selectedPlaylist.name}
               onSelectTrack={handleSelectTrack}
               onAddSong={handleAddSong}
-              onOpenDrawer={() => setShowModuleDrawer(true)}
               onMoveTrack={handleMoveTrack}
               onCopyTrack={handleCopyTrack}
               onRemoveTrack={handleRemoveTrack}

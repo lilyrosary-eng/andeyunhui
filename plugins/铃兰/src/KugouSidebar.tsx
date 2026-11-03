@@ -17,6 +17,8 @@ export interface KugouSidebarProps {
   activeTempId?: string | null;
   onSelectTemp: (temp: OnlineTempItem) => void;
   onCloseKugou: () => void;
+  /** 打开模块抽屉（标题行「网络」入口） */
+  onOpenModuleDrawer?: () => void;
   onOpenModuleSettings?: () => void;
   onOpenStats?: () => void;
   statsActive?: boolean;
@@ -31,6 +33,7 @@ export default function KugouSidebar({
   activeTempId,
   onSelectTemp,
   onCloseKugou,
+  onOpenModuleDrawer,
   onOpenModuleSettings,
   onOpenStats,
   statsActive,
@@ -75,6 +78,7 @@ export default function KugouSidebar({
     },
     userEmptyText: auth ? '暂无歌单' : '登录后同步歌单',
     onClose: onCloseKugou,
+    onOpenModuleDrawer,
     onOpenModuleSettings,
     onOpenStats,
     statsActive,
