@@ -591,7 +591,7 @@ pub struct ListenStatRow {
 /// 元数据规范化：多歌手分隔符归一（/ & ， 、 ； 等统一视为空格）、全角空格→半角、
 /// 折叠连续空白、去首尾空白、小写——用于「同一首歌」判定。
 /// 只归一不拆分不排序：乐队名（如 AC/DC）保持整体不被误拆；键是小写，显示名保留原文。
-fn normalize_meta(s: &str) -> String {
+pub(crate) fn normalize_meta(s: &str) -> String {
     let replaced: String = s.chars().map(|c| match c {
         // 多歌手分隔符（半角/全角）→ 空格，使 "A/B"、"A & B"、"A、B" 归并为同一键
         '/' | '\u{FF0F}' | '&' | '\u{FF06}' | ',' | '\u{FF0C}' | ';' | '\u{FF1B}' | '、' => ' ',

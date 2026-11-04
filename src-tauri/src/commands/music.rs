@@ -239,6 +239,19 @@ pub fn music_rollback_tag_edit(
     music_service::rollback_tag_batch(&app, &batch_id)
 }
 
+/// 给在线候选打分排序（自动匹配的选优环节）。
+///
+/// 只回吐下标与得分：富字段（封面 URL、平台 id 等）留在前端自己那条对象上，
+/// 契约里不重复一遍。
+#[tauri::command]
+pub fn music_rank_tag_candidates(
+    local: music_service::LocalMeta,
+    candidates: Vec<music_service::CandidateMeta>,
+    limit: Option<usize>,
+) -> Vec<music_service::RankedCandidate> {
+    music_service::rank_tag_candidates(local, candidates, limit)
+}
+
 /// 列出某文件换封面时留下的旧封面（新 → 旧），供「恢复封面」挑选。
 #[tauri::command]
 pub fn music_list_cover_backups(

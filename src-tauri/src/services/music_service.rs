@@ -1171,6 +1171,102 @@ pub fn restore_cover_from_backup(
     sync_cover_after_embed(app, file_path)
 }
 
+// ============ 在线候选打分（批量自动匹配的选优环节） ============
+
+/// 本地文件的匹配依据（三个字段可以有空，空字符串按「缺该维度」处理）。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalMeta {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+}
+
+/// 在线候选参与打分的字段。
+///
+/// 只收这三项：打分引擎不该关心封面 URL 之类的富字段，
+/// 排序结果回吐**下标**，前端仍然拿自己那条完整对象。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateMeta {
+    pub name: String,
+    pub artist: String,
+    pub album: String,
+}
+
+/// 打分结果：候选在原数组中的下标 + 得分。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankedCandidate {
+    pub index: usize,
+    pub score: i32,
+}
+
+/// 单项相似度：规范化后相等 2 分，互相包含 1 分，否则 0 分。
+///
+/// 规范化复用 `music_db::normalize_meta`（多歌手分隔符 `/ & ，、；` 与全角、
+/// 连续空白、大小写都归一，且刻意不拆词以保住 `AC/DC` 这类乐队名）。
+/// 繁简体归一**没有**做：本项目现成的繁简表只覆盖 227 字，抽查 28 个繁体常用
+/// 歌名用字缺 15 个（聲/聽/藝/夢/韻…），拿它匹配会大面积漏判，宁缺毋滥。
+fn meta_similarity(a: &str, b: &str) -> i32 {
+    let x = crate::services::music_db::normalize_meta(a);
+    let y = crate::services::music_db::normalize_meta(b);
+    if x.is_empty() || y.is_empty() {
+        return 0;
+    }
+    if x == y {
+        return 2;
+    }
+    if x.contains(&y) || y.contains(&x) {
+        return 1;
+    }
+    0
+}
+
+/// 对候选列表打分并按得分降序返回。
+///
+/// 公式对齐「音乐标签」Web 版（GPL-3.0）的实现，逐条重写而非搬运：
+/// - 标题分为 0 的候选直接淘汰（标题都对不上，别的字段再像也是误匹配）
+/// - 本地有歌手而歌手完全不像 → 记 -2，把「同名不同人」压到队尾
+/// - 本地没有歌手（文件名是「歌手 - 歌名」式）而歌手/标题都像 → 标题分提到 2
+/// - 歌手/专辑缺失时退回用标题比对，避免空字段直接判 0
+fn score_candidates(local: &LocalMeta, candidates: &[CandidateMeta]) -> Vec<RankedCandidate> {
+    let fallback_title = local.title.as_str();
+    let mut scored: Vec<RankedCandidate> = Vec::with_capacity(candidates.len());
+    for (index, c) in candidates.iter().enumerate() {
+        let title_score = meta_similarity(fallback_title, &c.name);
+        if title_score == 0 {
+            continue;
+        }
+        let artist_query = if local.artist.trim().is_empty() { fallback_title } else { local.artist.as_str() };
+        let album_query = if local.album.trim().is_empty() { fallback_title } else { local.album.as_str() };
+        let mut artist_score = meta_similarity(artist_query, &c.artist);
+        let album_score = meta_similarity(album_query, &c.album);
+
+        if !local.artist.trim().is_empty() && artist_score == 0 {
+            artist_score = -2;
+        }
+        // 本地没有独立歌手字段（文件名是「歌手 - 歌名」式）时，候选的歌手与标题双双命中
+        // 说明标题串本身就带着歌手信息 → 标题按满分算，否则这类文件永远排在纯标题命中之后
+        let title_final = if local.artist.trim().is_empty() && artist_score >= 1 && title_score >= 1 {
+            2
+        } else {
+            title_score
+        };
+        scored.push(RankedCandidate { index, score: title_final + artist_score + album_score });
+    }
+    scored.sort_by(|a, b| b.score.cmp(&a.score).then(a.index.cmp(&b.index)));
+    scored
+}
+
+/// 打分并截断到前 `limit` 条（默认 15，与「音乐标签」Web 版一致）。
+pub fn rank_tag_candidates(local: LocalMeta, candidates: Vec<CandidateMeta>, limit: Option<usize>) -> Vec<RankedCandidate> {
+    let keep = limit.unwrap_or(15);
+    let mut ranked = score_candidates(&local, &candidates);
+    ranked.truncate(keep);
+    ranked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1502,5 +1598,90 @@ mod tests {
             .unwrap();
         assert!(batch.contains("edit_track_tags("), "批量写回必须复用带快照闸门的 edit_track_tags");
         assert!(!batch.contains("save_to_path"), "批量入口不该绕过闸门直接写盘");
+    }
+
+
+    fn cand(name: &str, artist: &str, album: &str) -> CandidateMeta {
+        CandidateMeta { name: name.to_string(), artist: artist.to_string(), album: album.to_string() }
+    }
+
+    fn local(title: &str, artist: &str, album: &str) -> LocalMeta {
+        LocalMeta { title: title.to_string(), artist: artist.to_string(), album: album.to_string() }
+    }
+
+    #[test]
+    fn 三个维度全等的候选排在最前() {
+        let ranked = rank_tag_candidates(
+            local("稻香", "周杰伦", "魔杰座"),
+            vec![cand("稻香 (Live)", "周杰伦", "爱的四季"), cand("稻香", "周杰伦", "魔杰座")],
+            None,
+        );
+        assert_eq!(ranked[0].index, 1, "全等的那条应排第一: {:?}", ranked);
+        assert_eq!(ranked[0].score, 6, "标题2+歌手2+专辑2");
+    }
+
+    #[test]
+    fn 同名不同人的候选被负分压到队尾() {
+        let ranked = rank_tag_candidates(
+            local("晴天", "周杰伦", "叶惠美"),
+            vec![cand("晴天", "张三", "某精选集"), cand("晴天", "周杰伦", "叶惠美")],
+            None,
+        );
+        assert_eq!(ranked[0].index, 1);
+        let loser = ranked.iter().find(|r| r.index == 0).expect("不该被淘汰");
+        assert!(loser.score <= 0, "歌手完全不对应该吃到 -2 惩罚: {:?}", ranked);
+    }
+
+    #[test]
+    fn 多歌手分隔符写法不同不扣分() {
+        let ranked = rank_tag_candidates(
+            local("珊瑚海", "周杰伦/Lara", "七里香"),
+            vec![cand("珊瑚海", "周杰伦 & Lara", "七里香")],
+            None,
+        );
+        assert_eq!(ranked[0].score, 6, "分隔符差异不该影响得分: {:?}", ranked);
+    }
+
+    #[test]
+    fn 标题带现场后缀仍算部分命中() {
+        let ranked = rank_tag_candidates(local("稻香", "周杰伦", ""), vec![cand("稻香 (Live)", "周杰伦", "")], None);
+        // 标题互含 1 分 + 歌手全等 2 分 + 专辑（本地无专辑 → 拿标题比，候选专辑为空算 0）
+        assert_eq!(ranked[0].score, 3, "互含按 1 分算: {:?}", ranked);
+    }
+
+    #[test]
+    fn 标题完全对不上的候选直接淘汰() {
+        let ranked = rank_tag_candidates(
+            local("稻香", "周杰伦", "魔杰座"),
+            vec![cand("青花瓷", "周杰伦", "依然范特西"), cand("稻香", "周杰伦", "魔杰座")],
+            None,
+        );
+        assert_eq!(ranked.len(), 1, "青花瓷那条标题 0 分应被淘汰: {:?}", ranked);
+        assert_eq!(ranked[0].index, 1);
+    }
+
+    #[test]
+    fn 文件名式标题带歌手时标题按满分算() {
+        // 本地没有独立歌手字段：标题是「周杰伦 - 晴天」这种串，候选歌手/标题都能对上
+        let ranked = rank_tag_candidates(
+            local("周杰伦 - 晴天", "", ""),
+            vec![cand("晴天", "周杰伦", "叶惠美"), cand("晴天 (翻唱版)", "某人", "")],
+            None,
+        );
+        assert_eq!(ranked[0].index, 0, "带歌手的标题串应让真正对应的候选胜出: {:?}", ranked);
+    }
+
+    #[test]
+    fn 同分按原始顺序稳定排列且limit生效() {
+        let many: Vec<CandidateMeta> = (0..20).map(|_| cand("稻香", "周杰伦", "魔杰座")).collect();
+        let ranked = rank_tag_candidates(local("稻香", "周杰伦", "魔杰座"), many, Some(3));
+        assert_eq!(ranked.len(), 3);
+        assert_eq!(ranked.iter().map(|r| r.index).collect::<Vec<_>>(), vec![0, 1, 2], "同分要保持先来后到");
+    }
+
+    #[test]
+    fn 默认取前十五条() {
+        let many: Vec<CandidateMeta> = (0..30).map(|_| cand("稻香", "周杰伦", "魔杰座")).collect();
+        assert_eq!(rank_tag_candidates(local("稻香", "周杰伦", "魔杰座"), many, None).len(), 15);
     }
 }

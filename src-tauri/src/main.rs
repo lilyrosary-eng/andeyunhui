@@ -1873,6 +1873,7 @@ fn main() {
             music_edit_track,
             music_batch_edit_tracks,
             music_rollback_tag_edit,
+            music_rank_tag_candidates,
             music_list_cover_backups,
             music_restore_cover,
             music_get_all_cover_overrides,
