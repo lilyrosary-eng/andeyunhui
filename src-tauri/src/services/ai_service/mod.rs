@@ -29,6 +29,9 @@ pub(crate) mod codemode;
 pub mod ai_session;
 pub mod ai_agent;
 pub mod ai_ocr;
+// 多节点翻译：免费节点（Bing / MyMemory）+ AI / 百度 / 有道 / DeepL / LibreTranslate
+// + 按链兜底 + 全链路显式提示。端点可用性均为 2026-11-04 本机真实请求实测。
+pub mod translate_service;
 pub mod ai_conversations;
 pub mod comfyui_build;
 pub mod image_store;

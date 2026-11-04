@@ -6,6 +6,7 @@ use base64::Engine;
 use image::GenericImageView;
 use tauri::AppHandle;
 use crate::services::ai_service::ai_profile::{AiProfile, AiConfig, ResolvedTarget, find_provider_of_model, load_config, resolve_target};
+use super::translate_service::{TranslateOutcome, TranslateSettings};
 
 /// 测试 AI 配置是否可用：向端点发起一次极小开销的非流式请求，
 /// 校验 base_url / api_key / model 是否正确，并返回耗时。不消耗对话额度（max_tokens=5）。
@@ -381,8 +382,17 @@ pub async fn vision_ask_raw(
     Ok(content)
 }
 
-/// 翻译：传入文本 + 目标语言 + 可选源语言（"auto" 或留空表示自动识别），返回译文
-/// 走非流式 AI 对话；若未配置 AI 则返回错误供前端降级提示
+/// 翻译：**多节点** + 按链兜底 + 全链路显式提示。
+///
+/// 原来是「只有 AI 一条路、没配 API Key 直接报错」。现在：
+/// - 免费节点（Bing 网页版 / MyMemory）**无需任何配置**即可翻译；
+/// - 可选 AI / 百度 / 有道 / DeepL / LibreTranslate / Google；
+/// - 返回结构化结果（译文 + 实际节点 + 源语言识别 + 所有提示 + 诊断），不再是裸 String。
+/// 端点实测表与实现细节见 `translate_service` 模块头部。
+///
+/// 参数 `node` 是「本次用哪个节点」的简写；`settings` 带凭证、链顺序、术语表等。
+/// 两者都可缺省 —— **旧调用方（只传 text / targetLang / sourceLang / profileId）依然能用**，
+/// 会落到默认链 `bing → mymemory → ai`，因此没配任何 key 也能翻译。
 #[tauri::command]
 pub async fn translate_text(
     app: AppHandle,
@@ -390,73 +400,24 @@ pub async fn translate_text(
     target_lang: Option<String>,
     source_lang: Option<String>,
     profile_id: Option<String>,
-) -> Result<String, String> {
-    let config = load_config(&app);
-    let cfg = resolve_target(&config, profile_id.as_deref());
-    if cfg.api_key.trim().is_empty() {
-        return Err("未配置 API Key，请先在全局设置 → 模型中填写".to_string());
+    node: Option<String>,
+    settings: Option<TranslateSettings>,
+) -> Result<TranslateOutcome, String> {
+    let mut st = settings.unwrap_or_default();
+    if st.node.is_none() {
+        st.node = node;
     }
-
-    let lang = target_lang.unwrap_or_else(|| "中文".to_string());
-    // 源语言：仅当明确给出且非 "auto" 时才写入提示词；其余（auto / 空）视为自动识别
-    let source = source_lang
-        .filter(|s| !s.is_empty() && s != "auto");
-    let system = match source {
-        Some(src) => format!(
-            "你是专业翻译助手。将用户输入的{}文本翻译为{}，仅输出译文，不加注释、不加引号、不保留原文。如果原文已是目标语言则原样返回。",
-            src, lang
-        ),
-        None => format!(
-            "你是专业翻译助手。将用户输入的文本翻译为{}，仅输出译文，不加注释、不加引号、不保留原文。如果原文已是目标语言则原样返回。",
-            lang
-        ),
-    };
-
-    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
-        "model": cfg.model,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user", "content": text }
-        ],
-        "temperature": 0.1,
-        "max_tokens": cfg.max_tokens.unwrap_or(4096),
-        "stream": false,
-    });
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| format!("创建请求客户端失败: {}", e))?;
-
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "HTTP {}: {}",
-            status,
-            text.chars().take(300).collect::<String>()
-        ));
+    if st.profile_id.is_none() {
+        st.profile_id = profile_id;
     }
-
-    let v: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("解析响应失败: {}", e))?;
-    let content = v["choices"][0]["message"]["content"]
-        .as_str()
-        .ok_or_else(|| "响应中未找到 content 字段".to_string())?
-        .to_string();
-    Ok(content)
+    super::translate_service::translate(
+        &app,
+        &text,
+        source_lang.as_deref(),
+        target_lang.as_deref(),
+        st,
+    )
+    .await
 }
 
 /// OCR 文本校对 / 整理：将本地或云端 OCR 得到的原文发送给文本模型，

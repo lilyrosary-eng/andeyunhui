@@ -46,6 +46,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"
 # .mufurong 内容哈希：判断安装包插件副本是否变化，替代不可靠的「字节大小/mtime」比对
 sha2 = "0.10"
+# 百度翻译官方 API 的签名是 md5(appid + q + salt + 密钥)；有道用上面的 sha2
+# （两者都是 MIT/Apache-2.0 的纯 Rust 小库，不引入大型抽象）
+md5 = "0.7"
 # API Key 等敏感字段落盘加密（AES-256-GCM 机器绑定）：
 # 纯 Rust、跨平台（含 Android 交叉编译），scrypt 做密钥派生（参考 deepseek-desktop 方案）
 aes-gcm = "0.10"
