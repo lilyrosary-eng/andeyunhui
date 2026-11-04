@@ -579,6 +579,17 @@ async fn call_bing(
     }
 }
 
+/// MyMemory **失败也返回 HTTP 200**，错误写在 `translatedText` 里。
+/// 不检测就会把 `QUERY LENGTH LIMIT EXCEEDED...` 当成译文交给用户。
+/// 抽成纯函数是为了能单测这条防线（真实请求里很难稳定触发额度错误）。
+fn looks_like_mymemory_error(s: &str) -> bool {
+    let u = s.to_ascii_uppercase();
+    u.contains("QUERY LENGTH LIMIT")
+        || u.contains("MYMEMORY WARNING")
+        || u.contains("QUOTA")
+        || u.contains("INVALID")
+}
+
 /// ★ MyMemory 最大的坑：**失败也返回 HTTP 200**，正文里塞错误文本。
 /// 不检测就会把 `QUERY LENGTH LIMIT EXCEEDED...` 当译文交给用户。
 async fn call_mymemory(
@@ -611,10 +622,7 @@ async fn call_mymemory(
     let out = v.pointer("/responseData/translatedText").and_then(|x| x.as_str())
         .ok_or_else(|| nerr("mymemory", "parse", format!("响应缺 translatedText：{body}")))?
         .to_string();
-    let upper = out.to_ascii_uppercase();
-    if upper.contains("QUERY LENGTH LIMIT") || upper.contains("MYMEMORY WARNING")
-        || upper.contains("QUOTA") || upper.contains("INVALID")
-    {
+    if looks_like_mymemory_error(&out) {
         return Err(nerr("mymemory", "limit", format!("服务端在 200 响应里返回了错误文本：{out}")));
     }
     Ok(NodeResult {
@@ -905,8 +913,10 @@ async fn call_ai(
 }
 
 /// 单个节点的统一入口。
+/// `app` 只有 **AI 节点**需要（读全局模型配置）。做成 `Option` 是为了让
+/// 「免费节点 + 链兜底」能在测试里**真发请求**验证，而不必构造 Tauri AppHandle。
 async fn call_node(
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     client: &reqwest::Client,
     node: &str,
     src: Lang,
@@ -922,7 +932,10 @@ async fn call_node(
         "youdao" => call_youdao(client, src, tgt, text, st).await,
         "deepl" => call_deepl(client, src, tgt, text, st).await,
         "libre" => call_libre(client, src, tgt, text, st).await,
-        "ai" => call_ai(app, client, src, tgt, text, st).await,
+        "ai" => {
+            let app = app.ok_or_else(|| nerr("ai", "config", "AI 节点需要应用句柄"))?;
+            call_ai(app, client, src, tgt, text, st).await
+        }
         other => Err(nerr(other, "config", format!("未知翻译节点「{other}」"))),
     }
 }
@@ -931,7 +944,7 @@ async fn call_node(
 
 /// 一**段**文本按链尝试。返回 `(结果, 用了哪个节点, 本段提示)`。
 async fn run_chain_for_segment(
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     client: &reqwest::Client,
     chain: &[String],
     src: Lang,
@@ -1054,7 +1067,7 @@ pub async fn translate(
             // 并发写同一个 Vec 不安全，所以每段一份。
             let mut seg_notices = Vec::new();
             let res = run_chain_for_segment(
-                &app, &client, &chain, src, tgt,
+                Some(&app), &client, &chain, src, tgt,
                 if protected.trim().is_empty() { seg.as_str() } else { protected.as_str() },
                 &st,
                 &mut seg_notices,
@@ -1260,5 +1273,69 @@ mod tests {
         assert_eq!(DEFAULT_CHAIN, &["bing", "mymemory", "ai"]);
         let free: Vec<&str> = NODES.iter().filter(|n| !n.2).map(|n| n.0).collect();
         assert!(free.contains(&"bing") && free.contains(&"mymemory"), "必须至少有两个真免 key 节点");
+    }
+
+    #[test]
+    fn mymemory_的200错误文本必须被识别() {
+        assert!(looks_like_mymemory_error("QUERY LENGTH LIMIT EXCEEDED. MAX ALLOWED QUERY : 500 CHARS"));
+        assert!(looks_like_mymemory_error("MYMEMORY WARNING: USAGE EXCEEDED"));
+        assert!(looks_like_mymemory_error("QUOTA EXCEEDED"));
+        assert!(!looks_like_mymemory_error("你好，世界！"));
+        assert!(!looks_like_mymemory_error("This is a normal translation."));
+    }
+
+    /// ★ 真实端点回归：用**产品同一份 Rust 代码**发请求，不是 Python 探针。
+    ///
+    /// 默认是 `#[ignore]`（CI 不该依赖外网）；本机验证用：
+    /// `cargo test --lib ai_service::translate_service -- --ignored --nocapture`
+    /// 若 cargo 挑中的 test exe 起不来（本机偶发 0xc0000139），手动跑
+    /// `target/debug/deps/andeyunhui_lib-*.exe` 里其它那个。
+    #[tokio::test]
+    #[ignore = "真实网络请求，手动跑"]
+    async fn 实测_免费节点与链兜底() {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(25))
+            .user_agent(BING_UA)
+            .build()
+            .unwrap();
+        let st = TranslateSettings::default();
+
+        // ① Bing 免 key：必须出中文译文，且带回源语言识别
+        let b = call_node(None, &client, "bing", Lang::En, Lang::Zh, "Hello, world!", &st).await;
+        assert!(b.is_ok(), "Bing 免 key 失败：{b:?}");
+        let b = b.unwrap();
+        eprintln!("[实测] bing => {:?} via={} detected={:?}", b.text, b.via, b.detected);
+        assert!(b.text.contains("你好") || b.text.contains("世界"), "译文应是中文：{}", b.text);
+        assert_eq!(b.detected.as_deref(), Some("en"), "Bing 应返回 detectedLanguage");
+
+        // ② MyMemory 免 key
+        let m = call_node(None, &client, "mymemory", Lang::En, Lang::Zh, "Hello, world!", &st).await;
+        assert!(m.is_ok(), "MyMemory 免 key 失败：{m:?}");
+        let m = m.unwrap();
+        eprintln!("[实测] mymemory => {:?}", m.text);
+        assert!(!m.text.trim().is_empty());
+        assert!(!looks_like_mymemory_error(&m.text));
+
+        // ③ 超长文本必须被 length 防线挡下，不能把服务端错误文本当译文
+        let long = "This is a sentence about translation. ".repeat(25);
+        let bad = call_node(None, &client, "mymemory", Lang::En, Lang::Zh, &long, &st).await;
+        assert!(bad.is_err(), "超长文本不该被当译文返回");
+        assert!(bad.unwrap_err().contains("/limit]"), "应归到 limit 阶段");
+
+        // ④ 链兜底：百度没配 key → config 阶段显式失败 → 转第二站 Bing。
+        //    同时验证「每次失败/兜底都留显式提示」这条原则在真实链上成立。
+        let mut notes = Vec::new();
+        let chain = vec!["baidu".to_string(), "bing".to_string()];
+        let r = run_chain_for_segment(
+            None, &client, &chain, Lang::En, Lang::Zh, "Hello again!", &st, &mut notes,
+        )
+        .await;
+        assert!(r.is_ok(), "第二站应成功：{r:?}");
+        let (r, used) = r.unwrap();
+        assert_eq!(used, "bing");
+        eprintln!("[实测] chain notices = {notes:?}");
+        assert!(notes.iter().any(|n| n.contains("百度") && n.contains("失败")), "首站失败要留痕：{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("已兜底到")), "兜底到哪一站必须说出来：{notes:?}");
+        assert!(!r.text.trim().is_empty());
     }
 }
