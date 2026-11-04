@@ -49,6 +49,8 @@ pub mod log_service;
 pub mod netease_proxy;
 // 酷狗音乐 WebAPI 代理：与 netease_proxy 同构，签名在 TS 端完成（MD5 盐签名）
 pub mod kugou_proxy;
+// QQ 音乐代理：这三个接口实测免签名，所以 Rust 侧只做白名单转发 + 歌词 Referer 兜底
+pub mod qq_proxy;
 // 汽水音乐 WebAPI 代理：与 kugou_proxy 同构，签名在 TS 端完成（字节系 JSVMP 签名）
 pub mod qishui_proxy;
 // 哔哩哔哩 WebAPI 代理：与 netease_proxy 同构，wbi 签名在 TS 端完成（玉兰视频模块·网络视频）

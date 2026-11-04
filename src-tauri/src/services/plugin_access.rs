@@ -114,6 +114,9 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("netease_register_guest", "net"),
     ("kugou_http_post", "net"),
     ("qishui_http_post", "net"),
+    // QQ 音乐：搜索/详情 POST 与歌词 GET（Rust 侧白名单转发，见 qq_proxy.rs）
+    ("qq_http_post", "net"),
+    ("qq_http_get", "net"),
     ("bilibili_request", "net"),
     // ---- 窗口 / 浮层 ----
     ("show_lyrics_widget", "window"),
@@ -540,6 +543,13 @@ mod tests {
     fn known_commands_resolve() {
         assert_eq!(capability_for("generate_thumbnail"), Some("media"));
         assert_eq!(capability_for("music_set_favorite"), Some("data"));
+        // 新加的 QQ 音乐代理命令必须能被解析出能力，否则 铃兰 manifest 里声明它们
+        // 会被「所有插件声明命令都能归位」那条测试判红
+        assert_eq!(capability_for("qq_http_post"), Some("net"));
+        assert_eq!(capability_for("qq_http_get"), Some("net"));
+        assert_eq!(capability_for("music_batch_edit_tracks"), Some("data"));
+        assert_eq!(capability_for("music_rollback_tag_edit"), Some("data"));
+        assert_eq!(capability_for("music_rank_tag_candidates"), Some("data"));
         assert_eq!(capability_for("read_file_base64"), Some("fs.read"));
         assert_eq!(capability_for("write_file_bytes"), Some("fs.write"));
         assert_eq!(capability_for("gongfang_scan"), Some("attack"));

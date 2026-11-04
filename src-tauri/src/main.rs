@@ -1887,6 +1887,9 @@ fn main() {
             andeyunhui_lib::services::netease_proxy::netease_register_guest,
             // ========== 酷狗音乐 WebAPI 代理：TS 端 MD5 盐签名 + Rust 无 CORS 转发 ==========
             andeyunhui_lib::services::kugou_proxy::kugou_http_post,
+            // ========== QQ 音乐代理：搜索/详情免签名转发 + 歌词自动补 Referer ==========
+            andeyunhui_lib::services::qq_proxy::qq_http_post,
+            andeyunhui_lib::services::qq_proxy::qq_http_get,
             // ========== 汽水音乐 WebAPI 代理：TS 端字节系签名 + Rust 无 CORS 转发 ==========
             andeyunhui_lib::services::qishui_proxy::qishui_http_post,
 andeyunhui_lib::services::qishui_proxy::qishui_download_audio,
