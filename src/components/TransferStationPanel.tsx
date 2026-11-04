@@ -9,10 +9,16 @@ import { useI18n, t as i18nT } from '@/lib/i18n';
 import {
   SOURCE_LANGS,
   TARGET_LANGS,
+  TRANSLATE_NODES,
   loadSourceLang,
   loadTargetLang,
   saveSourceLang,
   saveTargetLang,
+  loadTranslateSettings,
+  saveTranslateSettings,
+  translateSettingsFor,
+  formatNotices,
+  type TranslateResult,
 } from '@/lib/translateLanguages';
 import { EVENTS } from '@/core/events/schema';
 import { isLinux } from '@/platform/isLinux';
@@ -305,8 +311,12 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
         setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'error', text: '⚠ ' + tr('transfer.noTextFound') } }));
         return;
       }
-      const translated = await api.translateText(ocrText, '中文');
-      setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'translate', text: translated } }));
+      // 目标语言跟着工作区里选的走（原来硬编码「中文」，与面板上的下拉不一致）
+      const res = await api.translateText(ocrText, loadTargetLang(), 'auto', translateSettingsFor());
+      const notes = formatNotices(res.notices);
+      // 兜底 / 降级 / 警告一律随结果显式展示，不静默丢掉
+      const text = notes ? [res.text, '', notes].join(String.fromCharCode(10)) : res.text;
+      setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'translate', text } }));
     } catch (err) {
       setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'error', text: '⚠ ' + tr('transfer.translateFailedPrefix') + String(err).slice(0, 200) } }));
     }
@@ -1054,20 +1064,36 @@ function TranslateWorkspace({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [sourceLang, setSourceLang] = useState<string>(() => loadSourceLang());
   const [targetLang, setTargetLang] = useState<string>(() => loadTargetLang());
+  const [node, setNode] = useState<string>(() => loadTranslateSettings().node || 'auto');
+  const [notices, setNotices] = useState('');
+  const [meta, setMeta] = useState('');
 
   const run = useCallback(async () => {
     if (!input.trim()) return;
     setLoading(true);
     setError(null);
+    setNotices('');
+    setMeta('');
     try {
-      const res = await api.translateText(input, targetLang, sourceLang);
-      setOutput(res || '');
+      const res: TranslateResult = await api.translateText(
+        input, targetLang, sourceLang, translateSettingsFor(node),
+      );
+      setOutput(res.text || '');
+      setNotices(formatNotices(res.notices));
+      const bits = [
+        `${tr('transfer.translateNode')}：${TRANSLATE_NODES.find((n) => n.id === res.node)?.label ?? res.node}`,
+        res.detectedLang ? `${tr('transfer.detectedLang')}：${res.detectedLang}` : '',
+        res.segments > 1 ? `${tr('transfer.segments')}：${res.segments}` : '',
+        res.fromCache ? tr('transfer.fromCache') : '',
+      ].filter(Boolean);
+      setMeta(bits.join(' · '));
     } catch (e) {
-      setError('⚠ ' + tr('transfer.translateFailedPrefix') + String(e).slice(0, 200));
+      // 错误文本里已经带了 [节点/阶段] 与每一次兜底，不做截断 —— 截断就是让人猜
+      setError('⚠ ' + tr('transfer.translateFailedPrefix') + String(e));
     } finally {
       setLoading(false);
     }
-  }, [input, targetLang, sourceLang, tr]);
+  }, [input, targetLang, sourceLang, node, tr]);
 
   const selCls =
     'text-xs rounded-lg border border-[var(--element-border)] bg-white/60 dark:bg-stone-800/60 px-2 py-1 text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-bg)]';
@@ -1105,6 +1131,25 @@ function TranslateWorkspace({ onClose }: { onClose: () => void }) {
             ))}
           </select>
         </div>
+        {/* 翻译节点：免费节点无需任何配置；换节点只改本地设置，不改输入框 */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <span className="text-xs text-neutral-500 dark:text-stone-400">{tr('transfer.translateNode')}</span>
+          <select
+            value={node}
+            onChange={(e) => {
+              setNode(e.target.value);
+              const s = loadTranslateSettings();
+              s.node = e.target.value;
+              saveTranslateSettings(s);
+            }}
+            className={selCls}
+            title={TRANSLATE_NODES.find((n) => n.id === node)?.note}
+          >
+            {TRANSLATE_NODES.map((n) => (
+              <option key={n.id} value={n.id}>{n.label}</option>
+            ))}
+          </select>
+        </div>
         <div className="flex items-center justify-between flex-shrink-0">
           <span className="text-xs font-medium text-neutral-600 dark:text-stone-300">{tr('transfer.sourceText')}</span>
           <button
@@ -1123,6 +1168,12 @@ function TranslateWorkspace({ onClose }: { onClose: () => void }) {
         />
         {error && (
           <div className="text-xs text-amber-600 dark:text-amber-400 flex-shrink-0">{error}</div>
+        )}
+        {notices && (
+          <pre className="text-[10px] leading-relaxed whitespace-pre-wrap break-all m-0 p-2 rounded-lg flex-shrink-0 bg-amber-500/5 text-amber-600 dark:text-amber-400">{notices}</pre>
+        )}
+        {meta && (
+          <div className="text-[10px] text-neutral-400 dark:text-stone-500 flex-shrink-0">{meta}</div>
         )}
         {/* 目标语言：放在下方输入框（译文）上面，无「自动识别」 */}
         <div className="flex items-center gap-2 flex-shrink-0">

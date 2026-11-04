@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import { ensureOverlayWindow } from '@/core/overlayWindow';
 import { EVENTS } from '@/core/events/schema';
+import type { TranslateSettings, TranslateResult } from './translateLanguages';
 
 // 定义笔记的数据类型（与 Rust 端保持一致）
 export interface NoteInfo {
@@ -224,10 +225,11 @@ export const api = {
   aiVisionOcr: (imageBase64: string, imageMime: string, prompt?: string, profileId?: string) =>
     invoke<string>('ai_vision_ocr', { imageBase64, imageMime, prompt, profileId }),
 
-  // AI 翻译：传入文本 + 目标语言 + 可选源语言（"auto" 表示自动识别），返回译文
-  // 未配置 AI 时抛错，调用方需展示降级提示（与 ai 编程模块一致）
-  translateText: (text: string, targetLang?: string, sourceLang?: string, profileId?: string) =>
-    invoke<string>('translate_text', { text, targetLang, sourceLang, profileId }),
+  // 多节点翻译：免费节点（Bing / MyMemory）、AI、百度、有道、DeepL、LibreTranslate…
+  // 返回**结构化结果**（译文 + 实际节点 + 源语言识别 + 所有显式提示 + 诊断）。
+  // settings 里带节点/凭证/链顺序/术语表；不传也能用（落默认链，无需任何 key）。
+  translateText: (text: string, targetLang?: string, sourceLang?: string, settings?: TranslateSettings) =>
+    invoke<TranslateResult>('translate_text', { text, targetLang, sourceLang, settings }),
 
   // OCR 文本校对 / 整理：将 OCR 原文交给文本模型纠错整理（用于 DeepSeek 等不支持识图的模型）
   aiOcrEnhance: (text: string, profileId?: string) =>

@@ -13,10 +13,16 @@ import { basename, extOf, pathToDataUrl } from '@/platform/nativeDropFiles';
 import {
   SOURCE_LANGS,
   TARGET_LANGS,
+  TRANSLATE_NODES,
   loadSourceLang,
   loadTargetLang,
   saveSourceLang,
   saveTargetLang,
+  loadTranslateSettings,
+  saveTranslateSettings,
+  translateSettingsFor,
+  formatNotices,
+  type TranslateResult,
 } from '@/lib/translateLanguages';
 import { EVENTS } from '@/core/events/schema';
 
@@ -614,16 +620,32 @@ function TranslateBox() {
   const [error, setError] = useState<string | null>(null);
   const [sourceLang, setSourceLang] = useState<string>(() => loadSourceLang());
   const [targetLang, setTargetLang] = useState<string>(() => loadTargetLang());
+  const [node, setNode] = useState<string>(() => loadTranslateSettings().node || 'auto');
+  const [notices, setNotices] = useState('');
+  const [meta, setMeta] = useState('');
 
   const run = async () => {
     if (!input.trim()) return;
     setLoading(true);
     setError(null);
+    setNotices('');
+    setMeta('');
     try {
-      const res = await api.translateText(input, targetLang, sourceLang);
-      setOutput(res || '');
+      const res: TranslateResult = await api.translateText(
+        input, targetLang, sourceLang, translateSettingsFor(node),
+      );
+      setOutput(res.text || '');
+      setNotices(formatNotices(res.notices));
+      const bits = [
+        `节点：${TRANSLATE_NODES.find((n) => n.id === res.node)?.label ?? res.node}`,
+        res.detectedLang ? `识别源语言：${res.detectedLang}` : '',
+        res.segments > 1 ? `分段：${res.segments}` : '',
+        res.fromCache ? '命中缓存' : '',
+      ].filter(Boolean);
+      setMeta(bits.join(' · '));
     } catch (e) {
-      setError(typeof e === 'string' ? e : '翻译失败，请检查 AI 配置');
+      // 完整错误：含 [节点/阶段] 与每次兜底，不截断
+      setError(typeof e === 'string' ? e : String(e));
     } finally {
       setLoading(false);
     }
@@ -662,6 +684,25 @@ function TranslateBox() {
           ))}
         </select>
       </div>
+      {/* 翻译节点：与设置页共用同一份 localStorage 设置 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        <span style={langLabelStyle}>节点</span>
+        <select
+          value={node}
+          onChange={(e) => {
+            setNode(e.target.value);
+            const s = loadTranslateSettings();
+            s.node = e.target.value;
+            saveTranslateSettings(s);
+          }}
+          style={langSelStyle}
+          title={TRANSLATE_NODES.find((n) => n.id === node)?.note}
+        >
+          {TRANSLATE_NODES.map((n) => (
+            <option key={n.id} value={n.id}>{n.label}</option>
+          ))}
+        </select>
+      </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
         <span style={{ fontSize: 12, fontWeight: 600, opacity: 0.7 }}>原文</span>
         <div style={{ flex: 1 }} />
@@ -676,6 +717,10 @@ function TranslateBox() {
         style={taStyle}
       />
       {error && <div style={{ color: '#b45309', fontSize: 12, flexShrink: 0 }}>{error}</div>}
+      {notices && (
+        <pre style={{ color: '#b45309', fontSize: 11, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0, padding: 8, borderRadius: 8, background: 'rgba(180,83,9,0.06)', flexShrink: 0 }}>{notices}</pre>
+      )}
+      {meta && <div style={{ fontSize: 10, opacity: 0.6, flexShrink: 0 }}>{meta}</div>}
       {/* 目标语言：放在下方输入框（译文）上面，无「自动识别」 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
         <span style={langLabelStyle}>目标语言</span>

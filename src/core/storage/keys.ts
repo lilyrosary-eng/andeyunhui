@@ -90,6 +90,7 @@ export const KEYS = {
     aideChat:          { key: 'andeyunhui.capsule.aide.conversations.v2', kind: 'json', scope: 'desktop', note: 'components/capsule/CapsuleAide.tsx AIDE_STORE_KEY，已封装模块，内部逻辑不动' },
     translateSource:   { key: 'ts_translate_source', kind: 'string', scope: 'desktop', note: 'lib/translateLanguages.ts KEY_SOURCE，已封装模块，内部逻辑不动' },
     translateTarget:   { key: 'ts_translate_target', kind: 'string', scope: 'desktop', note: 'lib/translateLanguages.ts KEY_TARGET，已封装模块，内部逻辑不动' },
+    translateSettings: { key: 'ts_translate_settings', kind: 'json', scope: 'desktop', note: 'lib/translateLanguages.ts KEY_SETTINGS；翻译节点/凭证/链顺序/术语表，已封装模块，内部逻辑不动' },
     deskpetManifest:   { key: 'deskpet:manifest', kind: 'json', scope: 'desktop', note: 'deskpetManifest.ts DESKPET_MANIFEST_KEY，已封装模块，内部逻辑不动' },
     deskpetPresets:    { key: 'deskpet:presets', kind: 'json', scope: 'desktop', note: 'deskpetManifest.ts DESKPET_PRESETS_KEY，已封装模块，内部逻辑不动' },
     deskpetActive:     { key: 'deskpet:active', kind: 'string', scope: 'desktop', note: 'deskpetManifest.ts DESKPET_ACTIVE_PRESET_KEY，已封装模块，内部逻辑不动' },

@@ -1,4 +1,5 @@
 // 中转站翻译页（主站 / 浮窗）共用的语言下拉数据 + 上次选择记忆
+// 2026-11-04 起还承载「多节点翻译」的节点表与设置（见 Rust translate_service.rs）。
 
 export interface TranslateLang {
   /** 传给后端的语言描述（如「中文」「英语」），自动识别用 "auto" */
@@ -71,4 +72,111 @@ export function saveTargetLang(v: string): void {
   } catch {
     /* 忽略持久化失败 */
   }
+}
+
+// ==================== 多节点翻译（2026-11-04）====================
+//
+// 节点可用性是**本机真实请求实测**的，不是看文档猜的。Rust 侧 translate_service.rs
+// 模块头部有完整实测表。这里只放 UI 需要的元信息。
+
+export interface TranslateNode {
+  id: string;
+  label: string;
+  /** 是否需要用户填凭证（免费节点 = false） */
+  needsKey: boolean;
+  /** 一句话说明；不可达/需自建的节点要如实标出来，不许装作可用 */
+  note: string;
+}
+
+/** 与 Rust `translate_service::NODES` 一一对应（顺序也一致：免费在前、AI 在后）。 */
+export const TRANSLATE_NODES: TranslateNode[] = [
+  { id: 'auto', label: '自动（按链兜底）', needsKey: false, note: '按链依次尝试，每次失败/降级都显式提示' },
+  { id: 'bing', label: 'Bing 网页版 · 免费', needsKey: false, note: '免 key；实测可用，能识别源语言' },
+  { id: 'mymemory', label: 'MyMemory · 免费', needsKey: false, note: '免 key；有日额度，单段上限 500 字符' },
+  { id: 'ai', label: 'AI 模型', needsKey: true, note: '复用全局 AI 配置；本地 LM Studio 可不填 key' },
+  { id: 'baidu', label: '百度翻译', needsKey: true, note: '官方 API（免费额度）；需 appid + 密钥，md5 签名' },
+  { id: 'youdao', label: '有道翻译', needsKey: true, note: '官方 API（免费额度）；需 appKey + 密钥，sha256 签名' },
+  { id: 'deepl', label: 'DeepL', needsKey: true, note: '需 auth_key；国内可能不通' },
+  { id: 'libre', label: 'LibreTranslate', needsKey: false, note: '公共实例实测 403/DNS 失败，请填自建端点' },
+  { id: 'google', label: 'Google gtx', needsKey: false, note: '本机实测超时，保留供网络可达时使用' },
+];
+
+/** 自动模式的默认链：免 key 排前面，没配任何 key 也能翻译，且不会偷偷花 AI 的钱。 */
+export const DEFAULT_TRANSLATE_CHAIN = ['bing', 'mymemory', 'ai'];
+
+/** 与 Rust `TranslateSettings`（serde rename_all = "camelCase"）逐字段对应。 */
+export interface TranslateSettings {
+  node?: string;
+  chain?: string[];
+  baiduAppId?: string;
+  baiduSecret?: string;
+  youdaoAppKey?: string;
+  youdaoSecret?: string;
+  deeplKey?: string;
+  libreUrl?: string;
+  libreKey?: string;
+  profileId?: string;
+  /** 术语表，每行 `原词=译法`；只对 AI 节点生效（用了别的节点会显式提示） */
+  glossary?: string;
+  cache?: boolean;
+  /** 测试模式：强制单节点、绕过缓存、返回 via/stage/detail 诊断 */
+  probe?: boolean;
+}
+
+/** `translate_text` 的结构化返回。notices 是**给用户看的**，不许只进日志。 */
+export interface TranslateResult {
+  text: string;
+  node: string;
+  detectedLang?: string | null;
+  notices: string[];
+  fromCache: boolean;
+  segments: number;
+  via?: string | null;
+  stage?: string | null;
+  detail?: string | null;
+}
+
+const KEY_SETTINGS = 'ts_translate_settings';
+
+/** 读设置。**坏 JSON 不该让翻译链挂掉** —— 回落成「自动」。 */
+export function loadTranslateSettings(): TranslateSettings {
+  try {
+    const raw = localStorage.getItem(KEY_SETTINGS);
+    if (raw && raw.trim()) {
+      const o = JSON.parse(raw) as TranslateSettings;
+      if (o && typeof o === 'object') {
+        return { node: typeof o.node === 'string' ? o.node : 'auto', ...o };
+      }
+    }
+  } catch {
+    /* localStorage 不可用 / JSON 坏了 → 用默认 */
+  }
+  return { node: 'auto' };
+}
+
+export function saveTranslateSettings(s: TranslateSettings): void {
+  try {
+    localStorage.setItem(KEY_SETTINGS, JSON.stringify(s));
+  } catch {
+    /* 忽略持久化失败 */
+  }
+}
+
+/** 本次调用要下发的设置：把「当前选中的节点」并进去，并可强制单节点测试。 */
+export function translateSettingsFor(node?: string, probe = false): TranslateSettings {
+  const s = loadTranslateSettings();
+  const out: TranslateSettings = { ...s };
+  if (node !== undefined) out.node = node;
+  if (probe) {
+    out.probe = true;
+    out.cache = false; // 测试必须真发请求，不能被缓存命中掩盖
+  }
+  return out;
+}
+
+/** 把后端的显式提示拼成可展示的一段文本（保持换行，不做截断）。 */
+export function formatNotices(notices?: string[] | null): string {
+  if (!notices?.length) return '';
+  // 用 String.fromCharCode(10) 而不是 '\n'：脚本生成时反斜杠转义容易被吃掉
+  return notices.map((n) => (n.startsWith('⚠️') ? n : `⚠️ ${n}`)).join(String.fromCharCode(10));
 }

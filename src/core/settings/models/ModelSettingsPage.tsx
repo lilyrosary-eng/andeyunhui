@@ -12,6 +12,7 @@ import { resolveMediaConfig } from '@/core/ai/media/resolve';
 import { ComfyuiPanel } from './ComfyuiPanel';
 import { MediaBackendsPanel } from './MediaBackendsPanel';
 import { InjectionPromptPanel } from './InjectionPromptPanel';
+import { TranslatePanel } from './TranslatePanel';
 import { inferProviderName, mergeModels, newModelKey, refillCapacity, refillCaps, sameBaseUrl } from './providerMatch';
 import { bestScore } from '@/lib/fuzzy';
 
@@ -535,6 +536,10 @@ export function ModelSettingsPage() {
 
       {/* 注入层提示词：AI 编程使用的系统规则。空白 = 只用内置；冲突时用户填写优先。 */}
       <InjectionPromptPanel />
+
+      {/* 翻译节点：与两个翻译工作区共用同一份设置（ts_translate_settings）。
+          含逐节点「测试」按钮，真发请求并显示实际通道 / stage / 原始错误。 */}
+      <TranslatePanel t={t} />
 
     </div>
   );
