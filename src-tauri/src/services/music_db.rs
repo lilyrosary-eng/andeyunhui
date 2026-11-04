@@ -112,6 +112,10 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| format!("初始化音乐表结构失败: {}", e))?;
 
+    // 标签写回历史（撤销的凭据）：与主表分开建，DDL 是常量，单测共用同一份避免漂移。
+    conn.execute_batch(TAG_HISTORY_DDL)
+        .map_err(|e| format!("初始化标签历史表失败: {}", e))?;
+
     // 兼容老库：CREATE TABLE IF NOT EXISTS 对已存在的表无效，
     // 若早期版本建表缺列（listen_daily.track_count / listen_day_track 的明细列），
     // 需在此 ALTER 补齐，否则 music_record_play_session 会因缺列报错。
@@ -939,5 +943,181 @@ mod meta_tests {
         ];
         let out = merge_listen_tracks(rows);
         assert_eq!(out.len(), 2);
+    }
+}
+
+// ============ 标签写回历史（写前快照 / 整批撤销） ============
+
+/// 标签写回历史表。一行 = 「某批次里某个文件的改前状态」。
+///
+/// - `old_json`：`music_service::TagSnapshot` 的序列化，即写回**之前**文件里的字段值
+/// - `cover_backup`：该次若同时换了封面，指向被覆盖掉的旧封面留底文件；没换则 NULL
+///
+/// 整批撤销按 `batch_id` 取出全部行逐条写回，成功后删掉这批历史 —— 撤销是一次性的，
+/// 否则连点两次会把文件滚回同一个旧快照（第二次其实是"重放"而不是"撤销"）。
+pub const TAG_HISTORY_DDL: &str = "
+CREATE TABLE IF NOT EXISTS tag_edit_history (
+    batch_id     TEXT NOT NULL,
+    file_path    TEXT NOT NULL,
+    old_json     TEXT NOT NULL,
+    cover_backup TEXT,
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY (batch_id, file_path)
+);
+CREATE INDEX IF NOT EXISTS idx_teh_batch ON tag_edit_history(batch_id);";
+
+/// 历史行（撤销时按行取回改前快照与封面留底路径）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagHistoryRow {
+    pub file_path: String,
+    pub old_json: String,
+    pub cover_backup: Option<String>,
+}
+
+/// 落一条改前快照。
+///
+/// 同批次同文件重复写入时**保留最早那份 old_json**：一次批量刮库对同一文件可能先写字段
+/// 再换封面，第二次的快照已经是"被本批改过之后"的状态，拿它撤销等于什么也没撤。
+/// `cover_backup` 走 COALESCE 合并 —— 后到的那一步才带得上封面留底路径。
+pub fn record_tag_snapshot_conn(
+    conn: &Connection,
+    batch_id: &str,
+    file_path: &str,
+    old_json: &str,
+    cover_backup: Option<&str>,
+) -> Result<(), String> {
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO tag_edit_history (batch_id, file_path, old_json, cover_backup, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(batch_id, file_path) DO UPDATE SET
+            cover_backup = COALESCE(excluded.cover_backup, tag_edit_history.cover_backup)",
+        params![batch_id, file_path, old_json, cover_backup, created_at],
+    )
+    .map_err(|e| format!("写入标签改前快照失败: {}", e))?;
+    Ok(())
+}
+
+pub fn tag_history_rows_conn(conn: &Connection, batch_id: &str) -> Result<Vec<TagHistoryRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT file_path, old_json, cover_backup FROM tag_edit_history
+             WHERE batch_id = ?1 ORDER BY created_at ASC, file_path ASC",
+        )
+        .map_err(|e| format!("准备查询标签历史失败: {}", e))?;
+    let rows = stmt
+        .query_map(params![batch_id], |r| {
+            Ok(TagHistoryRow {
+                file_path: r.get(0)?,
+                old_json: r.get(1)?,
+                cover_backup: r.get(2)?,
+            })
+        })
+        .map_err(|e| format!("查询标签历史失败: {}", e))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("读取标签历史行失败: {}", e))?);
+    }
+    Ok(out)
+}
+
+/// 删除整批历史，返回删除行数。撤销成功后调用，保证撤销不可重放。
+pub fn drop_tag_history_batch_conn(conn: &Connection, batch_id: &str) -> Result<usize, String> {
+    conn.execute("DELETE FROM tag_edit_history WHERE batch_id = ?1", params![batch_id])
+        .map_err(|e| format!("清理标签历史失败: {}", e))
+}
+
+/// 上面三个 `*_conn` 变体的 AppHandle 包装（与本项目其它命令一致的按需开连接模式），
+/// 拆开两层是为了让 SQL 能用内存库直接单测。
+pub fn music_record_tag_snapshot(
+    app: &AppHandle,
+    batch_id: &str,
+    file_path: &str,
+    old_json: &str,
+    cover_backup: Option<&str>,
+) -> Result<(), String> {
+    let conn = open_db(app)?;
+    record_tag_snapshot_conn(&conn, batch_id, file_path, old_json, cover_backup)
+}
+
+pub fn music_tag_history_rows(app: &AppHandle, batch_id: &str) -> Result<Vec<TagHistoryRow>, String> {
+    let conn = open_db(app)?;
+    tag_history_rows_conn(&conn, batch_id)
+}
+
+pub fn music_drop_tag_history_batch(app: &AppHandle, batch_id: &str) -> Result<usize, String> {
+    let conn = open_db(app)?;
+    drop_tag_history_batch_conn(&conn, batch_id)
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    fn mem_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("内存库打开失败");
+        conn.execute_batch(TAG_HISTORY_DDL).expect("建历史表失败");
+        conn
+    }
+
+    #[test]
+    fn 快照写入后可按批次读回并带着封面留底路径() {
+        let conn = mem_db();
+        record_tag_snapshot_conn(&conn, "b1", "/m/a.flac", r#"{"title":"旧"}"#, Some("/bak/a_1.jpg"))
+            .unwrap();
+        record_tag_snapshot_conn(&conn, "b1", "/m/b.flac", r#"{"title":"B"}"#, None).unwrap();
+        record_tag_snapshot_conn(&conn, "b2", "/m/a.flac", r#"{"title":"别的批次"}"#, None).unwrap();
+
+        let rows = tag_history_rows_conn(&conn, "b1").unwrap();
+        assert_eq!(rows.len(), 2, "只应取到本批次的两行");
+        assert_eq!(rows[0].file_path, "/m/a.flac");
+        assert_eq!(rows[0].cover_backup.as_deref(), Some("/bak/a_1.jpg"));
+        assert_eq!(rows[1].cover_backup, None);
+    }
+
+    #[test]
+    fn 同批次同文件保留最早快照_封面留底后补进来() {
+        let conn = mem_db();
+        // 批量刮库对同一文件：第一步写字段（此时还没换封面），第二步换封面才产生留底
+        record_tag_snapshot_conn(&conn, "b1", "/m/a.flac", r#"{"title":"本批之前的标题"}"#, None).unwrap();
+        record_tag_snapshot_conn(
+            &conn,
+            "b1",
+            "/m/a.flac",
+            r#"{"title":"已被本批改过之后的标题"}"#,
+            Some("/bak/a_2.jpg"),
+        )
+        .unwrap();
+        let rows = tag_history_rows_conn(&conn, "b1").unwrap();
+        assert_eq!(rows.len(), 1);
+        // 撤销要回到「这批动手之前」，所以 earliest 的 old_json 不能被后一次覆盖
+        assert_eq!(rows[0].old_json, r#"{"title":"本批之前的标题"}"#);
+        assert_eq!(rows[0].cover_backup.as_deref(), Some("/bak/a_2.jpg"));
+    }
+
+    #[test]
+    fn 已有封面留底不会被后到的空值抹掉() {
+        let conn = mem_db();
+        record_tag_snapshot_conn(&conn, "b1", "/m/a.flac", "{}", Some("/bak/a_1.jpg")).unwrap();
+        record_tag_snapshot_conn(&conn, "b1", "/m/a.flac", "{}", None).unwrap();
+        let rows = tag_history_rows_conn(&conn, "b1").unwrap();
+        assert_eq!(rows[0].cover_backup.as_deref(), Some("/bak/a_1.jpg"));
+    }
+
+    #[test]
+    fn 撤销后整批历史被清空_防止重放() {
+        let conn = mem_db();
+        record_tag_snapshot_conn(&conn, "b1", "/m/a.flac", "{}", None).unwrap();
+        record_tag_snapshot_conn(&conn, "b1", "/m/b.flac", "{}", None).unwrap();
+        record_tag_snapshot_conn(&conn, "b2", "/m/c.flac", "{}", None).unwrap();
+
+        assert_eq!(drop_tag_history_batch_conn(&conn, "b1").unwrap(), 2);
+        assert!(tag_history_rows_conn(&conn, "b1").unwrap().is_empty());
+        // 其它批次不受牵连
+        assert_eq!(tag_history_rows_conn(&conn, "b2").unwrap().len(), 1);
     }
 }

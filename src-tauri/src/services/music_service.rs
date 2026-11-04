@@ -489,12 +489,14 @@ fn picture_ext(mime: Option<&str>) -> &'static str {
 ///
 /// `backup_dir` 为 Some 时，覆盖前把当前内嵌封面留底一份（同文件最多 `COVER_BACKUP_KEEP`
 /// 份滚动）；留底失败**直接中止本次换封面**，不做无退路的覆盖。传 None 表示这次不需要留底。
+///
+/// 成功时返回本次写下的留底文件路径（没留底则为 None），供调用方记进标签历史以支持撤销。
 fn embed_cover_into_file(
     resolved: &Path,
     image_bytes: &[u8],
     mime: Option<&str>,
     backup_dir: Option<&Path>,
-) -> Result<(), String> {
+) -> Result<Option<PathBuf>, String> {
     let mut tagged_file = read_from_path(resolved).map_err(|e| format!("读取音频失败: {}", e))?;
     // mime 缺失时按字节头推断，作为 Content-Type fallback
     let mime_type = match mime.and_then(|m| {
@@ -521,6 +523,7 @@ fn embed_cover_into_file(
         .mime_type(mime_type)
         .description("cover")
         .build();
+    let mut backup_path: Option<PathBuf> = None;
     {
         let tag = if let Some(t) = tagged_file.primary_tag_mut() {
             t
@@ -536,7 +539,7 @@ fn embed_cover_into_file(
                 .first()
                 .map(|p| (p.data().to_vec(), picture_ext(p.mime_type().map(|m| m.as_str()))));
             if let Some((bytes, ext)) = old {
-                write_cover_backup(dir, resolved, &bytes, ext)?;
+                backup_path = Some(write_cover_backup(dir, resolved, &bytes, ext)?);
             }
         }
         // 移除旧封面后写入固定索引 0（set_picture 索引越界时自动 push）
@@ -548,7 +551,7 @@ fn embed_cover_into_file(
     tagged_file
         .save_to_path(resolved, lofty::config::WriteOptions::default())
         .map_err(|e| format!("内嵌封面写回失败: {}", e))?;
-    Ok(())
+    Ok(backup_path)
 }
 
 /// 取 file_path 对应的 canonicalize 后路径（与 extract_track_metadata 一致）。
@@ -570,11 +573,45 @@ fn sync_cover_after_embed(app: &tauri::AppHandle, file_path: &str) -> Result<Str
 /// 1) 优先写入音频文件内嵌标签（真正持久化到文件，迁移/分享也带封面）；
 /// 2) 任一步失败时回退为旧逻辑——封面写入 music_covers 目录并固定为 override。
 /// 返回新封面文件的绝对路径。
+/// 换封面成功后补一条批次历史（改前字段快照 + 本次产生的封面留底路径），
+/// 让「整批撤销」能把封面一起退回去。
+///
+/// 读不到改前快照时**不记历史**：宁可撤销时这批不含封面，也不能记一份残缺快照
+/// 让撤销把字段全部清空。留底文件本身已经在盘上，用户仍可用「恢复某份留底」单独退回。
+fn record_cover_history(
+    app: &tauri::AppHandle,
+    file_path: &str,
+    batch_id: Option<&str>,
+    cover_backup: Option<&Path>,
+) {
+    let Some(batch_id) = batch_id else { return };
+    let resolved = canonical_path_of(file_path);
+    let Some(snapshot) = lofty::read_from_path(&resolved)
+        .ok()
+        .and_then(|tf| tf.primary_tag().or_else(|| tf.first_tag()).map(snapshot_of_tagged))
+    else {
+        eprintln!("[music_service] 读不到改前快照，本次换封面不进批次历史: {}", file_path);
+        return;
+    };
+    let Ok(snapshot_json) = serde_json::to_string(&snapshot) else { return };
+    let backup_str = cover_backup.map(|p| p.to_string_lossy().into_owned());
+    if let Err(e) = crate::services::music_db::music_record_tag_snapshot(
+        app,
+        batch_id,
+        file_path,
+        &snapshot_json,
+        backup_str.as_deref(),
+    ) {
+        eprintln!("[music_service] 封面批次历史写入失败（留底仍在盘上，可单独恢复）: {}", e);
+    }
+}
+
 pub fn set_cover_from_base64(
     app: &tauri::AppHandle,
     file_path: String,
     data_base64: String,
     mime: Option<String>,
+    batch_id: Option<String>,
 ) -> Result<String, String> {
     use base64::Engine;
     let raw = base64::engine::general_purpose::STANDARD
@@ -584,7 +621,10 @@ pub fn set_cover_from_base64(
     let resolved = canonical_path_of(&file_path);
     let backup_dir = cover_backup_dir_of(app);
     match embed_cover_into_file(&resolved, &raw, mime.as_deref(), backup_dir.as_deref()) {
-        Ok(()) => return sync_cover_after_embed(app, &file_path),
+        Ok(backup_path) => {
+            record_cover_history(app, &file_path, batch_id.as_deref(), backup_path.as_deref());
+            return sync_cover_after_embed(app, &file_path);
+        }
         Err(embed_err) => eprintln!("[music_service] 内嵌封面写入失败，回退缓存 override: {} ({})", file_path, embed_err),
     }
     let ext = match mime.as_deref() {
@@ -610,6 +650,7 @@ pub async fn set_cover_from_url(
     app: &tauri::AppHandle,
     file_path: String,
     url: String,
+    batch_id: Option<String>,
 ) -> Result<String, String> {
     let response = reqwest::get(&url)
         .await
@@ -638,7 +679,10 @@ pub async fn set_cover_from_url(
         let mime_str = mime.as_deref();
         let backup_dir = cover_backup_dir_of(&app2);
         match embed_cover_into_file(&resolved, &image_bytes, mime_str, backup_dir.as_deref()) {
-            Ok(()) => sync_cover_after_embed(&app2, &fp).map_err(|e| format!("封面同步失败: {}", e)),
+            Ok(backup_path) => {
+                record_cover_history(&app2, &fp, batch_id.as_deref(), backup_path.as_deref());
+                sync_cover_after_embed(&app2, &fp).map_err(|e| format!("封面同步失败: {}", e))
+            }
             Err(embed_err) => {
                 eprintln!("[music_service] 内嵌封面写入失败，回退缓存 override: {} ({})", fp, embed_err);
                 let dir = cover_dir_of(&app2).ok_or_else(|| "无法获取封面目录".to_string())?;
@@ -701,7 +745,8 @@ pub fn rescan_track_metadata(app: &tauri::AppHandle, file_path: String) -> Resul
 /// 字段集对齐 MusicTag 的列表列（title/artist/album/albumartist/year/track/disc/genre/
 /// composer/lyricist/comment），全部走 lofty 的 `ItemKey`，由 lofty 按容器映射到
 /// ID3v2 / Vorbis / MP4 ilst / APEv2 等对应帧。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TagEditDraft {
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -767,6 +812,81 @@ fn apply_year_item(tag: &mut lofty::tag::Tag, raw: &str) -> bool {
     tag.insert_text(ItemKey::RecordingDate, v.to_string())
 }
 
+/// 写回**之前**的字段快照，落库用（`music_db::tag_edit_history.old_json`）。
+///
+/// 与 `TagEditDraft` 的区别在于每个字段都是必填的字符串：空串表示"这个字段当时没有值"，
+/// 撤销时要把标签项删掉。若沿用 Draft 的 `None`，撤销就无法区分"别动"和"清空"，
+/// 批量新写入的流派/年份会撤不掉。
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagSnapshot {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub track_number: String,
+    pub track_total: String,
+    pub disc_number: String,
+    pub disc_total: String,
+    pub year: String,
+    pub genre: String,
+    pub composer: String,
+    pub lyricist: String,
+    pub comment: String,
+}
+
+/// 读出文件当前的字段快照（读不到的字段留空串 = 撤销时清除）。
+fn snapshot_of_tagged(tagged: &lofty::tag::Tag) -> TagSnapshot {
+    use lofty::tag::ItemKey;
+    let s = |k: ItemKey| tag_item_str(Some(tagged), k).unwrap_or_default();
+    let n = |v: Option<u32>| v.map(|x| x.to_string()).unwrap_or_default();
+    TagSnapshot {
+        title: s(ItemKey::TrackTitle),
+        artist: s(ItemKey::TrackArtist),
+        album: s(ItemKey::AlbumTitle),
+        album_artist: s(ItemKey::AlbumArtist),
+        track_number: n(tagged.track()),
+        track_total: n(tagged.track_total()),
+        disc_number: n(tagged.disk()),
+        disc_total: n(tagged.disk_total()),
+        year: {
+            let dated = s(ItemKey::RecordingDate);
+            if dated.is_empty() { s(ItemKey::Year) } else { dated }
+        },
+        genre: tagged.genre().map(|c| c.to_string()).unwrap_or_default(),
+        composer: s(ItemKey::Composer),
+        lyricist: s(ItemKey::Lyricist),
+        comment: tagged.comment().map(|c| c.to_string()).unwrap_or_default(),
+    }
+}
+
+/// 把快照写回文件（撤销用）。返回该容器没有帧位而被跳过的字段名。
+fn apply_snapshot_to_tag(tag: &mut lofty::tag::Tag, snap: &TagSnapshot) -> Vec<&'static str> {
+    use lofty::tag::ItemKey;
+    let mut dropped: Vec<&'static str> = Vec::new();
+    let mut one = |label: &'static str, key: ItemKey, val: &str| {
+        if !apply_text_item(tag, key, Some(val)) {
+            dropped.push(label);
+        }
+    };
+    one("标题", ItemKey::TrackTitle, &snap.title);
+    one("歌手", ItemKey::TrackArtist, &snap.artist);
+    one("专辑", ItemKey::AlbumTitle, &snap.album);
+    one("专辑艺人", ItemKey::AlbumArtist, &snap.album_artist);
+    one("流派", ItemKey::Genre, &snap.genre);
+    one("作曲", ItemKey::Composer, &snap.composer);
+    one("作词", ItemKey::Lyricist, &snap.lyricist);
+    one("注释", ItemKey::Comment, &snap.comment);
+    one("音轨号", ItemKey::TrackNumber, &snap.track_number);
+    one("音轨总数", ItemKey::TrackTotal, &snap.track_total);
+    one("碟号", ItemKey::DiscNumber, &snap.disc_number);
+    one("碟总数", ItemKey::DiscTotal, &snap.disc_total);
+    if !apply_year_item(tag, &snap.year) {
+        dropped.push("年份");
+    }
+    dropped
+}
+
 /// 写回标签：用 lofty 修改文件的文本标签项并落盘，
 /// 同步更新 playlist_track/favorite 中的 title/artist/album（其余字段无对应列，
 /// 由调用方在写回后重扫单曲 `rescan_track_metadata` 取回真值）。
@@ -774,11 +894,29 @@ pub fn edit_track_tags(
     app: &tauri::AppHandle,
     file_path: String,
     draft: &TagEditDraft,
-) -> Result<(), String> {
+    batch_id: &str,
+) -> Result<Vec<String>, String> {
     let TagEditDraft { title, artist, album, .. } = draft;
     let path = Path::new(&file_path);
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut tagged_file = read_from_path(&resolved).map_err(|e| format!("读取音频失败: {}", e))?;
+
+    // 改前快照先落库，落不进去就不写文件 —— 覆盖原文件是不可逆的，
+    // 「有历史表但没写进去」比「这次没改成」严重得多。
+    let snapshot = tagged_file
+        .primary_tag()
+        .or_else(|| tagged_file.first_tag())
+        .map(snapshot_of_tagged)
+        .unwrap_or_default();
+    let snapshot_json =
+        serde_json::to_string(&snapshot).map_err(|e| format!("快照序列化失败: {}", e))?;
+    crate::services::music_db::music_record_tag_snapshot(
+        app,
+        batch_id,
+        &file_path,
+        &snapshot_json,
+        None,
+    )?;
     let mut dropped: Vec<&'static str> = Vec::new();
     {
         use lofty::tag::ItemKey;
@@ -808,15 +946,6 @@ pub fn edit_track_tags(
         record("碟号", apply_number_item(tag, ItemKey::DiscNumber, draft.disc_number));
         record("碟总数", apply_number_item(tag, ItemKey::DiscTotal, draft.disc_total));
     }
-    if !dropped.is_empty() {
-        // 该容器没有对应帧位置（如 APEv2 无作曲/作词），字段不会出现在文件里。
-        // 不阻断保存：其余字段仍然写成功，这里只如实记录被跳过的项。
-        eprintln!(
-            "[music_service] 以下标签项该格式不支持，已跳过: {} ({})",
-            dropped.join("、"),
-            file_path
-        );
-    }
     tagged_file
         .save_to_path(&resolved, lofty::config::WriteOptions::default())
         .map_err(|e| format!("标签写回失败: {}", e))?;
@@ -840,8 +969,208 @@ pub fn edit_track_tags(
         conn.execute("UPDATE favorite SET album=?2 WHERE file_path=?1", params![file_path, v])
             .map_err(|e| format!("更新收藏专辑失败: {}", e))?;
     }
-    Ok(())
+    Ok(dropped.into_iter().map(String::from).collect())
 }
+
+// ============ 写回历史：整批撤销 / 封面留底恢复 / 批量写回 ============
+
+/// 一次写回的回报：撤销用的批次号 + 被该容器跳过的字段名。
+///
+/// 单曲编辑也会拿到一个批次号 —— 这样「撤销刚才这次修改」和「撤销整批刮库」
+/// 用的是同一条通路，前端不用区分两种撤销。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditOutcome {
+    pub batch_id: String,
+    pub dropped: Vec<String>,
+}
+
+/// 为一次非批量写回生成批次号（前端拿到它就能给出「撤销这次修改」）。
+pub fn new_batch_id(kind: &str) -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{}_{}", kind, ms)
+}
+
+/// 批量写回的一项：文件 + 要写的字段。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchTagItem {
+    pub file_path: String,
+    pub draft: TagEditDraft,
+}
+
+/// 批量写回的单项目结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchItemResult {
+    pub file_path: String,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub dropped: Vec<String>,
+}
+
+/// 一批标签写回的全部改前快照（撤销时逐条写回）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RollbackReport {
+    pub files: usize,
+    pub covers_restored: usize,
+    /// 形如 `路径: 原因`；非空时这批历史**不会**被删除，用户还能再撤剩下的
+    pub failed: Vec<String>,
+}
+
+/// 批量写回。顺序执行、逐项回报，一项失败不影响其余项。
+///
+/// 刻意不并发：每项都要开 SQLite 连接写历史，且改的是用户磁盘上的原件，
+/// 顺序做才拿得到确定的「谁成功了、谁没成功」清单。
+pub fn batch_edit_tracks(
+    app: &tauri::AppHandle,
+    items: Vec<BatchTagItem>,
+    batch_id: &str,
+) -> Vec<BatchItemResult> {
+    items
+        .into_iter()
+        .map(|item| match edit_track_tags(app, item.file_path.clone(), &item.draft, batch_id) {
+            Ok(dropped) => BatchItemResult { file_path: item.file_path, ok: true, error: None, dropped },
+            Err(e) => BatchItemResult {
+                file_path: item.file_path,
+                ok: false,
+                error: Some(e),
+                dropped: Vec::new(),
+            },
+        })
+        .collect()
+}
+
+/// 撤销一批写回：按批次号取出每个文件的改前快照逐条写回；该批若换过封面，
+/// 再用对应留底把封面装回去。
+///
+/// 全部成功才删历史 —— 撤销是一次性的，留着成功部分的历史会让第二次点击
+/// 变成"把已经改回去的文件再改回旧快照"（那是重放，不是撤销）。
+pub fn rollback_tag_batch(app: &tauri::AppHandle, batch_id: &str) -> Result<RollbackReport, String> {
+    let rows = crate::services::music_db::music_tag_history_rows(app, batch_id)?;
+    if rows.is_empty() {
+        return Err("这一批没有可撤销的写回记录".to_string());
+    }
+    let mut report = RollbackReport { files: 0, covers_restored: 0, failed: Vec::new() };
+    for row in rows {
+        match restore_one(app, &row) {
+            Ok(cover_restored) => {
+                report.files += 1;
+                if cover_restored {
+                    report.covers_restored += 1;
+                }
+            }
+            Err(e) => report.failed.push(format!("{}: {}", row.file_path, e)),
+        }
+    }
+    if report.failed.is_empty() {
+        crate::services::music_db::music_drop_tag_history_batch(app, batch_id)?;
+    } else {
+        eprintln!("[music_service] 批次 {} 有 {} 项撤销失败，历史保留", batch_id, report.failed.len());
+    }
+    Ok(report)
+}
+
+/// 把一行历史恢复回文件。返回是否同时恢复了封面。
+fn restore_one(app: &tauri::AppHandle, row: &crate::services::music_db::TagHistoryRow) -> Result<bool, String> {
+    // 快照字段是必填的：解析不进来就说明这条历史不完整，宁可失败也不能按默认值
+    // （全空串）写回 —— 那等于把用户文件的标签清空。
+    let snap: TagSnapshot =
+        serde_json::from_str(&row.old_json).map_err(|e| format!("改前快照不完整，拒绝写回: {}", e))?;
+    let resolved = canonical_path_of(&row.file_path);
+    let mut tagged_file = read_from_path(&resolved).map_err(|e| format!("读取音频失败: {}", e))?;
+    {
+        let tag = if let Some(t) = tagged_file.primary_tag_mut() {
+            t
+        } else {
+            tagged_file
+                .first_tag_mut()
+                .ok_or_else(|| "文件不含可写标签".to_string())?
+        };
+        let dropped = apply_snapshot_to_tag(tag, &snap);
+        if !dropped.is_empty() {
+            eprintln!(
+                "[music_service] 撤销时有字段该格式没有位置、未能恢复: {} ({})",
+                dropped.join("、"),
+                row.file_path
+            );
+        }
+    }
+    tagged_file
+        .save_to_path(&resolved, lofty::config::WriteOptions::default())
+        .map_err(|e| format!("写回失败: {}", e))?;
+    // 顺带刷新曲库缓存里显示的那份标题/歌手/专辑（与手动编辑同一套同步逻辑）
+    let _ = rescan_track_metadata(app, row.file_path.clone());
+    let mut cover_restored = false;
+    if let Some(backup) = &row.cover_backup {
+        restore_cover_from_backup(app, &row.file_path, backup)?;
+        cover_restored = true;
+    }
+    Ok(cover_restored)
+}
+
+/// 留底文件的 mime（按扩展名反推，认不出当 jpeg）
+fn mime_from_ext(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        _ => "image/jpeg",
+    }
+}
+
+/// 列出某文件换封面时留下的旧封面，新 → 旧。
+pub fn list_cover_backups(app: &tauri::AppHandle, file_path: String) -> Result<Vec<String>, String> {
+    let dir = cover_backup_dir_of(app).ok_or_else(|| "无法获取留底目录".to_string())?;
+    let resolved = canonical_path_of(&file_path);
+    let prefix = format!("{}_", path_hash_of(&resolved));
+    let mut names: Vec<String> = Vec::new();
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("读取留底目录失败: {}", e))?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(&prefix) && entry.path().is_file() {
+            names.push(name);
+        }
+    }
+    // 文件名里是定宽秒级时间戳，字典序倒排即时间倒序
+    names.sort_by(|a, b| b.cmp(a));
+    Ok(names.into_iter().map(|n| dir.join(n).to_string_lossy().to_string()).collect())
+}
+
+/// 用某个留底文件覆盖当前内嵌封面（单独撤销一次换封面）。
+pub fn restore_cover_from_backup(
+    app: &tauri::AppHandle,
+    file_path: &str,
+    backup_path: &str,
+) -> Result<String, String> {
+    let dir = cover_backup_dir_of(app).ok_or_else(|| "无法获取留底目录".to_string())?;
+    let candidate = Path::new(backup_path)
+        .canonicalize()
+        .map_err(|e| format!("留底文件不存在: {}", e))?;
+    let root = dir.canonicalize().map_err(|e| format!("留底目录不可用: {}", e))?;
+    // 路径由前端传入，必须钉在留底目录内，否则等于给了一个任意文件读取的口子
+    if !candidate.starts_with(&root) {
+        return Err("留底路径不在封面留底目录内，已拒绝".to_string());
+    }
+    let bytes = std::fs::read(&candidate).map_err(|e| format!("读取留底失败: {}", e))?;
+    let ext = candidate
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+    let mime = mime_from_ext(&ext);
+    let resolved = canonical_path_of(file_path);
+    // backup_dir 传 None：恢复本身就是撤销动作，不该再吃掉一份留底名额
+    embed_cover_into_file(&resolved, &bytes, Some(mime), None)?;
+    sync_cover_after_embed(app, file_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1078,5 +1407,100 @@ mod tests {
         assert_eq!(picture_ext(Some("image/webp")), "webp");
         assert_eq!(picture_ext(Some("application/octet-stream")), "jpg");
         assert_eq!(picture_ext(None), "jpg");
+    }
+
+    #[test]
+    fn 快照能把批量新写入的字段撤销掉() {
+        let mut tag = id3();
+        tag.insert_text(ItemKey::TrackTitle, "原名".to_string());
+        let snap = snapshot_of_tagged(&tag);
+        assert_eq!(snap.title, "原名");
+        assert_eq!(snap.genre, "", "当时没有流派 → 记成空串");
+
+        // 模拟这一批写入了流派与年份
+        assert!(apply_text_item(&mut tag, ItemKey::Genre, Some("流行")));
+        assert!(apply_year_item(&mut tag, "2003"));
+
+        let dropped = apply_snapshot_to_tag(&mut tag, &snap);
+        assert!(dropped.is_empty(), "ID3v2 这些字段都有位置: {:?}", dropped);
+        assert_eq!(tag.get_string(ItemKey::TrackTitle), Some("原名"));
+        assert_eq!(tag.get_string(ItemKey::Genre), None, "批量新加的流派必须被撤掉");
+        assert_eq!(tag.get_string(ItemKey::RecordingDate), None, "批量新加的年份必须被撤掉");
+    }
+
+    #[test]
+    fn 撤销时被格式没有位置的字段要点名报出() {
+        // RIFF INFO 没有专辑艺人的帧位，恢复这类字段只能如实报跳过
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::RiffInfo);
+        let snap = TagSnapshot {
+            album_artist: "艺人".to_string(),
+            title: "歌名".to_string(),
+            ..Default::default()
+        };
+        let dropped = apply_snapshot_to_tag(&mut tag, &snap);
+        assert!(dropped.contains(&"专辑艺人"), "应报出专辑艺人: {:?}", dropped);
+        // 有位置的字段照常恢复
+        assert_eq!(tag.get_string(ItemKey::TrackTitle), Some("歌名"));
+    }
+
+    #[test]
+    fn 快照序列化能读回_坏数据不会被当成空标签() {
+        let snap = TagSnapshot { title: "T".into(), year: "2003".into(), ..Default::default() };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: TagSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.title, "T");
+        assert_eq!(back.year, "2003");
+        // 残缺的历史行（比如只存了半个对象）必须解析失败，
+        // 不能退化成"全空串快照"——那等于撤销时把用户标签清空
+        assert!(serde_json::from_str::<TagSnapshot>(r#"{"title":"T"}"#).is_err());
+        assert!(serde_json::from_str::<TagSnapshot>("{}").is_err());
+    }
+
+    #[test]
+    fn 批次号带来源前缀且按毫秒区分() {
+        let a = new_batch_id("single");
+        let b = new_batch_id("batch");
+        assert!(a.starts_with("single_"));
+        assert!(b.starts_with("batch_"));
+        assert_ne!(a, b);
+    }
+
+    /// 规则挂载点：写文件之前必须先落改前快照。
+    ///
+    /// 顺序一旦被人调回去，覆盖原文件就没有退路了，所以把「快照先于写盘」钉成测试
+    /// （对齐本项目 agentContract.test.ts 用源码内容守住规则的做法），不靠注释自觉。
+    #[test]
+    fn 闸门_落快照必须排在写盘之前() {
+        let src = include_str!("music_service.rs");
+        let body = src
+            .split("pub fn edit_track_tags(")
+            .nth(1)
+            .expect("edit_track_tags 应存在")
+            .split("
+}
+")
+            .next()
+            .expect("函数体");
+        let record = body
+            .find("music_record_tag_snapshot")
+            .expect("edit_track_tags 必须落改前快照");
+        let save = body.find("save_to_path").expect("edit_track_tags 必须写盘");
+        assert!(
+            record < save,
+            "改前快照必须在 save_to_path 之前落库，否则覆盖原文件没有退路"
+        );
+
+        // 批量入口必须走同一条带闸门的通路，不能自己另开一次裸写
+        let batch = src
+            .split("pub fn batch_edit_tracks(")
+            .nth(1)
+            .expect("batch_edit_tracks 应存在")
+            .split("
+}
+")
+            .next()
+            .unwrap();
+        assert!(batch.contains("edit_track_tags("), "批量写回必须复用带快照闸门的 edit_track_tags");
+        assert!(!batch.contains("save_to_path"), "批量入口不该绕过闸门直接写盘");
     }
 }

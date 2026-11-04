@@ -153,8 +153,9 @@ pub fn music_set_cover(
     file_path: String,
     data_base64: String,
     mime: Option<String>,
+    batch_id: Option<String>,
 ) -> Result<String, String> {
-    music_service::set_cover_from_base64(&app, file_path, data_base64, mime)
+    music_service::set_cover_from_base64(&app, file_path, data_base64, mime, batch_id)
 }
 
 /// 按远程 URL 下载封面并写入音频文件内嵌标签（用于自动获取元信息）。
@@ -163,8 +164,9 @@ pub async fn music_set_cover_url(
     app: tauri::AppHandle,
     file_path: String,
     url: String,
+    batch_id: Option<String>,
 ) -> Result<String, String> {
-    music_service::set_cover_from_url(&app, file_path, url).await
+    music_service::set_cover_from_url(&app, file_path, url, batch_id).await
 }
 
 #[tauri::command]
@@ -195,7 +197,8 @@ pub fn music_edit_track(
     composer: Option<String>,
     lyricist: Option<String>,
     comment: Option<String>,
-) -> Result<(), String> {
+    batch_id: Option<String>,
+) -> Result<music_service::EditOutcome, String> {
     let draft = music_service::TagEditDraft {
         title,
         artist,
@@ -211,7 +214,48 @@ pub fn music_edit_track(
         lyricist,
         comment,
     };
-    music_service::edit_track_tags(&app, file_path, &draft)
+    let batch_id = batch_id.unwrap_or_else(|| music_service::new_batch_id("single"));
+    let dropped = music_service::edit_track_tags(&app, file_path, &draft, &batch_id)?;
+    Ok(music_service::EditOutcome { batch_id, dropped })
+}
+
+/// 批量写回标签（一批共用一个批次号，撤销时整批退回）。
+#[tauri::command]
+pub fn music_batch_edit_tracks(
+    app: tauri::AppHandle,
+    items: Vec<music_service::BatchTagItem>,
+    batch_id: String,
+) -> Vec<music_service::BatchItemResult> {
+    music_service::batch_edit_tracks(&app, items, &batch_id)
+}
+
+/// 撤销一批标签写回：按批次号把每个文件的字段写回改前快照，
+/// 该批换过的封面一并用留底装回去。
+#[tauri::command]
+pub fn music_rollback_tag_edit(
+    app: tauri::AppHandle,
+    batch_id: String,
+) -> Result<music_service::RollbackReport, String> {
+    music_service::rollback_tag_batch(&app, &batch_id)
+}
+
+/// 列出某文件换封面时留下的旧封面（新 → 旧），供「恢复封面」挑选。
+#[tauri::command]
+pub fn music_list_cover_backups(
+    app: tauri::AppHandle,
+    file_path: String,
+) -> Result<Vec<String>, String> {
+    music_service::list_cover_backups(&app, file_path)
+}
+
+/// 用指定留底恢复该文件的内嵌封面（单独撤销一次换封面）。
+#[tauri::command]
+pub fn music_restore_cover(
+    app: tauri::AppHandle,
+    file_path: String,
+    backup_path: String,
+) -> Result<String, String> {
+    music_service::restore_cover_from_backup(&app, &file_path, &backup_path)
 }
 
 #[tauri::command]
