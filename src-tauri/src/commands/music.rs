@@ -172,6 +172,12 @@ pub fn music_rescan_metadata(app: tauri::AppHandle, file_path: String) -> Result
     music_service::rescan_track_metadata(&app, file_path)
 }
 
+/// 写回曲目标签。
+///
+/// 参数保持"平铺 + 全部可选"的形式（而非收一个 draft 对象），是为了让现有前端调用
+/// `{filePath, title, artist, album, trackNumber}` 原样可用 —— 缺省的参数即 None，
+/// 表示该字段不动。新增字段在前端接入时按 camelCase 补传即可。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn music_edit_track(
     app: tauri::AppHandle,
@@ -180,8 +186,32 @@ pub fn music_edit_track(
     artist: Option<String>,
     album: Option<String>,
     track_number: Option<u32>,
+    album_artist: Option<String>,
+    year: Option<String>,
+    genre: Option<String>,
+    track_total: Option<u32>,
+    disc_number: Option<u32>,
+    disc_total: Option<u32>,
+    composer: Option<String>,
+    lyricist: Option<String>,
+    comment: Option<String>,
 ) -> Result<(), String> {
-    music_service::edit_track_tags(&app, file_path, title, artist, album, track_number)
+    let draft = music_service::TagEditDraft {
+        title,
+        artist,
+        album,
+        album_artist,
+        track_number,
+        track_total,
+        disc_number,
+        disc_total,
+        year,
+        genre,
+        composer,
+        lyricist,
+        comment,
+    };
+    music_service::edit_track_tags(&app, file_path, &draft)
 }
 
 #[tauri::command]

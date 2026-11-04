@@ -1,8 +1,14 @@
-//! 音乐扫描服务 — 只读索引
+//! 音乐扫描与标签服务
 //!
-//! 安全模型：此服务仅扫描文件系统中的音频文件并提取元数据，
-//! 不对原始文件进行任何修改、删除或移动操作。
-//! 所有播放列表管理操作仅影响前端 localStorage 数据，不触及磁盘文件。
+//! 扫描阶段（`scan_music_root` / `extract_track_metadata`）只读：遍历目录、用 lofty 提取
+//! 元数据、把内嵌封面导出到 app_data 的缓存目录，不改动原始文件。
+//!
+//! 写回是**显式**操作，只在用户点了「保存标签」之后发生：`edit_track_tags`（文本项）、
+//! `embed_cover_into_file`（封面内嵌）。两者都会 `save_to_path` 覆盖原文件。
+//! 换封面不可逆，所以覆盖前把旧内嵌封面留底到 `app_data/cover_backups`，同一文件最多
+//! `COVER_BACKUP_KEEP`(3) 份滚动；留底失败直接中止这次换封面。
+//! 文本字段的写前快照与整批撤销还没接（下一轮），批量刮库上线前必须先补上。
+//! 播放列表管理只动 SQLite（music_db），不触及磁盘文件。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +26,13 @@ use serde::Serialize;
 use tauri::Emitter;
 use tauri::Manager;
 
-const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "wav", "ogg", "m4a", "aac", "wma"];
+// 扫描收录的扩展名 = lofty 能打标签 ∩ webview 能解码。
+// ape/wv/mpc/aiff 虽然 lofty 支持标签，但 WebView2/WebKitGTK 没有可靠解码器，
+// 收录进来会在曲库里生成"看得见、点不开"的条目，故不加入扫描；
+// 用户手动添加单曲时不走这张表（直接交给 lofty），仍可读写。
+// wma 保留（历史行为，Linux 侧 media_http 可流式播放），但 lofty 无 ASF 支持，
+// 读不到标签时以 tagTypes=[] + properties=null 如实回报，不伪装成"标签为空"。
+const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "wav", "ogg", "m4a", "aac", "wma", "opus"];
 const MAX_AUDIO_FILES: usize = 10_000;
 const MAX_DEPTH: usize = 12;
 const CHUNK_SIZE: usize = 50;
@@ -37,6 +49,40 @@ pub struct Track {
     pub album: String,
     pub duration_secs: u64,
     pub cover_path: Option<String>,
+    // 以下字段由 lofty 直接读出，旧扫描缓存里没有这些键 → 反序列化为 None/空，
+    // 因此不需要作废缓存；重新扫描（或单曲 rescan）后即可填充。
+    pub album_artist: Option<String>,
+    pub composer: Option<String>,
+    pub lyricist: Option<String>,
+    pub genre: Option<String>,
+    pub comment: Option<String>,
+    /// 年份/日期原始字符串（TYER/TDRC/date/\xa9day 等），可能是 "2003" 或 "2003-05-01"
+    pub year: Option<String>,
+    pub track_number: Option<u32>,
+    pub track_total: Option<u32>,
+    pub disc_number: Option<u32>,
+    pub disc_total: Option<u32>,
+    /// 文件内实际存在的标签族，如 ["ID3v2"]；空数组表示无标签或格式不被 lofty 识别
+    #[serde(default)]
+    pub tag_types: Vec<String>,
+    pub has_picture: bool,
+    pub properties: Option<AudioProperties>,
+}
+
+/// 音频流属性（lofty `FileProperties`，替代 MusicTag 的 MediaInfo.dll —— 不引入原生依赖）
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioProperties {
+    /// 采样率 Hz
+    pub sample_rate: Option<u32>,
+    /// 位深（16/24/32）
+    pub bit_depth: Option<u8>,
+    /// 声道数
+    pub channels: Option<u8>,
+    /// 音频码率 kbps
+    pub audio_bitrate: Option<u32>,
+    /// 整体码率 kbps（含容器开销）
+    pub overall_bitrate: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -209,6 +255,38 @@ pub fn extract_track_metadata(file_path: &Path, cover_dir: Option<&Path>) -> Tra
                 .unwrap_or_default();
             let duration_secs = tagged_file.properties().duration().as_secs();
 
+            // 扩展字段：年份/流派/碟号/作曲/作词/注释 —— lofty 原生支持，不需 MediaInfo
+            let non_empty = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            let album_artist = non_empty(tag_item_str(tag, lofty::tag::ItemKey::AlbumArtist));
+            let composer = non_empty(tag_item_str(tag, lofty::tag::ItemKey::Composer));
+            let lyricist = non_empty(tag_item_str(tag, lofty::tag::ItemKey::Lyricist));
+            let genre = non_empty(tag.and_then(|t| t.genre()).map(|c| c.to_string()));
+            let comment = non_empty(tag.and_then(|t| t.comment()).map(|c| c.to_string()));
+            // RecordingDate 优先（TDRC/\xa9day），只有裸年份时回退 ItemKey::Year
+            let year = tag_item_str(tag, lofty::tag::ItemKey::RecordingDate)
+                .or_else(|| tag_item_str(tag, lofty::tag::ItemKey::Year))
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty());
+            let track_number = tag.and_then(|t| t.track());
+            let track_total = tag.and_then(|t| t.track_total());
+            let disc_number = tag.and_then(|t| t.disk());
+            let disc_total = tag.and_then(|t| t.disk_total());
+
+            let props = tagged_file.properties();
+            let properties = AudioProperties {
+                sample_rate: props.sample_rate(),
+                bit_depth: props.bit_depth(),
+                channels: props.channels(),
+                audio_bitrate: props.audio_bitrate(),
+                overall_bitrate: props.overall_bitrate(),
+            };
+            let tag_types: Vec<String> = tagged_file
+                .tags()
+                .iter()
+                .map(|t| tag_type_label(t.tag_type()))
+                .collect();
+            let has_picture = tag.map_or(false, |t| !t.pictures().is_empty());
+
             // 提取内嵌封面图片
             let cover_path = cover_dir.and_then(|dir| {
                 tag.and_then(|t| {
@@ -246,6 +324,19 @@ pub fn extract_track_metadata(file_path: &Path, cover_dir: Option<&Path>) -> Tra
                 album,
                 duration_secs,
                 cover_path,
+                album_artist,
+                composer,
+                lyricist,
+                genre,
+                comment,
+                year,
+                track_number,
+                track_total,
+                disc_number,
+                disc_total,
+                tag_types,
+                has_picture,
+                properties: Some(properties),
             }
         }
         Err(e) => {
@@ -258,9 +349,47 @@ pub fn extract_track_metadata(file_path: &Path, cover_dir: Option<&Path>) -> Tra
                 album: String::new(),
                 duration_secs: 0,
                 cover_path: None,
+                album_artist: None,
+                composer: None,
+                lyricist: None,
+                genre: None,
+                comment: None,
+                year: None,
+                track_number: None,
+                track_total: None,
+                disc_number: None,
+                disc_total: None,
+                // 走到这里说明 lofty 不认识该容器（如 .wma/.dsf/.tak），或文件损坏。
+                // 空 tagTypes + properties=null 就是给前端的诚实信号：不要显示成"标签为空"，
+                // 而要显示成"此格式不支持标签读写"。
+                tag_types: Vec::new(),
+                has_picture: false,
+                properties: None,
             }
         }
     }
+}
+
+/// 读取单个文本型标签项（可能不存在）
+fn tag_item_str(tag: Option<&lofty::tag::Tag>, key: lofty::tag::ItemKey) -> Option<String> {
+    tag.and_then(|t| t.get_string(key)).map(|s| s.to_string())
+}
+
+/// 标签族的展示名（对齐 MusicTag 列表里的 tagtypes 列语义）
+fn tag_type_label(tag_type: lofty::tag::TagType) -> String {
+    use lofty::tag::TagType;
+    let name = match tag_type {
+        TagType::Id3v1 => "ID3v1",
+        TagType::Id3v2 => "ID3v2",
+        TagType::Ape => "APE",
+        TagType::Mp4Ilst => "MP4",
+        TagType::VorbisComments => "Vorbis",
+        TagType::RiffInfo => "RIFF INFO",
+        TagType::AiffText => "AIFF Text",
+        // TagType 是 #[non_exhaustive]，lofty 升级新增族时落到兜底名而不是编译失败
+        other => return format!("{:?}", other),
+    };
+    name.to_string()
 }
 
 // 计算文件路径哈希（与 extract_track_metadata 中保持一致，用于封面文件名前缀）
@@ -281,9 +410,91 @@ fn cover_dir_of(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
         })
 }
 
+/// 每次换封面对该文件最多留几份旧封面，超出滚动淘汰最旧的。
+/// 沿用本项目既定范式（`rag_backup_db` 保留最近 3 份、checkpoint 滚动淘汰）。
+const COVER_BACKUP_KEEP: usize = 3;
+
+/// 旧封面留底目录。**必须与 `music_covers` 缓存分开**：
+/// `music_clean_cover_cache(keep)` 会把缓存目录里不在 keep 集的文件一律删除，
+/// 留底放进去会被前端的缓存清理吃掉。
+fn cover_backup_dir_of(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|d| {
+            let dir = d.join("cover_backups");
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        })
+}
+
+/// 同一音频文件只保留最近 `keep` 份留底，其余删除，返回删除数量。
+///
+/// 文件名形如 `{pathHash}_{10位时间戳}_{内容哈希}.{ext}`：同一文件的分组前缀相同，
+/// 时间戳定宽 ⇒ 按文件名字典序即按时间序。
+fn prune_cover_backups(dir: &Path, path_hash: &str, keep: usize) -> Result<usize, String> {
+    let prefix = format!("{}_", path_hash);
+    let mut names: Vec<String> = Vec::new();
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("读取留底目录失败: {}", e))?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(&prefix) && entry.path().is_file() {
+            names.push(name);
+        }
+    }
+    if names.len() <= keep {
+        return Ok(0);
+    }
+    names.sort_by(|a, b| b.cmp(a)); // 新 → 旧
+    let mut removed = 0usize;
+    for stale in names.iter().skip(keep) {
+        if std::fs::remove_file(dir.join(stale)).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// 把当前内嵌封面写入留底目录，返回留底文件路径。
+fn write_cover_backup(dir: &Path, audio: &Path, bytes: &[u8], ext: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建留底目录失败: {}", e))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let content_hash = format!("{:x}", hasher.finish());
+    let path = dir.join(format!("{}_{:010}_{}.{}", path_hash_of(audio), ts, content_hash, ext));
+    std::fs::write(&path, bytes).map_err(|e| format!("写旧封面留底失败: {}", e))?;
+    // 先写后淘汰：淘汰中途失败不影响本轮已经留住的这份
+    prune_cover_backups(dir, &path_hash_of(audio), COVER_BACKUP_KEEP)?;
+    Ok(path)
+}
+
+/// 留底文件的扩展名（按内嵌图片的 mime 推断，认不出的一律当 jpg）
+fn picture_ext(mime: Option<&str>) -> &'static str {
+    match mime {
+        Some("image/png") => "png",
+        Some("image/gif") => "gif",
+        Some("image/webp") => "webp",
+        Some("image/bmp") => "bmp",
+        Some("image/tiff") => "tif",
+        _ => "jpg",
+    }
+}
+
 /// 将 image_bytes 作为封面写入音频文件内嵌标签（ID3v2 APIC / FLAC 图块 / MP4 covr），
 /// 覆盖原有全部内嵌图片。失败返回错误信息，供上层回退到「缓存式 override」兜底。
-fn embed_cover_into_file(resolved: &Path, image_bytes: &[u8], mime: Option<&str>) -> Result<(), String> {
+///
+/// `backup_dir` 为 Some 时，覆盖前把当前内嵌封面留底一份（同文件最多 `COVER_BACKUP_KEEP`
+/// 份滚动）；留底失败**直接中止本次换封面**，不做无退路的覆盖。传 None 表示这次不需要留底。
+fn embed_cover_into_file(
+    resolved: &Path,
+    image_bytes: &[u8],
+    mime: Option<&str>,
+    backup_dir: Option<&Path>,
+) -> Result<(), String> {
     let mut tagged_file = read_from_path(resolved).map_err(|e| format!("读取音频失败: {}", e))?;
     // mime 缺失时按字节头推断，作为 Content-Type fallback
     let mime_type = match mime.and_then(|m| {
@@ -318,6 +529,16 @@ fn embed_cover_into_file(resolved: &Path, image_bytes: &[u8], mime: Option<&str>
                 .first_tag_mut()
                 .ok_or_else(|| "文件不含可写标签".to_string())?
         };
+        // 覆盖前先留底当前内嵌封面（bytes 先 clone 出来，避免与后面的可变操作抢借用）
+        if let Some(dir) = backup_dir {
+            let old = tag
+                .pictures()
+                .first()
+                .map(|p| (p.data().to_vec(), picture_ext(p.mime_type().map(|m| m.as_str()))));
+            if let Some((bytes, ext)) = old {
+                write_cover_backup(dir, resolved, &bytes, ext)?;
+            }
+        }
         // 移除旧封面后写入固定索引 0（set_picture 索引越界时自动 push）
         while tag.picture_count() > 0 {
             tag.remove_picture(0);
@@ -361,7 +582,8 @@ pub fn set_cover_from_base64(
         .map_err(|e| format!("base64 解码失败: {}", e))?;
     // 优先写内嵌封面；失败则回退为缓存式 override（不改原文件，兼容不支持写入的格式）。
     let resolved = canonical_path_of(&file_path);
-    match embed_cover_into_file(&resolved, &raw, mime.as_deref()) {
+    let backup_dir = cover_backup_dir_of(app);
+    match embed_cover_into_file(&resolved, &raw, mime.as_deref(), backup_dir.as_deref()) {
         Ok(()) => return sync_cover_after_embed(app, &file_path),
         Err(embed_err) => eprintln!("[music_service] 内嵌封面写入失败，回退缓存 override: {} ({})", file_path, embed_err),
     }
@@ -414,7 +636,8 @@ pub async fn set_cover_from_url(
     tauri::async_runtime::spawn_blocking(move || {
         let resolved = canonical_path_of(&fp);
         let mime_str = mime.as_deref();
-        match embed_cover_into_file(&resolved, &image_bytes, mime_str) {
+        let backup_dir = cover_backup_dir_of(&app2);
+        match embed_cover_into_file(&resolved, &image_bytes, mime_str, backup_dir.as_deref()) {
             Ok(()) => sync_cover_after_embed(&app2, &fp).map_err(|e| format!("封面同步失败: {}", e)),
             Err(embed_err) => {
                 eprintln!("[music_service] 内嵌封面写入失败，回退缓存 override: {} ({})", fp, embed_err);
@@ -473,20 +696,92 @@ pub fn rescan_track_metadata(app: &tauri::AppHandle, file_path: String) -> Resul
     Ok(track)
 }
 
-/// 写回标签：用 lofty 修改文件的 title/artist/album/track_number 并落盘，
-/// 同步更新 playlist_track/favorite 中的对应字段。
+/// 标签写回的字段集合。`None` = 保持文件原值不动；文本项传空串 = 清除该字段。
+///
+/// 字段集对齐 MusicTag 的列表列（title/artist/album/albumartist/year/track/disc/genre/
+/// composer/lyricist/comment），全部走 lofty 的 `ItemKey`，由 lofty 按容器映射到
+/// ID3v2 / Vorbis / MP4 ilst / APEv2 等对应帧。
+#[derive(Debug, Clone, Default)]
+pub struct TagEditDraft {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub album_artist: Option<String>,
+    pub track_number: Option<u32>,
+    pub track_total: Option<u32>,
+    pub disc_number: Option<u32>,
+    pub disc_total: Option<u32>,
+    pub year: Option<String>,
+    pub genre: Option<String>,
+    pub composer: Option<String>,
+    pub lyricist: Option<String>,
+    pub comment: Option<String>,
+}
+
+/// 文本项写回：None 不动，空串清除，其余 trim 后写入。
+///
+/// 返回 `false` 表示该 `TagType` 没有这个键的帧映射 —— lofty 的 `Tag::insert` 会先
+/// `re_map` 校验，校验不过就**静默丢弃**。调用方收集这些字段并打日志，
+/// 不能假装写成功了（典型：APEv2 里没有作曲/作词的位置）。
+fn apply_text_item(
+    tag: &mut lofty::tag::Tag,
+    key: lofty::tag::ItemKey,
+    value: Option<&str>,
+) -> bool {
+    let Some(raw) = value else { return true };
+    let v = raw.trim().to_string();
+    if v.is_empty() {
+        tag.remove_key(key);
+        return true;
+    }
+    tag.insert_text(key, v)
+}
+
+/// 序号项写回（音轨/碟号）：None 不动，Some 写入。返回值语义同 `apply_text_item`
+fn apply_number_item(
+    tag: &mut lofty::tag::Tag,
+    key: lofty::tag::ItemKey,
+    value: Option<u32>,
+) -> bool {
+    match value {
+        None => true,
+        Some(n) => tag.insert_text(key, n.to_string()),
+    }
+}
+
+/// 年份写回：一律落到 `RecordingDate`。
+///
+/// `ItemKey::Year` 在 ID3v2 下**没有帧映射**，`insert_text(Year, ..)` 会被 lofty 静默丢弃
+/// （单测实测：写进去后 get_string 两个键都拿不到值）。lofty 自己的文档也建议用
+/// `RecordingDate` 换取更广的应用支持；写 ID3v2.3 时由 lofty 拆出 TYER 帧。
+/// 空串表示清除。
+fn apply_year_item(tag: &mut lofty::tag::Tag, raw: &str) -> bool {
+    use lofty::tag::ItemKey;
+    let v = raw.trim();
+    if v.is_empty() {
+        tag.remove_key(ItemKey::Year);
+        tag.remove_key(ItemKey::RecordingDate);
+        return true;
+    }
+    tag.remove_key(ItemKey::Year);
+    tag.insert_text(ItemKey::RecordingDate, v.to_string())
+}
+
+/// 写回标签：用 lofty 修改文件的文本标签项并落盘，
+/// 同步更新 playlist_track/favorite 中的 title/artist/album（其余字段无对应列，
+/// 由调用方在写回后重扫单曲 `rescan_track_metadata` 取回真值）。
 pub fn edit_track_tags(
     app: &tauri::AppHandle,
     file_path: String,
-    title: Option<String>,
-    artist: Option<String>,
-    album: Option<String>,
-    track_number: Option<u32>,
+    draft: &TagEditDraft,
 ) -> Result<(), String> {
+    let TagEditDraft { title, artist, album, .. } = draft;
     let path = Path::new(&file_path);
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut tagged_file = read_from_path(&resolved).map_err(|e| format!("读取音频失败: {}", e))?;
+    let mut dropped: Vec<&'static str> = Vec::new();
     {
+        use lofty::tag::ItemKey;
         let tag = if let Some(t) = tagged_file.primary_tag_mut() {
             t
         } else {
@@ -494,18 +789,33 @@ pub fn edit_track_tags(
                 .first_tag_mut()
                 .ok_or_else(|| "文件不含可写标签".to_string())?
         };
-        if let Some(v) = &title {
-            tag.set_title(v.clone());
-        }
-        if let Some(v) = &artist {
-            tag.set_artist(v.clone());
-        }
-        if let Some(v) = &album {
-            tag.set_album(v.clone());
-        }
-        if let Some(n) = track_number {
-            tag.set_track(n);
-        }
+        let mut record = |label: &'static str, ok: bool| {
+            if !ok {
+                dropped.push(label);
+            }
+        };
+        record("标题", apply_text_item(tag, ItemKey::TrackTitle, title.as_deref()));
+        record("歌手", apply_text_item(tag, ItemKey::TrackArtist, artist.as_deref()));
+        record("专辑", apply_text_item(tag, ItemKey::AlbumTitle, album.as_deref()));
+        record("专辑艺人", apply_text_item(tag, ItemKey::AlbumArtist, draft.album_artist.as_deref()));
+        record("流派", apply_text_item(tag, ItemKey::Genre, draft.genre.as_deref()));
+        record("作曲", apply_text_item(tag, ItemKey::Composer, draft.composer.as_deref()));
+        record("作词", apply_text_item(tag, ItemKey::Lyricist, draft.lyricist.as_deref()));
+        record("注释", apply_text_item(tag, ItemKey::Comment, draft.comment.as_deref()));
+        record("年份", draft.year.as_deref().map_or(true, |raw| apply_year_item(tag, raw)));
+        record("音轨号", apply_number_item(tag, ItemKey::TrackNumber, draft.track_number));
+        record("音轨总数", apply_number_item(tag, ItemKey::TrackTotal, draft.track_total));
+        record("碟号", apply_number_item(tag, ItemKey::DiscNumber, draft.disc_number));
+        record("碟总数", apply_number_item(tag, ItemKey::DiscTotal, draft.disc_total));
+    }
+    if !dropped.is_empty() {
+        // 该容器没有对应帧位置（如 APEv2 无作曲/作词），字段不会出现在文件里。
+        // 不阻断保存：其余字段仍然写成功，这里只如实记录被跳过的项。
+        eprintln!(
+            "[music_service] 以下标签项该格式不支持，已跳过: {} ({})",
+            dropped.join("、"),
+            file_path
+        );
     }
     tagged_file
         .save_to_path(&resolved, lofty::config::WriteOptions::default())
@@ -531,4 +841,242 @@ pub fn edit_track_tags(
             .map_err(|e| format!("更新收藏专辑失败: {}", e))?;
     }
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lofty::tag::{ItemKey, Tag, TagType};
+
+    fn id3() -> Tag {
+        Tag::new(TagType::Id3v2)
+    }
+
+    #[test]
+    fn id3v2_不认year键_这是统一写recordingdate的原因() {
+        // lofty 的 Tag::insert 会先校验该 TagType 有没有这个键的帧映射，
+        // 校验不过直接静默丢弃并返回 false。ID3v2 没有 Year 的位置。
+        let mut tag = id3();
+        assert!(
+            !tag.insert_text(ItemKey::Year, "2003".to_string()),
+            "ID3v2 若开始支持 ItemKey::Year，本用例与 apply_year_item 的注释需要一起复核"
+        );
+        assert_eq!(tag.get_string(ItemKey::Year), None);
+    }
+
+    #[test]
+    fn 年份_四位数字落recordingdate且覆盖旧日期() {
+        let mut tag = id3();
+        tag.insert_text(ItemKey::RecordingDate, "2001-02-03".to_string());
+        assert!(apply_year_item(&mut tag, "2003"));
+        assert_eq!(tag.get_string(ItemKey::RecordingDate), Some("2003"));
+    }
+
+    #[test]
+    fn 年份_完整日期原样保留() {
+        let mut tag = id3();
+        assert!(apply_year_item(&mut tag, "2003-05-01"));
+        assert_eq!(tag.get_string(ItemKey::RecordingDate), Some("2003-05-01"));
+    }
+
+    #[test]
+    fn 年份_空串清除() {
+        let mut tag = id3();
+        apply_year_item(&mut tag, "2003-05-01");
+        assert!(apply_year_item(&mut tag, "  "));
+        assert_eq!(tag.get_string(ItemKey::RecordingDate), None);
+    }
+
+    #[test]
+    fn 文本项_none保持不动_空串清除() {
+        let mut tag = id3();
+        tag.insert_text(ItemKey::TrackTitle, "原名".to_string());
+        // None → 不动
+        apply_text_item(&mut tag, ItemKey::TrackTitle, None);
+        assert_eq!(tag.get_string(ItemKey::TrackTitle), Some("原名"));
+        // Some("") → 清除
+        apply_text_item(&mut tag, ItemKey::TrackTitle, Some(""));
+        assert_eq!(tag.get_string(ItemKey::TrackTitle), None);
+    }
+
+    #[test]
+    fn 碟号写discnumber并可读回() {
+        let mut tag = id3();
+        apply_number_item(&mut tag, ItemKey::DiscNumber, Some(2));
+        assert_eq!(tag.disk(), Some(2));
+        // None → 不改动已写好的值
+        apply_number_item(&mut tag, ItemKey::DiscNumber, None);
+        assert_eq!(tag.disk(), Some(2));
+    }
+
+    #[test]
+    fn 标签族展示名可读() {
+        assert_eq!(tag_type_label(TagType::Id3v2), "ID3v2");
+        assert_eq!(tag_type_label(TagType::VorbisComments), "Vorbis");
+    }
+
+    /// 真实音频文件的完整往返（手动跑，不进 CI）。
+    /// 用法：把待测文件**复制**到临时目录后，用环境变量指向副本：
+    ///   MUSICTAG_FIXTURE=/tmp/x.flac cargo test --lib --features test-manifest \
+    ///     真实文件往返 -- --ignored --nocapture
+    /// 原件只读：本用例只接受副本路径，写操作全部发生在该路径上。
+    #[test]
+    #[ignore = "需要本机音频文件副本，手动用 MUSICTAG_FIXTURE 指定"]
+    fn 真实文件往返_全部新字段可读回() {
+        let src = std::env::var("MUSICTAG_FIXTURE").expect("需要 MUSICTAG_FIXTURE 指向一个副本文件");
+        let mut tagged = lofty::read_from_path(&src).expect("lofty 读不了该副本");
+        {
+            let tag = if let Some(t) = tagged.primary_tag_mut() {
+                t
+            } else {
+                tagged.first_tag_mut().expect("无可写标签")
+            };
+            use lofty::tag::ItemKey;
+            // 各容器没有相同的字段位（如 WAV 的 RIFF INFO 没有专辑艺人），
+            // 这里逐项记录而不是撞到第一个就 panic，用来产出「字段 × 容器」支持矩阵。
+            let mut attempts: Vec<(&'static str, bool)> = Vec::new();
+            attempts.push(("title", apply_text_item(tag, ItemKey::TrackTitle, Some("标题X"))));
+            attempts.push(("albumArtist", apply_text_item(tag, ItemKey::AlbumArtist, Some("艺人Y"))));
+            attempts.push(("genre", apply_text_item(tag, ItemKey::Genre, Some("流行"))));
+            attempts.push(("composer", apply_text_item(tag, ItemKey::Composer, Some("作曲Z"))));
+            attempts.push(("lyricist", apply_text_item(tag, ItemKey::Lyricist, Some("作词W"))));
+            attempts.push(("comment", apply_text_item(tag, ItemKey::Comment, Some("备注V"))));
+            attempts.push(("year", apply_year_item(tag, "2003")));
+            attempts.push(("track", apply_number_item(tag, ItemKey::TrackNumber, Some(3))));
+            attempts.push(("trackTotal", apply_number_item(tag, ItemKey::TrackTotal, Some(12))));
+            attempts.push(("disc", apply_number_item(tag, ItemKey::DiscNumber, Some(2))));
+            println!(
+                "写入被丢弃: {}",
+                if attempts.iter().any(|(_, ok)| !*ok) {
+                    attempts
+                        .iter()
+                        .filter(|(_, ok)| !*ok)
+                        .map(|(n, _)| *n)
+                        .collect::<Vec<_>>()
+                        .join("、")
+                } else {
+                    "无".to_string()
+                }
+            );
+        }
+        tagged
+            .save_to_path(&src, lofty::config::WriteOptions::default())
+            .expect("保存失败");
+
+        let reread = lofty::read_from_path(&src).expect("回读失败");
+        let tag = reread.primary_tag().or_else(|| reread.first_tag()).expect("回读无标签");
+        use lofty::tag::ItemKey;
+        let get = |k: ItemKey| tag.get_string(k).map(|s| s.to_string());
+        println!("--- 副本 {} 往返结果 ---", src);
+        println!("title        = {:?}", get(ItemKey::TrackTitle));
+        println!("albumArtist  = {:?}", get(ItemKey::AlbumArtist));
+        println!("genre        = {:?}", get(ItemKey::Genre));
+        println!("composer     = {:?}", get(ItemKey::Composer));
+        println!("lyricist     = {:?}", get(ItemKey::Lyricist));
+        println!("comment      = {:?}", get(ItemKey::Comment));
+        println!("date()       = {:?}", tag.date().map(|d| d.to_string()));
+        println!("track        = {:?}/{:?}", tag.track(), tag.track_total());
+        println!("disc         = {:?}/{:?}", tag.disk(), tag.disk_total());
+        println!("tagTypes     = {:?}", reread.tags().iter().map(|t| tag_type_label(t.tag_type())).collect::<Vec<_>>());
+        let p = reread.properties();
+        println!(
+            "props        = sr={:?} bit={:?} ch={:?} kbps={:?}",
+            p.sample_rate(), p.bit_depth(), p.channels(), p.audio_bitrate()
+        );
+        // 只对「所有容器都应成立」的核心字段断言；albumArtist/lyricist/disc
+        // 在 RIFF INFO 里没有位置，属于格式本身的限制，由上面的「写入被丢弃」行如实记录。
+        assert_eq!(get(ItemKey::TrackTitle).as_deref(), Some("标题X"));
+        assert_eq!(get(ItemKey::Genre).as_deref(), Some("流行"));
+        assert_eq!(tag.track(), Some(3));
+        assert_eq!(tag.track_total(), Some(12));
+        assert_eq!(tag.date().map(|d| d.year), Some(2003));
+    }
+
+    fn seed_backups(dir: &Path, hash: &str, stamps: &[&str]) {
+        for ts in stamps {
+            std::fs::write(dir.join(format!("{}_{}_x.jpg", hash, ts)), b"x").expect("建测试文件失败");
+        }
+    }
+
+    fn names_with(dir: &Path, prefix: &str) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(prefix))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn 封面留底_同文件只留最近三份且不动别的文件() {
+        let dir = std::env::temp_dir().join("adyh_cover_prune_keep3");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_backups(&dir, "aaa", &["0000000001", "0000000002", "0000000003", "0000000004", "0000000005"]);
+        seed_backups(&dir, "bbb", &["0000000009"]);
+
+        assert_eq!(prune_cover_backups(&dir, "aaa", COVER_BACKUP_KEEP).unwrap(), 2);
+
+        let left = names_with(&dir, "aaa_");
+        assert_eq!(left.len(), 3, "只应留最近 3 份，实际: {:?}", left);
+        assert!(left.iter().any(|n| n.contains("0000000005")));
+        assert!(left.iter().any(|n| n.contains("0000000004")));
+        assert!(left.iter().any(|n| n.contains("0000000003")));
+        assert!(!left.iter().any(|n| n.contains("0000000001")));
+        assert_eq!(names_with(&dir, "bbb_").len(), 1, "别的文件的留底不该被牵连");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 封面留底_未超上限时一份都不删() {
+        let dir = std::env::temp_dir().join("adyh_cover_prune_below");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_backups(&dir, "ccc", &["0000000001", "0000000002", "0000000003"]);
+        assert_eq!(prune_cover_backups(&dir, "ccc", COVER_BACKUP_KEEP).unwrap(), 0);
+        assert_eq!(names_with(&dir, "ccc_").len(), COVER_BACKUP_KEEP);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 真文件端到端验证换封面留底（手动跑，需要 MUSICTAG_FIXTURE 指向副本）。
+    /// 连换 4 次封面 ⇒ 留底目录应只剩最近 3 份，且最新一份是"刚被覆盖掉的那张"。
+    #[test]
+    #[ignore = "需要本机音频文件副本，手动用 MUSICTAG_FIXTURE 指定"]
+    fn 封面留底_真文件连换六次只留三份() {
+        let src = std::env::var("MUSICTAG_FIXTURE").expect("需要 MUSICTAG_FIXTURE");
+        let resolved = canonical_path_of(&src);
+        let backup = std::env::temp_dir().join("adyh_cover_real_backup");
+        let _ = std::fs::remove_dir_all(&backup);
+        std::fs::create_dir_all(&backup).unwrap();
+
+        // 6 张可区分的假封面（JPEG 头 + 尾字节做标识），逐张写进同一个文件。
+        // 换 6 次 ⇒ 至少产生 5 份留底（第一次换时原文件可能没有内嵌封面，就不留底），
+        // 无论原始有没有封面，最后留下的最新一份都应该是刚被覆盖掉的第 5 张。
+        for marker in 1..=6u8 {
+            let mut jpeg = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
+            jpeg.extend_from_slice(&[marker; 32]);
+            jpeg.extend_from_slice(&[0xFF, 0xD9]);
+            embed_cover_into_file(&resolved, &jpeg, Some("image/jpeg"), Some(&backup))
+                .expect("换封面失败");
+            std::thread::sleep(std::time::Duration::from_millis(1100)); // 时间戳按秒，隔开才可排序
+        }
+
+        let hash = path_hash_of(&resolved);
+        let left = names_with(&backup, &format!("{}_", hash));
+        assert_eq!(left.len(), COVER_BACKUP_KEEP, "4 次换封面后应只留 3 份，实际: {:?}", left);
+        // 最新一份留底 = 第 3 张（marker=3），因为它被第 4 张覆盖掉
+        let newest = backup.join(left.last().unwrap());
+        let bytes = std::fs::read(&newest).unwrap();
+        assert!(bytes[4..36].iter().all(|b| *b == 5u8), "最新留底应是刚被覆盖的第 5 张封面");
+        let _ = std::fs::remove_dir_all(&backup);
+    }
+
+    #[test]
+    fn 留底扩展名按mime推断且认不出时按jpg() {
+        assert_eq!(picture_ext(Some("image/png")), "png");
+        assert_eq!(picture_ext(Some("image/webp")), "webp");
+        assert_eq!(picture_ext(Some("application/octet-stream")), "jpg");
+        assert_eq!(picture_ext(None), "jpg");
+    }
 }
