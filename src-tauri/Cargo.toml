@@ -76,6 +76,9 @@ pro-tools-kit = { path = "../crates/pro-tools-kit" }
 # 此处 default-features=false：本 crate 的 feature（见文件末尾 [features]）才是唯一开关，
 # 而那组 feature 已默认全开 —— `pnpm tauri dev` / `cargo check` / 构建脚本都不用再加参数。
 gongfang-kit = { path = "../crates/gongfang-kit", default-features = false }
+# AI 协作组态后端（P0）：harness 适配层 + 任务 runtime + 事件流。
+# 独立 crate 便于整体拆卸；去掉本行依赖 + main.rs 命令注册即可移除该能力。
+ai-collab-kit = { path = "../crates/ai-collab-kit" }
 # image / base64 跨平台通用，保留在主 crate
 image = "0.25"
 base64 = "0.22"

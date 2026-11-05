@@ -39,6 +39,8 @@ use andeyunhui_lib::commands::rag_commands;
 use pro_tools_kit::commands::*;
 // 攻防模块后端命令（gongfang-kit crate，默认仅骨架，--features gongfang 启用爬虫等）
 use gongfang_kit::commands::*;
+// AI 协作组态后端命令（ai-collab-kit crate，P0：echo harness + 任务 runtime）
+use ai_collab_kit::commands::*;
 use andeyunhui_lib::screenshot::{self, *};
 use andeyunhui_lib::TrayModeState;
 use andeyunhui_lib::device;
@@ -2177,6 +2179,23 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             ai_service::ocr_export_pdf,
             ai_service::ai_get_conversations,
             ai_service::ai_save_conversations,
+            // ========== 全局：AI 协作组态（crates/ai-collab-kit，P0 echo harness）==========
+            collab_harnesses,
+            collab_mcp_info,
+            collab_room_list,
+            collab_room_create,
+            collab_room_delete,
+            collab_room_snapshot,
+            collab_room_send,
+            collab_assignments,
+            collab_events,
+            collab_assign,
+            collab_demo,
+            collab_cancel,
+            collab_dsh_sessions,
+            collab_import_dsh_session,
+            collab_sync_external,
+            collab_set_room_workspace,
             // ========== 全局：伴侣（人机恋记忆点，阶段 1 + 1.5 多伴侣）==========
             companion_service::companion_list,
             companion_service::companion_get,

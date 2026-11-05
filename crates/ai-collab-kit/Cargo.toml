@@ -1,0 +1,16 @@
+[package]
+name = "ai-collab-kit"
+version = "0.1.0"
+edition = "2021"
+description = "AI 协作组态后端内核 —— 可拆卸 crate（harness 适配层 + 任务 runtime + 事件流）"
+authors = ["Rosary"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+# DeepSeek Harness 会话日志是 zstd 压缩的 JSONL；只读导入已有会话用 zstd 解压。
+zstd = "0.13"
+# echo harness 的模拟执行 + DeepSeek Harness 子进程：Tauri 2 内部已是 tokio
+tokio = { version = "1", features = ["rt", "time", "macros", "process", "io-util"] }

@@ -15,6 +15,8 @@ import { AISubmoduleDrawer } from '@/components/ai-chat/AISubmoduleSwitcher';
 import { AiSubmodulePlaceholder } from '@/components/ai-chat/AiSubmodulePlaceholder';
 import { AiWorkView } from '@/components/ai-chat/AiWorkView';
 import { AiWorkflowView } from '@/components/ai-chat/AiWorkflowView';
+import { AiCollabView } from '@/components/ai-chat/AiCollabView';
+import { useAiCollab } from '@/core/ai/aiCollab';
 import { useAiWorkProducts } from '@/core/ai/aiWorkProducts';
 import type { WorkflowDoc } from '@/core/ai/aiWorkflows';
 import {
@@ -160,6 +162,7 @@ const Root = memo(function Root() {
     conversations, activeId, activeConv, busy, profileId,
     selectConv, newConversation, newGroup, deleteConversation, renameConversation, clearAll, send, abort, webSearch, setWebSearch, effort, setEffort,
     regenerate, switchVersion, rateMessage,
+    decidePlan,
   } = useAiChat({ persistKey: DEFAULT_PERSIST_KEY });
 
   // AIWork 统一任务实例：与主「AI 对话」彻底隔离，专属存储 key，侧栏任务区 / 对话工作台 / 蓝图画布共用。
@@ -169,10 +172,10 @@ const Root = memo(function Root() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [companionEnabled, setCompanionEnabled] = useState(readCompanionEnabled);
 
-  // 子模块切换（桌面版）：chat / work / workflow。胶囊浮岛不接入，保持现有 ai 对话。
+  // 子模块切换（桌面版）：chat / work / workflow / collab。胶囊浮岛不接入，保持现有 ai 对话。
   const [subId, setSubId] = useState<AISubmoduleId>(() => {
     const raw = (() => { try { return localStorage.getItem(SUBMODULE_STORAGE_KEY); } catch { return null; } })();
-    return (raw === 'work' || raw === 'workflow' || raw === 'chat') ? raw : 'chat';
+    return (raw === 'work' || raw === 'workflow' || raw === 'collab' || raw === 'chat') ? raw : 'chat';
   });
   const [subDrawerOpen, setSubDrawerOpen] = useState(false);
   // work / workflow 子模块内容区分段（任务区 / 产物区），受控于宿主；切换覆盖的是侧栏列表。
@@ -191,7 +194,7 @@ const Root = memo(function Root() {
   navRef.current = (target) => {
     const props = (target.props ?? {}) as { submodule?: AISubmoduleId; conversationId?: string };
     const rawSub = props.submodule ?? (target.tabs?.[0] === 'AI 办公' ? 'work' : 'chat');
-    const subTarget: AISubmoduleId = rawSub === 'work' || rawSub === 'workflow' ? rawSub : 'chat';
+    const subTarget: AISubmoduleId = rawSub === 'work' || rawSub === 'workflow' || rawSub === 'collab' ? rawSub : 'chat';
     const convId = props.conversationId ?? target.entity;
     switchSub(subTarget);
     if (convId) {
@@ -218,6 +221,8 @@ const Root = memo(function Root() {
   // work / workflow 子模块状态：产物库 + 统一任务（AIWork 对话 与 AIWorkflow 蓝图共用的同一条任务）托管于此，
   // 复用的共享侧栏（AiChatSidebar）与各视图共用同一份数据，不再自建第二层侧栏。
   const productStore = useAiWorkProducts();
+  // AI 协作（P0）：房间列表 + 事件流由独立 crate 提供，前端只消费快照与事件。
+  const collab = useAiCollab();
   const changeArea = useCallback((t: AiWorkTab) => {
     setArea(t);
     if (t === 'task') productStore.back(); // 切回任务区时清空查看态
@@ -321,11 +326,50 @@ const Root = memo(function Root() {
           onPending: productStore.pending,
           onDeleteProduct: productStore.remove,
         }}
+        collab={{
+          rooms: collab.rooms,
+          activeRoomId: collab.activeRoom?.id ?? null,
+          onSelectRoom: (id) => void collab.selectRoom(id),
+          onNewRoom: () => void collab.createRoom(),
+          deepseekAvailable: collab.harnesses.find((h) => h.id === 'dsh')?.available ?? false,
+          onNewDeepSeekRoom: () => void collab.createRoom(undefined, 'dsh'),
+          onDeleteRoom: (id) => void collab.deleteRoom(id),
+        }}
       />
       {settingsOpen ? (
-        // AI 办公 / AI 工作流：设置与「AI 对话」隔离 —— 只暴露 AIGC 产物/任务相关设置，
-        // 不混杂主对话的「伴侣 / 记忆 / 清除对话」等 AI 对话专属项。
-        sub.id === 'work' || sub.id === 'workflow' ? (
+        // AI 协作：设置页只读展示 harness 接入路线（P1：Echo + DeepSeek 本地）。
+        sub.id === 'collab' ? (
+          <ModuleSettingsPanel title="AI 协作" icon={sub.icon} onClose={() => setSettingsOpen(false)}>
+            <div className="rounded-xl border border-black/10 dark:border-white/10 p-4">
+              <div className="text-sm font-medium text-neutral-800 dark:text-stone-100">Harness 接入</div>
+              <div className="mt-0.5 text-xs text-neutral-400 dark:text-stone-500">
+                P2 已接入 DeepSeek Harness（headless + ACP 原位恢复，本地模型）；下列条目是后续接入路线。
+              </div>
+            </div>
+            <div className="space-y-2">
+              {collab.harnesses.map((harness) => (
+                <div key={harness.id} className="rounded-xl border border-black/10 p-3 dark:border-white/10">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-neutral-800 dark:text-stone-100">{harness.name}</span>
+                    <span className={`ml-auto text-[10px] ${harness.available ? 'text-emerald-600 dark:text-emerald-400' : 'text-neutral-400 dark:text-stone-500'}`}>
+                      {harness.available ? '可用' : '未接入'}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xs leading-relaxed text-neutral-500 dark:text-stone-400">{harness.detail}</div>
+                </div>
+              ))}
+            </div>
+            <div className="rounded-xl border border-black/10 p-3 text-xs leading-relaxed text-neutral-500 dark:border-white/10 dark:text-stone-400">
+              共享会话镜像：绑定了工作目录的房间会把事件流写到
+              <span className="mx-1 rounded bg-neutral-100 px-1 py-0.5 font-mono text-[10px] dark:bg-stone-800">
+                &lt;workspace&gt;/.adyh/collab/rooms/&lt;id&gt;/
+              </span>
+              ，其它 harness 读取 `events.ndjson` 即可扫描，往 `inbox/` 写 JSON 即可发言。
+            </div>
+          </ModuleSettingsPanel>
+        ) : sub.id === 'work' || sub.id === 'workflow' ? (
+          // AI 办公 / AI 工作流：设置与「AI 对话」隔离 —— 只暴露 AIGC 产物/任务相关设置，
+          // 不混杂主对话的「伴侣 / 记忆 / 清除对话」等 AI 对话专属项。
           <ModuleSettingsPanel title={sub.name} icon={sub.icon} onClose={() => setSettingsOpen(false)}>
             <div className="rounded-xl border border-black/10 dark:border-white/10 p-4">
               <div className="text-sm font-medium text-neutral-800 dark:text-stone-100">{sub.name} 设置</div>
@@ -405,6 +449,7 @@ const Root = memo(function Root() {
           onRegenerate={(id) => void regenerate(id)}
           onSwitchVersion={switchVersion}
           onRate={rateMessage}
+          onPlanDecision={(id, ok) => decidePlan(id, ok)}
           onClear={() => deleteConversation(activeId)}
           companionCard={companionEnabled ? (
             <AiChatCompanionCard variant="compact" onEdit={() => setSettingsOpen(true)} />
@@ -427,6 +472,7 @@ const Root = memo(function Root() {
         onRegenerate={(id) => void aiWorkChat.regenerate(id)}
         onSwitchVersion={aiWorkChat.switchVersion}
         onRate={aiWorkChat.rateMessage}
+        onPlanDecision={(id, ok) => aiWorkChat.decidePlan(id, ok)}
         conversations={aiWorkChat.conversations}
         onSelectConv={aiWorkChat.selectConv}
         onNewConv={newTask}
@@ -438,6 +484,25 @@ const Root = memo(function Root() {
         profileId={profileId}
         doc={wfDoc}
         onUpdate={updateWorkflow}
+      />
+    ) : sub.id === 'collab' ? (
+      <AiCollabView
+        room={collab.activeRoom}
+        events={collab.events}
+        assignments={collab.assignments}
+        busy={collab.busy}
+        error={collab.error}
+        onCreateRoom={() => void collab.createRoom()}
+        onCreateDeepSeekRoom={() => void collab.createRoom(undefined, 'dsh')}
+        deepseekAvailable={collab.harnesses.find((h) => h.id === 'dsh')?.available ?? false}
+        dshSessions={collab.dshSessions}
+        dshSessionsLoading={collab.dshSessionsLoading}
+        onLoadDshSessions={() => void collab.loadDshSessions()}
+        onImportDshSession={(id) => void collab.importDshSession(id)}
+        onSetWorkspace={(path) => void collab.setWorkspace(path)}
+        onSend={(text) => void collab.send(text)}
+        onDemo={() => void collab.runDemo()}
+        onCancel={(id) => void collab.cancel(id)}
       />
     ) : (
         <AiSubmodulePlaceholder mod={sub} />
