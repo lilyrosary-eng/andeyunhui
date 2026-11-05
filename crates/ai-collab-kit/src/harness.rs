@@ -28,6 +28,9 @@ use crate::types::HarnessInfo;
 
 pub const ECHO: &str = "echo";
 pub const DSH: &str = "dsh";
+/// 外部 harness（Trae / WorkBuddy）通过 `ai-collab-mcp` 参与：
+/// 任务只入队，不自动执行，等外部认领。
+pub const MCP: &str = "mcp";
 pub const ACP: &str = "acp";
 pub const STREAM_JSON: &str = "stream-json";
 pub const MAILBOX: &str = "mailbox";
@@ -306,6 +309,13 @@ pub fn catalog(app: &AppHandle) -> Vec<HarnessInfo> {
             kind: "headless".to_string(),
             available,
             detail,
+        },
+        HarnessInfo {
+            id: MCP.to_string(),
+            name: "MCP 外部 harness".to_string(),
+            kind: MCP.to_string(),
+            available: true,
+            detail: "任务只入队，由外部 harness（Trae / WorkBuddy）通过 ai-collab-mcp 认领并回报结果。".to_string(),
         },
         HarnessInfo {
             id: ACP.to_string(),

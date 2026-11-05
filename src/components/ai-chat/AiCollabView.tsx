@@ -23,6 +23,8 @@ interface AiCollabViewProps {
   onCreateRoom: () => void;
   /** 新建 DeepSeek Harness 房间；不可用时为空 */
   onCreateDeepSeekRoom?: () => void;
+  /** 新建 MCP 房间：任务只入队，交给外部 harness 认领 */
+  onCreateMcpRoom?: () => void;
   deepseekAvailable?: boolean;
   dshSessions: DshSessionSummary[];
   dshSessionsLoading: boolean;
@@ -359,6 +361,7 @@ export const AiCollabView = memo(function AiCollabView({
   error,
   onCreateRoom,
   onCreateDeepSeekRoom,
+  onCreateMcpRoom,
   deepseekAvailable,
   dshSessions,
   dshSessionsLoading,
@@ -410,6 +413,14 @@ export const AiCollabView = memo(function AiCollabView({
                 className="btn-press rounded-full border border-emerald-500/40 bg-emerald-500/10 px-5 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300"
               >
                 DeepSeek 本地房间
+              </button>
+            )}
+            {onCreateMcpRoom && (
+              <button
+                onClick={onCreateMcpRoom}
+                className="btn-press rounded-full border border-sky-500/40 bg-sky-500/10 px-5 py-2 text-sm font-medium text-sky-700 hover:bg-sky-500/20 dark:text-sky-300"
+              >
+                MCP 协作房间
               </button>
             )}
             {deepseekAvailable && (

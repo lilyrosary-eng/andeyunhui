@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
 
@@ -18,6 +19,66 @@ const ROOMS_FILE: &str = "rooms.json";
 const ASSIGNMENTS_FILE: &str = "assignments.json";
 /// 与 `src-tauri/tauri.conf.json` 的 identifier 必须一致，否则 MCP 进程找不到宿主的数据目录。
 const APP_IDENTIFIER: &str = "com.rosary.andengyuanhua";
+
+// ========== 跨进程写锁 ==========
+//
+// 宿主（Tauri）与 MCP server 现在是两个进程，共用同一份 assignments.json / 事件流。
+// 没有锁时「读-改-写」会互相覆盖（丢任务更新），事件 seq 也可能撞号。
+// 用「create_new 独占文件」实现轻量互斥：不引入额外依赖，崩溃残留按 15s 视为陈旧锁。
+
+const WRITE_LOCK_FILE: &str = ".collab-write.lock";
+const WRITE_LOCK_STALE: Duration = Duration::from_secs(15);
+const WRITE_LOCK_RETRY: u32 = 150;
+const WRITE_LOCK_INTERVAL: Duration = Duration::from_millis(20);
+
+struct WriteLockGuard {
+    path: PathBuf,
+}
+
+impl Drop for WriteLockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_write_lock(base: &Path) -> Result<WriteLockGuard, String> {
+    let path = base.join(WRITE_LOCK_FILE);
+    fs::create_dir_all(base).map_err(|e| format!("创建协作目录失败 {}: {e}", base.display()))?;
+    for _ in 0..WRITE_LOCK_RETRY {
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                use std::io::Write;
+                let _ = writeln!(file, "{}", std::process::id());
+                return Ok(WriteLockGuard { path });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = fs::metadata(&path)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|time| time.elapsed().ok())
+                    .map(|age| age > WRITE_LOCK_STALE)
+                    .unwrap_or(false);
+                if stale {
+                    // 持有者进程已崩溃且长时间没释放，清掉陈旧锁后继续抢。
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                std::thread::sleep(WRITE_LOCK_INTERVAL);
+            }
+            Err(error) => return Err(format!("获取协作写锁失败 {}: {error}", path.display())),
+        }
+    }
+    Err("协作数据正被其它进程占用，请稍后重试".to_string())
+}
+
+/// 在跨进程写锁内执行一次「读-改-写」。任何路径都会释放锁（含提前返回错误）。
+pub fn with_write_lock<T>(
+    base: &Path,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = acquire_write_lock(base)?;
+    action()
+}
 
 /// 事件序号缓存：房间 -> 当前最大 seq。
 /// 重启后首次访问会从 NDJSON 末尾恢复，避免序号重复。
@@ -141,44 +202,65 @@ pub fn events_path(base: &Path, room_id: &str) -> Result<PathBuf, String> {
     Ok(dir.join(format!("{id}.ndjson")))
 }
 
-/// 追加一条事件并推进序号缓存。
+/// 追加一条事件并推进序号。
+/// 序号分配与追加写都在跨进程写锁内完成：MCP 进程与宿主可能同时发言，
+/// 只靠进程内缓存会出现两个进程拿到同一个 seq 的情况。
 pub fn append_event(base: &Path, mut event: CollabEvent) -> Result<CollabEvent, String> {
     let path = events_path(base, &event.room_id)?;
-    let seq = next_seq(&path, &event.room_id)?;
-    event.seq = seq;
-    let line = serde_json::to_string(&event).map_err(|e| format!("序列化事件失败: {e}"))?;
-    use std::io::Write;
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("打开事件文件失败 {}: {e}", path.display()))?;
-    file.write_all(format!("{line}\n").as_bytes())
-        .map_err(|e| format!("写入事件失败 {}: {e}", path.display()))?;
-    Ok(event)
+    let room_id = event.room_id.clone();
+    with_write_lock(base, move || {
+        event.seq = next_seq(&path, &room_id)?;
+        let line = serde_json::to_string(&event).map_err(|e| format!("序列化事件失败: {e}"))?;
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| format!("打开事件文件失败 {}: {e}", path.display()))?;
+        file.write_all(format!("{line}\n").as_bytes())
+            .map_err(|e| format!("写入事件失败 {}: {e}", path.display()))?;
+        Ok(event)
+    })
 }
 
 fn next_seq(path: &Path, room_id: &str) -> Result<u64, String> {
     let cache = seq_cache();
     let mut guard = cache.lock().map_err(|_| "事件序号锁已损坏".to_string())?;
-    if let Some(seq) = guard.get(room_id) {
-        let next = *seq + 1;
-        guard.insert(room_id.to_string(), next);
-        return Ok(next);
-    }
-    let last = fs::read_to_string(path)
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .rev()
-                .find(|line| !line.trim().is_empty())
-                .and_then(|line| serde_json::from_str::<CollabEvent>(line).ok())
-                .map(|e| e.seq)
-        })
-        .unwrap_or(0);
+    let cached = guard.get(room_id).copied().unwrap_or(0);
+    // 以文件尾为准：别的进程（MCP）可能刚追加过，进程内缓存只是下界。
+    let last = last_seq_in_file(path).max(cached);
     let next = last + 1;
     guard.insert(room_id.to_string(), next);
     Ok(next)
+}
+
+/// 读 NDJSON 末尾一小段找最后一个合法事件的 seq。文件不存在 / 尾部未写完都返回 None。
+fn last_seq_in_file(path: &Path) -> u64 {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return 0,
+    };
+    let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    // 事件行可能很长（结果正文），16KB 尾部足够覆盖最后一条。
+    let start = len.saturating_sub(16 * 1024);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return 0;
+    }
+    let mut buf = Vec::new();
+    if file.read_to_end(&mut buf).is_err() {
+        return 0;
+    }
+    let text = String::from_utf8_lossy(&buf);
+    for line in text.lines().rev() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(event) = serde_json::from_str::<CollabEvent>(line) {
+            return event.seq;
+        }
+    }
+    0
 }
 
 /// 读取事件；`after_seq` 为 Some 时只返回更大的序号（增量拉取）。
@@ -525,6 +607,25 @@ mod tests {
         assert!(meta.contains("镜像房间"));
         let _ = fs::remove_dir_all(base);
         let _ = fs::remove_dir_all(workspace);
+    }
+
+    /// 模拟 MCP 进程先写入一条事件：本进程的下一条 seq 必须接着文件尾，而不是从 1 开始。
+    #[test]
+    fn seq_follows_external_append_from_other_process() {
+        let base = temp_base("seq-external");
+        let room = "room_external";
+        let path = events_path(&base, room).unwrap();
+        let mut external = event(room, "message");
+        external.seq = 9;
+        external.text = Some("外部进程写入".to_string());
+        let line = serde_json::to_string(&external).unwrap();
+        fs::write(&path, format!("{line}\n")).unwrap();
+
+        let appended = append_event(&base, event(room, "message")).unwrap();
+        assert_eq!(appended.seq, 10);
+        // 写锁必须在结束后清理，否则下一个进程会一直等到陈旧锁超时。
+        assert!(!base.join(".collab-write.lock").exists());
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]

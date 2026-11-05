@@ -162,6 +162,8 @@ export function useAiCollab(): UseAiCollabResult {
 
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
+  const activeRoomRef = useRef<CollabRoom | null>(null);
+  activeRoomRef.current = activeRoom;
   /** 当前房间最后消费的事件序号：增量拉取与实时推送共用，避免重复合并。 */
   const lastSeqRef = useRef(0);
 
@@ -373,8 +375,13 @@ export function useAiCollab(): UseAiCollabResult {
       },
     ];
     try {
+      const fallbackName = harnessId === 'dsh'
+        ? 'DeepSeek 本地协作'
+        : harnessId === 'mcp'
+          ? 'MCP 协作房间'
+          : '协作房间';
       const room = await invoke<CollabRoom>('collab_room_create', {
-        name: name?.trim() || (harnessId === 'dsh' ? 'DeepSeek 本地协作' : '协作房间'),
+        name: name?.trim() || fallbackName,
         agents,
         leadId: 'lead',
       });
@@ -402,24 +409,35 @@ export function useAiCollab(): UseAiCollabResult {
     }
   }, [refreshRooms, selectRoom]);
 
+  /** 该成员是否由外部 harness 执行：这类任务只入队，不占用本应用的 busy 状态。 */
+  const waitsForExternal = useCallback((agentId?: string) => {
+    const room = activeRoomRef.current;
+    if (!room) return false;
+    const id = agentId ?? room.leadId;
+    return room.agents.find((agent) => agent.id === id)?.harnessId === 'mcp';
+  }, []);
+
   const send = useCallback(async (text: string) => {
     const roomId = activeIdRef.current;
     const body = text.trim();
     if (!roomId || !body) return;
-    setBusy(true);
+    // MCP 房间的任务要等外部 harness 认领，锁住输入框只会让人以为卡住。
+    const external = waitsForExternal();
+    if (!external) setBusy(true);
     setError(null);
     try {
       await invoke('collab_room_send', { roomId, text: body });
     } catch (err) {
-      setBusy(false);
+      if (!external) setBusy(false);
       setError(String(err));
     }
-  }, []);
+  }, [waitsForExternal]);
 
   const assign = useCallback(async (assigneeId: string, brief: string) => {
     const roomId = activeIdRef.current;
     if (!roomId || !brief.trim()) return;
-    setBusy(true);
+    const external = waitsForExternal(assigneeId);
+    if (!external) setBusy(true);
     setError(null);
     try {
       await invoke('collab_assign', {
@@ -429,10 +447,10 @@ export function useAiCollab(): UseAiCollabResult {
         parentId: null,
       });
     } catch (err) {
-      setBusy(false);
+      if (!external) setBusy(false);
       setError(String(err));
     }
-  }, []);
+  }, [waitsForExternal]);
 
   const runDemo = useCallback(async () => {
     const roomId = activeIdRef.current;

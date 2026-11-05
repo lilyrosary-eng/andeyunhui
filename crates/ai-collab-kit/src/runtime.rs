@@ -109,13 +109,16 @@ pub fn emit_event(
 
 fn upsert_assignment(base: &Path, assignment: &Assignment) -> Result<(), String> {
     let _guard = board_lock().lock().map_err(|_| "任务表锁已损坏".to_string())?;
-    let mut map = store::read_assignments(base);
-    let list = map.entry(assignment.room_id.clone()).or_default();
-    match list.iter().position(|a| a.id == assignment.id) {
-        Some(index) => list[index] = assignment.clone(),
-        None => list.push(assignment.clone()),
-    }
-    store::write_assignments(base, &map)
+    // 进程内互斥挡不住 MCP 进程，读-改-写必须在跨进程写锁里做，否则会丢任务更新。
+    store::with_write_lock(base, || {
+        let mut map = store::read_assignments(base);
+        let list = map.entry(assignment.room_id.clone()).or_default();
+        match list.iter().position(|a| a.id == assignment.id) {
+            Some(index) => list[index] = assignment.clone(),
+            None => list.push(assignment.clone()),
+        }
+        store::write_assignments(base, &map)
+    })
 }
 
 /// 新建任务并落一条 `assignment.created` 事件，返回任务与事件本身。
@@ -227,21 +230,22 @@ fn update_assignment(
     result: Option<String>,
 ) -> Result<Assignment, String> {
     let _guard = board_lock().lock().map_err(|_| "任务表锁已损坏".to_string())?;
-    let mut map = store::read_assignments(base);
-    let list = map
-        .get_mut(room_id)
-        .ok_or_else(|| "房间任务表不存在".to_string())?;
-    let assignment = list
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| "任务不存在".to_string())?;
-    assignment.status = status;
-    assignment.result = result;
-    assignment.updated_at = now_ms();
-    let updated = assignment.clone();
-    drop(_guard);
-    store::write_assignments(base, &map)?;
-    Ok(updated)
+    store::with_write_lock(base, || {
+        let mut map = store::read_assignments(base);
+        let list = map
+            .get_mut(room_id)
+            .ok_or_else(|| "房间任务表不存在".to_string())?;
+        let assignment = list
+            .iter_mut()
+            .find(|a| a.id == assignment_id)
+            .ok_or_else(|| "任务不存在".to_string())?;
+        assignment.status = status;
+        assignment.result = result;
+        assignment.updated_at = now_ms();
+        let updated = assignment.clone();
+        store::write_assignments(base, &map)?;
+        Ok(updated)
+    })
 }
 
 fn mark_cancelled(assignment_id: &str) {
@@ -413,6 +417,23 @@ async fn run_assignment(app: AppHandle, base: PathBuf, room: Room, assignment: A
         .find(|agent| agent.id == assignment.assignee_id)
         .map(|agent| agent.harness_id.as_str())
         .unwrap_or(crate::harness::ECHO);
+
+    // 外部 harness 走 MCP 自己认领：宿主一旦自动执行就会抢跑，
+    // 所以只留一条提示事件，任务保持 queued 等外部 claim。
+    if harness_id == crate::harness::MCP {
+        let _ = emit_event(
+            &app,
+            &base,
+            &room.id,
+            "assignment.progress",
+            Some(assignment.assignee_id.clone()),
+            Some(assignment.id.clone()),
+            Some("任务已入队，等待外部 harness 通过 MCP 认领".to_string()),
+            None,
+            None,
+        );
+        return;
+    }
 
     if harness_id != crate::harness::DSH {
         run_echo_assignment(app, base, room, assignment).await;
