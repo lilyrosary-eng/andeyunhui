@@ -25,6 +25,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use crate::harness::DshConfig;
+use crate::permission::{self, PermissionOption, PermissionPrompt};
+
+/// 权限请求等待用户确认的上限；超时按拒绝处理，避免 agent 进程永久卡住。
+const PERMISSION_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcpUpdateKind {
@@ -52,10 +56,17 @@ struct AcpClient {
     reader: BufReader<ChildStdout>,
     next_id: u64,
     stderr: Arc<Mutex<String>>,
+    /// 权限请求要带上房间标识，前端才能判断是不是当前房间。
+    room_id: String,
 }
 
 impl AcpClient {
-    async fn spawn(config: &DshConfig, patch: &Path, workspace: &Path) -> Result<Self, String> {
+    async fn spawn(
+        config: &DshConfig,
+        patch: &Path,
+        workspace: &Path,
+        room_id: &str,
+    ) -> Result<Self, String> {
         let mut command = if config.is_script() {
             let mut command = tokio::process::Command::new("node");
             command.arg(&config.bin);
@@ -109,6 +120,7 @@ impl AcpClient {
             reader: BufReader::new(stdout),
             next_id: 1,
             stderr: stderr_buf,
+            room_id: room_id.to_string(),
         })
     }
 
@@ -171,6 +183,7 @@ impl AcpClient {
         params: Value,
         assignment_id: &str,
         on_update: &mut F,
+        on_permission: &mut (dyn FnMut(&PermissionPrompt) + Send),
     ) -> Result<Value, String>
     where
         F: FnMut(AcpUpdate) + Send,
@@ -202,18 +215,23 @@ impl AcpClient {
                     }
                 }
                 Some("session/request_permission") => {
-                    let request_id = message.get("id").cloned().unwrap_or(Value::Null);
-                    let options = message.pointer("/params/options").and_then(|value| value.as_array());
-                    let allow_once = options.and_then(|options| {
-                        options
-                            .iter()
-                            .find(|option| option.get("kind").and_then(|value| value.as_str()) == Some("allow_once"))
-                            .and_then(|option| option.get("optionId").and_then(|value| value.as_str()))
-                    });
-                    let outcome = if let Some(option_id) = allow_once {
-                        json!({ "outcome": { "outcome": "selected", "optionId": option_id } })
-                    } else {
-                        json!({ "outcome": { "outcome": "cancelled" } })
+                    let (request_id, prompt) =
+                        parse_permission_request(&message, &self.room_id, assignment_id);
+                    let receiver = permission::open(&prompt)?;
+                    // 先通知 UI，再等用户选择；等待期间 agent 会阻塞在权限请求上。
+                    on_permission(&prompt);
+                    let selected = permission::wait(
+                        &prompt.permission_id,
+                        receiver,
+                        assignment_id,
+                        Duration::from_secs(PERMISSION_TIMEOUT_SECS),
+                    )
+                    .await;
+                    let outcome = match selected {
+                        Some(option_id) => {
+                            json!({ "outcome": { "outcome": "selected", "optionId": option_id } })
+                        }
+                        None => json!({ "outcome": { "outcome": "cancelled" } }),
                     };
                     self.write_line(&json!({
                         "jsonrpc": "2.0",
@@ -238,7 +256,12 @@ impl AcpClient {
         }
     }
 
-    async fn initialize<F>(&mut self, assignment_id: &str, on_update: &mut F) -> Result<(), String>
+    async fn initialize<F>(
+        &mut self,
+        assignment_id: &str,
+        on_update: &mut F,
+        on_permission: &mut (dyn FnMut(&PermissionPrompt) + Send),
+    ) -> Result<(), String>
     where
         F: FnMut(AcpUpdate) + Send,
     {
@@ -253,6 +276,7 @@ impl AcpClient {
             }),
             assignment_id,
             on_update,
+            on_permission,
         )
         .await?;
         Ok(())
@@ -266,6 +290,7 @@ impl AcpClient {
         model: &str,
         assignment_id: &str,
         on_update: &mut F,
+        on_permission: &mut (dyn FnMut(&PermissionPrompt) + Send),
     ) -> Result<(String, bool), String>
     where
         F: FnMut(AcpUpdate) + Send,
@@ -277,6 +302,7 @@ impl AcpClient {
                 json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] }),
                 assignment_id,
                 on_update,
+                on_permission,
             )
             .await?
         } else {
@@ -285,6 +311,7 @@ impl AcpClient {
                 json!({ "cwd": cwd, "mcpServers": [] }),
                 assignment_id,
                 on_update,
+                on_permission,
             )
             .await?
         };
@@ -296,8 +323,16 @@ impl AcpClient {
             .ok_or_else(|| "ACP session/new 未返回 sessionId".to_string())?;
 
         let options = result.get("configOptions").cloned().unwrap_or(Value::Null);
-        self.ensure_local_model(&session_id, &options, provider, model, assignment_id, on_update)
-            .await?;
+        self.ensure_local_model(
+            &session_id,
+            &options,
+            provider,
+            model,
+            assignment_id,
+            on_update,
+            on_permission,
+        )
+        .await?;
         Ok((session_id, resume.is_none()))
     }
 
@@ -311,6 +346,7 @@ impl AcpClient {
         model: &str,
         assignment_id: &str,
         on_update: &mut F,
+        on_permission: &mut (dyn FnMut(&PermissionPrompt) + Send),
     ) -> Result<(), String>
     where
         F: FnMut(AcpUpdate) + Send,
@@ -339,6 +375,7 @@ impl AcpClient {
             json!({ "sessionId": session_id, "configId": "model", "value": target }),
             assignment_id,
             on_update,
+            on_permission,
         )
         .await?;
         Ok(())
@@ -350,6 +387,7 @@ impl AcpClient {
         prompt: &str,
         assignment_id: &str,
         on_update: &mut F,
+        on_permission: &mut (dyn FnMut(&PermissionPrompt) + Send),
     ) -> Result<(String, String), String>
     where
         F: FnMut(AcpUpdate) + Send,
@@ -370,6 +408,7 @@ impl AcpClient {
                 }),
                 assignment_id,
                 &mut callback,
+                on_permission,
             )
             .await?;
         // callback 持有 text 的可变借用；先释放再读取累计文本。
@@ -389,10 +428,68 @@ impl AcpClient {
                 json!({ "sessionId": session_id }),
                 "close",
                 &mut |_| {},
+                &mut |_| {},
             )
             .await;
         let _ = self.child.kill().await;
     }
+}
+
+/// 解析 ACP 的权限请求。参数形状参考协议：
+/// `params.toolCall.title / kind`，`params.options[].optionId / name / kind`。
+fn parse_permission_request(
+    message: &Value,
+    room_id: &str,
+    assignment_id: &str,
+) -> (Value, PermissionPrompt) {
+    let request_id = message.get("id").cloned().unwrap_or(Value::Null);
+    let tool = message.pointer("/params/toolCall");
+    let title = tool
+        .and_then(|item| item.get("title"))
+        .and_then(|value| value.as_str())
+        .or_else(|| tool.and_then(|item| item.get("kind")).and_then(|value| value.as_str()))
+        .unwrap_or("工具调用")
+        .to_string();
+    let tool_kind = tool
+        .and_then(|item| item.get("kind"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    let options = message
+        .pointer("/params/options")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let option_id = item.get("optionId").and_then(|value| value.as_str())?;
+                    Some(PermissionOption {
+                        option_id: option_id.to_string(),
+                        name: item
+                            .get("name")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or(option_id)
+                            .to_string(),
+                        kind: item
+                            .get("kind")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (
+        request_id,
+        PermissionPrompt {
+            permission_id: crate::runtime::new_id("perm"),
+            room_id: room_id.to_string(),
+            assignment_id: assignment_id.to_string(),
+            title,
+            tool_kind,
+            options,
+        },
+    )
 }
 
 fn model_option_has(option: &Value, target: &str) -> bool {
@@ -462,28 +559,47 @@ where
 /// 恢复（或新建）一个 ACP 会话并提交一条 prompt。
 /// `resume_session` 为 Some 时优先原位恢复；失败由上层决定是否回退 headless。
 #[allow(clippy::too_many_arguments)]
-pub async fn run_turn<F>(
+pub async fn run_turn<F, P>(
     config: &DshConfig,
     patch: &Path,
     workspace: &Path,
     prompt: &str,
     assignment_id: &str,
+    room_id: &str,
     resume_session: Option<&str>,
     provider: &str,
     model: &str,
     mut on_update: F,
+    mut on_permission: P,
 ) -> Result<AcpTurnResult, String>
 where
     F: FnMut(AcpUpdate) + Send,
+    P: FnMut(&PermissionPrompt) + Send,
 {
-    let mut client = AcpClient::spawn(config, patch, workspace).await?;
+    let mut client = AcpClient::spawn(config, patch, workspace, room_id).await?;
     let inner = async {
-        client.initialize(assignment_id, &mut on_update).await?;
+        client
+            .initialize(assignment_id, &mut on_update, &mut on_permission)
+            .await?;
         let (session_id, created) = client
-            .open_session(resume_session, workspace, provider, model, assignment_id, &mut on_update)
+            .open_session(
+                resume_session,
+                workspace,
+                provider,
+                model,
+                assignment_id,
+                &mut on_update,
+                &mut on_permission,
+            )
             .await?;
         let (text, stop_reason) = client
-            .prompt(&session_id, prompt, assignment_id, &mut on_update)
+            .prompt(
+                &session_id,
+                prompt,
+                assignment_id,
+                &mut on_update,
+                &mut on_permission,
+            )
             .await?;
         client.close(&session_id).await;
         Ok(AcpTurnResult { session_id, text, stop_reason, created })
@@ -498,6 +614,33 @@ where
 mod tests {
     use super::*;
     use crate::harness::{self, DshConfig, DEFAULT_MODEL, DEFAULT_PROVIDER};
+
+    /// 权限请求的字段形状（title / kind / options）要能正确映射成前端可用的结构。
+    #[test]
+    fn parses_permission_request() {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "s1",
+                "toolCall": { "toolCallId": "t1", "title": "运行 npm test", "kind": "execute" },
+                "options": [
+                    { "optionId": "allow_once", "name": "允许一次", "kind": "allow_once" },
+                    { "optionId": "reject_once", "name": "拒绝", "kind": "reject_once" }
+                ]
+            }
+        });
+        let (request_id, prompt) = parse_permission_request(&message, "room_perm", "task_perm");
+        assert_eq!(request_id, json!(7));
+        assert_eq!(prompt.room_id, "room_perm");
+        assert_eq!(prompt.assignment_id, "task_perm");
+        assert_eq!(prompt.title, "运行 npm test");
+        assert_eq!(prompt.tool_kind.as_deref(), Some("execute"));
+        assert_eq!(prompt.options.len(), 2);
+        assert_eq!(prompt.options[0].option_id, "allow_once");
+        assert!(prompt.permission_id.starts_with("perm_"));
+    }
 
     /// 本地实跑（需要 LM Studio + dsh CLI，默认忽略）：
     /// `cargo test -p ai-collab-kit acp_resume_smoke -- --ignored --nocapture`
@@ -548,9 +691,11 @@ mod tests {
             &dir,
             "刚才让你记住的数字是多少？只回答数字。",
             "acp-smoke-resume",
+            "room-acp-smoke",
             Some(&target.id),
             &config.provider,
             &config.model,
+            |_| {},
             |_| {},
         )
         .await
@@ -567,9 +712,11 @@ mod tests {
             &dir,
             "2+3 等于几？只回答数字。",
             "acp-smoke-new",
+            "room-acp-smoke",
             None,
             &config.provider,
             &config.model,
+            |_| {},
             |_| {},
         )
         .await

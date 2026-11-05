@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 use serde_json::json;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 use crate::dsh_sessions::{self, DshSessionSummary};
 use crate::harness;
@@ -65,6 +65,29 @@ pub fn collab_recover(app: AppHandle) -> Result<runtime::RecoverySummary, String
 #[tauri::command]
 pub fn collab_watch_start(app: AppHandle) -> Result<(), String> {
     crate::watcher::start(app)
+}
+
+/// 用户对 ACP 权限请求的选择。`option_id` 为 null 表示拒绝 / 取消。
+#[tauri::command]
+pub fn collab_permission_reply(
+    app: AppHandle,
+    permission_id: String,
+    option_id: Option<String>,
+) -> Result<(), String> {
+    let resolved = crate::permission::reply(&permission_id, option_id.as_deref());
+    if !resolved {
+        return Err("权限请求不存在或已被处理".to_string());
+    }
+    // 让所有窗口清掉确认条；带上 optionId 便于 UI 回显选择。
+    let _ = app.emit(
+        "collab-permission",
+        json!({
+            "permissionId": permission_id,
+            "resolved": true,
+            "optionId": option_id,
+        }),
+    );
+    Ok(())
 }
 
 /// MCP 接入信息：设置页展示，外部 harness 直接复制。

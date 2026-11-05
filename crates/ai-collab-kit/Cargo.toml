@@ -13,7 +13,8 @@ chrono = "0.4"
 # DeepSeek Harness 会话日志是 zstd 压缩的 JSONL；只读导入已有会话用 zstd 解压。
 zstd = "0.13"
 # echo harness 的模拟执行 + DeepSeek Harness 子进程：Tauri 2 内部已是 tokio
-tokio = { version = "1", features = ["rt", "time", "macros", "process", "io-util"] }
+# sync：ACP 权限桥接用 oneshot 把「用户点了哪个选项」送回等待中的协议循环。
+tokio = { version = "1", features = ["rt", "time", "macros", "process", "io-util", "sync"] }
 # 事件实时推送：监听 <base>/events/*.ndjson。MCP 是独立进程，没法 emit Tauri 事件，
 # 只能由宿主监听文件变化后再推给前端。与主 crate 的 notify 版本/特性保持一致。
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }

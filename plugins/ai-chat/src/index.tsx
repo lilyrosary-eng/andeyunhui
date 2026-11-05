@@ -499,6 +499,8 @@ const Root = memo(function Root() {
         streamJsonAvailable={collab.harnesses.find((harness) => harness.id === 'stream-json')?.available ?? false}
         onCreateMailboxRoom={() => void collab.createRoom(undefined, 'mailbox')}
         mailboxAvailable={collab.harnesses.find((harness) => harness.id === 'mailbox')?.available ?? false}
+        permission={collab.permission}
+        onReplyPermission={(optionId) => void collab.replyPermission(optionId)}
         deepseekAvailable={collab.harnesses.find((h) => h.id === 'dsh')?.available ?? false}
         dshSessions={collab.dshSessions}
         dshSessionsLoading={collab.dshSessionsLoading}

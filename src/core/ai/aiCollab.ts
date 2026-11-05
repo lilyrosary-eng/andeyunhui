@@ -98,6 +98,22 @@ export interface CollabRoomSnapshot {
   events: CollabEvent[];
 }
 
+/** ACP 权限确认（`session/request_permission`）。 */
+export interface CollabPermissionOption {
+  optionId: string;
+  name: string;
+  kind: string;
+}
+
+export interface CollabPermissionRequest {
+  permissionId: string;
+  roomId: string;
+  assignmentId: string;
+  title: string;
+  toolKind?: string | null;
+  options: CollabPermissionOption[];
+}
+
 /** 启动恢复结果：上一进程遗留任务的处理统计。 */
 export interface CollabRecovery {
   failedRunning: number;
@@ -158,6 +174,10 @@ export interface UseAiCollabResult {
   selectRoom: (roomId: string) => Promise<void>;
   send: (text: string) => Promise<void>;
   assign: (assigneeId: string, brief: string) => Promise<void>;
+  /** 当前等待用户确认的 ACP 权限请求（可为空） */
+  permission: CollabPermissionRequest | null;
+  /** 回复权限请求；null 表示拒绝 */
+  replyPermission: (optionId: string | null) => Promise<void>;
   runDemo: () => Promise<void>;
   cancel: (assignmentId: string) => Promise<void>;
 }
@@ -173,6 +193,7 @@ export function useAiCollab(): UseAiCollabResult {
   const [error, setError] = useState<string | null>(null);
   const [dshSessions, setDshSessions] = useState<DshSessionSummary[]>([]);
   const [dshSessionsLoading, setDshSessionsLoading] = useState(false);
+  const [permission, setPermission] = useState<CollabPermissionRequest | null>(null);
 
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
@@ -180,6 +201,8 @@ export function useAiCollab(): UseAiCollabResult {
   activeRoomRef.current = activeRoom;
   /** 当前房间最后消费的事件序号：增量拉取与实时推送共用，避免重复合并。 */
   const lastSeqRef = useRef(0);
+  const permissionRef = useRef<CollabPermissionRequest | null>(null);
+  permissionRef.current = permission;
 
   const refreshRooms = useCallback(async () => {
     const list = await invoke<CollabRoom[]>('collab_room_list');
@@ -190,6 +213,8 @@ export function useAiCollab(): UseAiCollabResult {
   const selectRoom = useCallback(async (roomId: string) => {
     setError(null);
     setActiveId(roomId);
+    // 切房间时清掉上一间的权限确认，避免弹条串房。
+    setPermission(null);
     try {
       const snapshot = await invoke<CollabRoomSnapshot>('collab_room_snapshot', { roomId });
       const snapshotEvents = snapshot.events ?? [];
@@ -258,10 +283,38 @@ export function useAiCollab(): UseAiCollabResult {
       }
       if (event.kind === 'assignment.completed' || event.kind === 'assignment.failed' || event.kind === 'assignment.cancelled') {
         setBusy(false);
+        // 任务已结束，挂着的权限确认条一并清掉。
+        setPermission((prev) => (prev && prev.assignmentId === event.assignmentId ? null : prev));
       }
     }).then((off) => { unlisten = off; });
     return () => { unlisten?.(); };
   }, []);
+
+  // ACP 权限确认：专用事件用于即时弹条；收到 resolved 后清掉。
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    void listen<Record<string, unknown>>('collab-permission', (payload) => {
+      const data = payload.payload as Partial<CollabPermissionRequest> & {
+        resolved?: boolean;
+      };
+      if (!data?.permissionId) return;
+      if (data.resolved) {
+        setPermission((prev) => (prev && prev.permissionId === data.permissionId ? null : prev));
+        return;
+      }
+      if (!data.roomId || data.roomId !== activeIdRef.current) return;
+      if (!data.options || !data.title) return;
+      setPermission(data as CollabPermissionRequest);
+    }).then((off) => { unlisten = off; });
+    return () => { unlisten?.(); };
+  }, []);
+
+  // 后端等待上限 120s；这里多留 5s 兜底清条，避免界面永久卡在一个已失效的请求。
+  useEffect(() => {
+    if (!permission) return;
+    const timer = window.setTimeout(() => setPermission(null), 125_000);
+    return () => window.clearTimeout(timer);
+  }, [permission]);
 
   // 发现 dsh 既有会话：只在用户打开导入弹窗时扫描，避免启动即解压大量日志。
   const loadDshSessions = useCallback(async () => {
@@ -352,6 +405,7 @@ export function useAiCollab(): UseAiCollabResult {
           || event.kind === 'assignment.cancelled'
         ) {
           setBusy(false);
+          setPermission((prev) => (prev && prev.assignmentId === event.assignmentId ? null : prev));
         }
       }
     } catch {
@@ -498,6 +552,22 @@ export function useAiCollab(): UseAiCollabResult {
     }
   }, []);
 
+  const replyPermission = useCallback(async (optionId: string | null) => {
+    const current = permissionRef.current;
+    if (!current) return;
+    setError(null);
+    try {
+      await invoke('collab_permission_reply', {
+        permissionId: current.permissionId,
+        optionId,
+      });
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setPermission(null);
+    }
+  }, []);
+
   const cancel = useCallback(async (assignmentId: string) => {
     const roomId = activeIdRef.current;
     if (!roomId) return;
@@ -526,6 +596,8 @@ export function useAiCollab(): UseAiCollabResult {
     selectRoom,
     send,
     assign,
+    permission,
+    replyPermission,
     runDemo,
     cancel,
   };

@@ -21,6 +21,8 @@ pub mod dsh_sessions;
 pub mod harness;
 /// MCP 控制面（stdio JSON-RPC）：宿主 exe `--mcp` 模式与独立 bin 共用同一实现。
 pub mod mcp;
+/// ACP 权限桥接：agent 的权限请求 → 前端确认 → 回传选择。
+pub mod permission;
 pub mod runtime;
 pub mod store;
 pub mod types;

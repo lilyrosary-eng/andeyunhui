@@ -1121,16 +1121,41 @@ async fn run_dsh_assignment(
             );
         };
 
+        // 权限请求：推给 UI 等待用户点选，超时/取消按拒绝处理（见 permission::wait）。
+        let app_perm = app.clone();
+        let base_perm = base.clone();
+        let room_perm = room.clone();
+        let assignment_perm = assignment.clone();
+        let on_permission = move |prompt: &crate::permission::PermissionPrompt| {
+            let payload = prompt.payload();
+            // 专用事件：前端用它弹确认条。
+            let _ = app_perm.emit("collab-permission", payload.clone());
+            // 同时落事件流：重开房间时能看到「曾请求过什么权限」。
+            let _ = emit_event(
+                &app_perm,
+                &base_perm,
+                &room_perm.id,
+                "permission.request",
+                Some(assignment_perm.assignee_id.clone()),
+                Some(assignment_perm.id.clone()),
+                Some(format!("需要确认：{}", prompt.title)),
+                None,
+                Some(json!({ "permission": payload })),
+            );
+        };
+
         match crate::acp_client::run_turn(
             &config,
             &crate::harness::acp_patch_path(&base),
             &workspace,
             &prompt_task,
             &assignment.id,
+            &room.id,
             resume_session.as_deref(),
             &config.provider,
             &config.model,
             on_update,
+            on_permission,
         )
         .await
         {

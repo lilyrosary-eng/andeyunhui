@@ -10,7 +10,8 @@ import {
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  CollabAssignment, CollabAssignmentStatus, CollabEvent, CollabMcpInfo, CollabRoom, DshSessionSummary,
+  CollabAssignment, CollabAssignmentStatus, CollabEvent, CollabMcpInfo, CollabPermissionRequest, CollabRoom,
+  DshSessionSummary,
 } from '@/core/ai/aiCollab';
 import { DshSessionImportDialog } from '@/components/ai-chat/DshSessionImportDialog';
 
@@ -40,6 +41,10 @@ interface AiCollabViewProps {
   onSend: (text: string) => void;
   onDemo: () => void;
   onCancel: (assignmentId: string) => void;
+  /** 等待用户确认的 ACP 权限请求 */
+  permission?: CollabPermissionRequest | null;
+  /** 回复权限请求；null 表示拒绝 */
+  onReplyPermission?: (optionId: string | null) => void;
 }
 
 const STATUS_META: Record<CollabAssignmentStatus, { label: string; cls: string; icon: LucideIcon }> = {
@@ -382,6 +387,8 @@ export const AiCollabView = memo(function AiCollabView({
   onSend,
   onDemo,
   onCancel,
+  permission,
+  onReplyPermission,
 }: AiCollabViewProps) {
   const [draft, setDraft] = useState('');
   const [importOpen, setImportOpen] = useState(false);
@@ -573,6 +580,35 @@ export const AiCollabView = memo(function AiCollabView({
         )}
 
         <Timeline room={room} events={events} />
+
+        {permission && (
+          <div className="mx-5 mb-1 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2.5">
+            <div className="text-xs font-medium text-amber-800 dark:text-amber-200">
+              需要你确认：{permission.title}
+            </div>
+            <div className="mt-1 text-[11px] leading-relaxed text-amber-700/80 dark:text-amber-300/80">
+              {permission.toolKind ? `类型：${permission.toolKind} · ` : ''}
+              agent 正在等待你的选择，超时按拒绝处理。
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {permission.options.map((option) => (
+                <button
+                  key={option.optionId}
+                  onClick={() => onReplyPermission?.(option.optionId)}
+                  className="btn-press rounded-lg border border-amber-500/50 bg-white/70 px-3 py-1 text-[11px] font-medium text-amber-800 hover:bg-white dark:bg-stone-800/60 dark:text-amber-200"
+                >
+                  {option.name}
+                </button>
+              ))}
+              <button
+                onClick={() => onReplyPermission?.(null)}
+                className="btn-press rounded-lg border border-neutral-300 px-3 py-1 text-[11px] text-neutral-600 hover:bg-neutral-100 dark:border-stone-600 dark:text-stone-300 dark:hover:bg-stone-800"
+              >
+                拒绝
+              </button>
+            </div>
+          </div>
+        )}
 
         <footer className="shrink-0 border-t border-neutral-200/70 p-3 dark:border-stone-700/60">
           <div className="flex items-end gap-2 rounded-2xl border border-neutral-200 bg-white px-3 py-2 shadow-sm focus-within:border-indigo-400/60 dark:border-stone-700 dark:bg-stone-800">
