@@ -280,6 +280,9 @@ describe('批量「自动匹配并写入」：门槛与命令接线', () => {
     // 元信息候选、歌词候选、批量确认面板三处各用一次
     const uses = src.split('sourceLabel(').length - 1;
     expect(uses, '来源徽标被删到少于三处').toBeGreaterThanOrEqual(4);
+    // 分项自动获取取的是排序后的第 0 条，看不见来源就等于让人凭空信一个值
+    expect(src).toContain('setFieldAutoHint');
+    expect(src).toContain('fieldAutoHint &&');
   });
 });
 

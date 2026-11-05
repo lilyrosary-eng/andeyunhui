@@ -11,8 +11,8 @@ import { T, useLang } from '../../_shared/pluginRuntime';
 import { translateLyrics } from './lyricTranslate';
 import { BATCH_WRITABLE_FIELDS, type BatchPlan, type BatchAutoTagReport } from './batchAutoTag';
 
-/** 批量确认面板上的字段展示名（值来自后端 draft，键与 BATCH_WRITABLE_FIELDS 一致） */
-const BATCH_FIELD_LABEL: Record<string, string> = { title: '标题', artist: '歌手', album: '专辑' };
+/** 字段中文展示名（批量确认面板与「分项自动获取」的来源提示共用） */
+const FIELD_LABEL_CN: Record<string, string> = { title: '标题', artist: '歌手', album: '专辑' };
 import { loadTargetLang, TARGET_LANGS, TRANSLATE_NODES, translateSettingsFor, loadTranslateSettings } from '@/lib/translateLanguages';
 import { isGlossaryOff, learnGlossaryPairs } from '@/lib/translateGlossary';
 
@@ -598,6 +598,10 @@ export function TrackList({
   const [candidateLoading, setCandidateLoading] = useState(false);
   // 分项自动获取：当前在检索的字段（title/artist/album）
   const [fieldAutoBusy, setFieldAutoBusy] = useState<null | 'title' | 'artist' | 'album'>(null);
+  // 「分项自动获取」是从排好序的候选里取第 0 条填进格子的，用户看不见那是哪个源 ——
+  // 界面必须把来源说破，否则等于让人凭空信一个值
+  const [fieldAutoHint, setFieldAutoHint] = useState<string | null>(null);
+  useEffect(() => { setFieldAutoHint(null); }, [editingTrack]);
   // 一键自动获取：拉候选列表
   const fetchCandidates = async () => {
     if (!editingTrack || !onFetchMetaCandidates || candidateLoading) return;
@@ -632,6 +636,9 @@ export function TrackList({
       if (list.length > 0) {
         const best = list[0];
         setEditDraft((d) => ({ ...d, [field]: best[field] }));
+        setFieldAutoHint(
+          `${FIELD_LABEL_CN[field] || field}取自 ${sourceLabel(best.source)}：${best.title}${best.artist ? ' - ' + best.artist : ''}`,
+        );
       } else {
         alert(T('music.metaAutoNoResult') || '未找到匹配的歌曲信息');
       }
@@ -1100,7 +1107,7 @@ export function TrackList({
                   <span className="text-neutral-400 dark:text-stone-500">
                     {'  '}
                     {BATCH_WRITABLE_FIELDS.filter((k) => it.draft[k])
-                      .map((k) => `${BATCH_FIELD_LABEL[k] || k}→${String(it.draft[k])}`)
+                      .map((k) => `${FIELD_LABEL_CN[k] || k}→${String(it.draft[k])}`)
                       .join('  ')}
                     {'  '}
                     {sourceLabel(it.source)} {it.score}
@@ -1341,6 +1348,11 @@ export function TrackList({
                 </button>
               )}
             </div>
+            {fieldAutoHint && (
+              <div className="-mt-1 mb-2 text-[11px] text-neutral-500 dark:text-stone-400 truncate" title={fieldAutoHint}>
+                {fieldAutoHint}
+              </div>
+            )}
             {/* 封面区：预览 + 更换/重置 */}
             <div className="flex items-center gap-3 mb-4">
               <div className="w-14 h-14 rounded-lg bg-neutral-100 dark:bg-stone-700 overflow-hidden flex-shrink-0 flex items-center justify-center">
