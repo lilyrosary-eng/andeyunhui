@@ -78,6 +78,7 @@ name = "ai-collab-kit"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "notify",
  "serde",
  "serde_json",
  "tauri",

@@ -24,3 +24,5 @@ pub mod mcp;
 pub mod runtime;
 pub mod store;
 pub mod types;
+/// 事件目录监听：把外部进程（MCP）写入的增量近实时推给前端。
+pub mod watcher;

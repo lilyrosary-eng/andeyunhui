@@ -234,6 +234,12 @@ fn next_seq(path: &Path, room_id: &str) -> Result<u64, String> {
     Ok(next)
 }
 
+/// 某房间当前最后一条事件的序号；没有事件（或文件不存在）返回 0。
+/// 监听器用它把「已有历史」与「增量」分开，避免启动时把整段历史重推一遍。
+pub fn last_event_seq(base: &Path, room_id: &str) -> Result<u64, String> {
+    Ok(last_seq_in_file(&events_path(base, room_id)?))
+}
+
 /// 读 NDJSON 末尾一小段找最后一个合法事件的 seq。文件不存在 / 尾部未写完都返回 None。
 fn last_seq_in_file(path: &Path) -> u64 {
     use std::io::{Read, Seek, SeekFrom};

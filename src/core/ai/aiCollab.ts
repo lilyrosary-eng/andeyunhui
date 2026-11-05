@@ -216,6 +216,12 @@ export function useAiCollab(): UseAiCollabResult {
         } catch {
           // 恢复失败不阻断房间加载；最坏情况是旧任务仍显示执行中。
         }
+        try {
+          // MCP 写入的事件由宿主监听目录后近实时推送；失败时仍有 8s 轮询兜底。
+          await invoke('collab_watch_start');
+        } catch {
+          // 监听启动失败不阻断房间加载。
+        }
         const [catalog, list] = await Promise.all([
           invoke<CollabHarnessInfo[]>('collab_harnesses'),
           invoke<CollabRoom[]>('collab_room_list'),

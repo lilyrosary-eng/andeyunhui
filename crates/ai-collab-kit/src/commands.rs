@@ -60,6 +60,12 @@ pub fn collab_recover(app: AppHandle) -> Result<runtime::RecoverySummary, String
     runtime::recover_stale_assignments(&base)
 }
 
+/// 启动事件文件监听：MCP 等外部进程写入后近实时推给前端（线程只启动一次）。
+#[tauri::command]
+pub fn collab_watch_start(app: AppHandle) -> Result<(), String> {
+    crate::watcher::start(app)
+}
+
 /// MCP 接入信息：设置页展示，外部 harness 直接复制。
 ///
 /// 随包分发方式：**宿主 exe 自身带 `--mcp` 参数**就进入 stdio 模式，

@@ -14,3 +14,6 @@ chrono = "0.4"
 zstd = "0.13"
 # echo harness 的模拟执行 + DeepSeek Harness 子进程：Tauri 2 内部已是 tokio
 tokio = { version = "1", features = ["rt", "time", "macros", "process", "io-util"] }
+# 事件实时推送：监听 <base>/events/*.ndjson。MCP 是独立进程，没法 emit Tauri 事件，
+# 只能由宿主监听文件变化后再推给前端。与主 crate 的 notify 版本/特性保持一致。
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
