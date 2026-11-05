@@ -1871,6 +1871,7 @@ fn main() {
             music_set_cover_url,
             music_rescan_metadata,
             music_edit_track,
+            music_tag_field_support,
             music_batch_edit_tracks,
             music_rollback_tag_edit,
             music_rank_tag_candidates,

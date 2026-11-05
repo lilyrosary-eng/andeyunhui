@@ -766,8 +766,9 @@ pub struct TagEditDraft {
 /// 文本项写回：None 不动，空串清除，其余 trim 后写入。
 ///
 /// 返回 `false` 表示该 `TagType` 没有这个键的帧映射 —— lofty 的 `Tag::insert` 会先
-/// `re_map` 校验，校验不过就**静默丢弃**。调用方收集这些字段并打日志，
-/// 不能假装写成功了（典型：APEv2 里没有作曲/作词的位置）。
+/// `re_map` 校验，校验不过就**静默丢弃**。调用方收集这些字段并打日志，不能假装写成功了。
+/// 实测的例子是 WAV：RIFF INFO 没有专辑艺人 / 作词 / 碟号的位置
+/// （哪些字段会掉，用 `field_support_for` 查，别凭容器名猜）。
 fn apply_text_item(
     tag: &mut lofty::tag::Tag,
     key: lofty::tag::ItemKey,
@@ -1169,6 +1170,85 @@ pub fn restore_cover_from_backup(
     // backup_dir 传 None：恢复本身就是撤销动作，不该再吃掉一份留底名额
     embed_cover_into_file(&resolved, &bytes, Some(mime), None)?;
     sync_cover_after_embed(app, file_path)
+}
+
+// ============ 字段 × 容器支持矩阵（前端置灰的唯一依据）============
+
+/// 某容器能写哪些标签字段。
+///
+/// 判据用 lofty 自己的 `ItemKey::map_key(tag_type)`：映射不到就是**没有帧位**，
+/// 写了会被静默丢弃（`Tag::insert` 的 `re_map` 校验不过）。这把"哪些格子该灰"
+/// 留在知道信息的那一层，而不是让前端照经验猜容器。
+/// 与实测一致：WAV(RIFF INFO) 有 ICRD(作曲)、没有专辑艺人/作词/碟号。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagFieldSupport {
+    /// 文件里已有的标签族；空数组 = lofty 认不出该容器（如 .wma）
+    pub tag_types: Vec<String>,
+    /// 本次会写进哪个标签族（已有 primary 就用它，否则按容器推断）
+    pub target_tag_type: String,
+    /// 该容器有没有可写标签位（ADTS .aac 为 false：容器能读但没有标签结构）
+    pub writable: bool,
+    pub supported: Vec<String>,
+    pub unsupported: Vec<String>,
+}
+
+/// 参与矩阵的字段名（camelCase，与 `music_edit_track` 的参数名一一对应）
+const SUPPORT_PROBE_FIELDS: &[(&str, lofty::tag::ItemKey)] = &[
+    ("title", lofty::tag::ItemKey::TrackTitle),
+    ("artist", lofty::tag::ItemKey::TrackArtist),
+    ("album", lofty::tag::ItemKey::AlbumTitle),
+    ("albumArtist", lofty::tag::ItemKey::AlbumArtist),
+    ("year", lofty::tag::ItemKey::RecordingDate),
+    ("trackNumber", lofty::tag::ItemKey::TrackNumber),
+    ("trackTotal", lofty::tag::ItemKey::TrackTotal),
+    ("discNumber", lofty::tag::ItemKey::DiscNumber),
+    ("discTotal", lofty::tag::ItemKey::DiscTotal),
+    ("genre", lofty::tag::ItemKey::Genre),
+    ("composer", lofty::tag::ItemKey::Composer),
+    ("lyricist", lofty::tag::ItemKey::Lyricist),
+    ("comment", lofty::tag::ItemKey::Comment),
+];
+
+/// 给定标签族，算出哪些字段有帧位、哪些没有（纯函数，便于单测交叉验证）
+pub fn field_support_for(
+    target_type: lofty::tag::TagType,
+) -> (Vec<String>, Vec<String>) {
+    let (mut supported, mut unsupported) = (Vec::new(), Vec::new());
+    for (label, key) in SUPPORT_PROBE_FIELDS {
+        if key.map_key(target_type).is_some() {
+            supported.push((*label).to_string());
+        } else {
+            unsupported.push((*label).to_string());
+        }
+    }
+    (supported, unsupported)
+}
+
+pub fn tag_field_support(file_path: &str) -> Result<TagFieldSupport, String> {
+    let resolved = canonical_path_of(file_path);
+    let tagged_file = read_from_path(&resolved).map_err(|e| format!("读取音频失败: {}", e))?;
+    let tag_types: Vec<String> = tagged_file
+        .tags()
+        .iter()
+        .map(|t| tag_type_label(t.tag_type()))
+        .collect();
+    // 已有标签就写回它；没有则按容器推断（此时 lofty 会新建对应族）
+    let file_type = tagged_file.file_type();
+    let target_type = match tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
+        Some(t) => t.tag_type(),
+        None => file_type.primary_tag_type(),
+    };
+    // 读得进来 ≠ 写得回去：如 ID3v2 能从 FLAC 读出但写不回（lofty 标成 ReadOnly）
+    let writable = file_type.tag_support(target_type).is_writable();
+    let (supported, unsupported) = field_support_for(target_type);
+    Ok(TagFieldSupport {
+        tag_types,
+        target_tag_type: tag_type_label(target_type),
+        writable,
+        supported,
+        unsupported,
+    })
 }
 
 // ============ 在线候选打分（批量自动匹配的选优环节） ============
@@ -1684,4 +1764,32 @@ mod tests {
         let many: Vec<CandidateMeta> = (0..30).map(|_| cand("稻香", "周杰伦", "魔杰座")).collect();
         assert_eq!(rank_tag_candidates(local("稻香", "周杰伦", "魔杰座"), many, None).len(), 15);
     }
+
+    #[test]
+    fn 字段支持矩阵与真文件实测一致() {
+        use lofty::tag::TagType;
+        let (sup, unsup) = field_support_for(TagType::Id3v2);
+        assert!(unsup.is_empty(), "ID3v2 应支持全部字段，实际缺: {:?}", unsup);
+        assert_eq!(sup.len(), 13);
+
+        // 与 WAV 副本实测对齐：RIFF INFO 有 ICRD(作曲)，没有专辑艺人/作词/碟号
+        let (sup_r, unsup_r) = field_support_for(TagType::RiffInfo);
+        for k in ["albumArtist", "lyricist", "discNumber"] {
+            assert!(unsup_r.contains(&k.to_string()), "RIFF INFO 不该有 {}", k);
+        }
+        for k in ["title", "artist", "album", "composer", "genre", "year"] {
+            assert!(sup_r.contains(&k.to_string()), "RIFF INFO 应有 {}", k);
+        }
+
+        // MP4 也应放得下专辑艺人（aART），这是中文曲库常用的归并字段
+        let (sup_m, unsup_m) = field_support_for(TagType::Mp4Ilst);
+        assert!(sup_m.contains(&"title".to_string()));
+        assert!(sup_m.contains(&"albumArtist".to_string()), "MP4 该有 aART，实际缺: {:?}", unsup_m);
+
+        // APEv2 反过来：它比想象中完整，13 个字段全有位置。
+        // 原先我在注释里写过「APEv2 无作曲/作词」，那条是猜的、且是错的，已改掉。
+        let (_, unsup_a) = field_support_for(TagType::Ape);
+        assert!(unsup_a.is_empty(), "APEv2 实测应支持全部字段，实际缺: {:?}", unsup_a);
+    }
+
 }

@@ -239,6 +239,15 @@ pub fn music_rollback_tag_edit(
     music_service::rollback_tag_batch(&app, &batch_id)
 }
 
+/// 查询该文件的容器能写哪些标签字段。
+///
+/// 编辑弹窗按这张表置灰字段 —— 判据在 Rust 侧（lofty 的帧映射），
+/// 前端不靠"容器名看起来像不像"猜，否则改了 lofty 版本就悄悄错。
+#[tauri::command]
+pub fn music_tag_field_support(file_path: String) -> Result<music_service::TagFieldSupport, String> {
+    music_service::tag_field_support(&file_path)
+}
+
 /// 给在线候选打分排序（自动匹配的选优环节）。
 ///
 /// 只回吐下标与得分：富字段（封面 URL、平台 id 等）留在前端自己那条对象上，
