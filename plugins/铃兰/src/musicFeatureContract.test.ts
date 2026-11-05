@@ -139,7 +139,10 @@ describe('标签编辑弹窗既有用能力', () => {
     mustContain('index.tsx', ['qqSearchSongs', 'music_rank_tag_candidates']);
     // 全部候选被打分器淘汰时退回原顺序，不能报「没找到」
     const src = read('index.tsx');
-    expect(src).toContain('return sorted.length > 0 ? sorted : out;');
+    expect(src).toContain('sorted.length > 0 ? sorted : out');
+    // 超时护栏与分段日志必须在：这条链此前没有任何超时，一次挂起就是永久转圈
+    expect(src).toContain('withTimeout');
+    expect(src).toContain('[meta-candidates]');
   });
 
   it('宿主侧写回与封面链路仍被调用', () => {

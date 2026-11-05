@@ -2018,9 +2018,22 @@ useEffect(() => {
     const artist = (Array.isArray(track.artist) ? track.artist.join(' ') : (track.artist || '')).trim();
     const kw = [title, artist].filter(Boolean).join(' ');
     if (!kw) return [];
+    // 分段日志：这条链任一段挂住都能从日志指出是哪一段（之前只能猜）。
+    // 走宿主 debug_log 通道，与其它插件日志同源。
+    const logStage = (m: string) => {
+      try { window.__HOST_API__?.invoke('debug_log', { msg: `[meta-candidates] ${m}` }).catch(() => {}); } catch {}
+    };
+    // 超时护栏：任何一步都不许让弹窗无限等 —— QQ 侧本身有「静默限流 → 退避重试」，
+    // 而网易云/酷狗的检索此前没有任何超时，一次挂起就是永久转圈。
+    const withTimeout = (p: Promise<any>, ms: number, label: string): Promise<any> =>
+      Promise.race([
+        p.catch((e: unknown) => { logStage(`${label} 抛错: ${String(e)}`); return null; }),
+        new Promise<null>((resolve) => setTimeout(() => { logStage(`${label} 超时 ${ms}ms`); resolve(null); }, ms)),
+      ]);
+    logStage(`begin kw=${kw}`);
     const out: TrackMetaCandidate[] = [];
     try {
-      const res = await neteaseSearchSongs(kw, 9);
+      const res = await withTimeout(neteaseSearchSongs(kw, 9), 12000, 'netease');
       for (const s of res?.tracks ?? []) {
         out.push({
           key: 'netease-' + s.id,
@@ -2033,9 +2046,10 @@ useEffect(() => {
         });
       }
     } catch (e) { console.warn('[Music] 网易云检索失败:', e); }
+    logStage(`netease done n=${out.length}`);
     if (out.length === 0) {
       try {
-        const kg = await kugouSearchSongs(kw, 9);
+        const kg = await withTimeout(kugouSearchSongs(kw, 9), 12000, 'kugou');
         for (const s of kg ?? []) {
           out.push({
             key: 'kugou-' + (s.hash || s.id || out.length),
@@ -2049,10 +2063,11 @@ useEffect(() => {
         }
       } catch (e) { console.warn('[Music] 酷狗检索失败:', e); }
     }
+    logStage(`kugou done n=${out.length}`);
     // QQ 音乐作第三兜底（探针实测免签名可用；空结果由客户端内部退避重试，不当「没搜到」）
     if (out.length === 0) {
       try {
-        const qq = await qqSearchSongs(kw, 9);
+        const qq = (await withTimeout(qqSearchSongs(kw, 9), 15000, 'qq')) ?? [];
         for (const s of qq) {
           out.push({
             key: 'qq-' + s.mid,
@@ -2066,6 +2081,7 @@ useEffect(() => {
         }
       } catch (e) { console.warn('[Music] QQ 音乐检索失败:', e); }
     }
+    logStage(`qq done n=${out.length}`);
     // 用宿主打分引擎排序（标题/歌手/专辑三维，「同名不同人」会被记 -2 压到队尾）。
     // 弹窗里「分项自动获取」直接取第 0 条，所以排序一生效它就自动受益，不必动编辑器。
     // 注意：打分器会淘汰标题完全不搭的候选；若全部被淘汰则退回原顺序 ——
@@ -2073,20 +2089,24 @@ useEffect(() => {
     if (out.length > 1) {
       try {
         const joinArr = (v: unknown) => (Array.isArray(v) ? v.join(' / ') : String(v ?? ''));
-        const ranked = await hostApi.invoke('music_rank_tag_candidates', {
+        const ranked = await withTimeout(hostApi.invoke('music_rank_tag_candidates', {
           local: {
             title: joinArr(track.title),
             artist: joinArr(track.artist),
             album: joinArr((track as { album?: unknown }).album),
           },
           candidates: out.map((c) => ({ name: c.title, artist: c.artist, album: c.album })),
-        });
+        }), 4000, 'rank');
         if (Array.isArray(ranked) && ranked.length > 0) {
           const sorted = ranked.map((r: { index: number }) => out[r.index]).filter(Boolean);
-          return sorted.length > 0 ? sorted : out;
+          const final = sorted.length > 0 ? sorted : out;
+          logStage(`ranked → n=${final.length}`);
+          return final;
         }
+        logStage('ranked 为空 → 退回原顺序');
       } catch (e) { console.warn('[Music] 候选打分失败，按原顺序返回:', e); }
     }
+    logStage(`end n=${out.length}`);
     return out;
   }, []);
 
