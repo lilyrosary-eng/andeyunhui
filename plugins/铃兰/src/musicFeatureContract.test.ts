@@ -112,6 +112,37 @@ describe('歌词编辑器（与标签编辑同居 TrackList.tsx，最易被误�
   });
 });
 
+describe('编辑弹窗字段面（13 项）与提交语义', () => {
+  it('三组分组标题与 9 个新字段都在', () => {
+    mustContain('TrackList.tsx', [
+      'groupBasic', 'groupRelease', 'groupCredit',
+      'editAlbumArtist', 'editYear', 'editTrackTotal', 'editDiscNo', 'editDiscTotal',
+      'editGenre', 'editComposer', 'editLyricist', 'editComment',
+    ]);
+  });
+
+  it('只下发**改动过**的字段 —— 全量下发会把用户没填的格子清掉', () => {
+    const src = read('TrackList.tsx');
+    const fn = src.slice(src.indexOf('const submitEdit'), src.indexOf('// ===== 自动获取元信息'));
+    expect(fn.length, '切片没截到 submitEdit，断言会假绿').toBeGreaterThan(20);
+    expect(fn).toContain('editDraft[k] !== editOrig[k]');
+    expect(fn).not.toContain("title: editDraft.title.trim() || undefined");
+  });
+
+  it('置灰依据来自后端矩阵，不是前端猜扩展名', () => {
+    const src = read('TrackList.tsx');
+    expect(src).toContain('fieldSupport.unsupported.includes(key)');
+    expect(src).toContain('onFetchFieldSupport');
+    // 查不到矩阵时一律当作可写（宁可让人试一次看到后端跳过，也不灰错格子）
+    expect(src).toContain('if (!fieldSupport) return false;');
+  });
+
+  it('写回后给出「撤销这次」入口，并显示被格式丢掉的字段', () => {
+    mustContain('TrackList.tsx', ['onRollbackBatch', 'rollbackThis', 'lastSave', 'droppedHint']);
+    mustContain('index.tsx', ['music_rollback_tag_edit', 'music_tag_field_support', 'buildEditArgs']);
+  });
+});
+
 describe('候选点击不得直接写盘（用户实测反馈的毛病）', () => {
   it('选候选只暂存封面 URL，不立刻下载内嵌', () => {
     const src = read('TrackList.tsx');
@@ -217,6 +248,9 @@ describe('插件权限声明不能被顺手删', () => {
       'get_lyrics_text',
       'save_track_lyrics',
       'translate_text',
+      'music_tag_field_support',
+      'music_rollback_tag_edit',
+      'music_rank_tag_candidates',
     ]) {
       expect(m, `manifest 缺少命令声明：${cmd}`).toContain(`"${cmd}"`);
     }

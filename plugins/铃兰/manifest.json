@@ -55,6 +55,7 @@
       "music_set_cover_url",
       "music_set_favorite",
       "music_set_mv_path",
+      "music_tag_field_support",
       "netease_http_post",
       "netease_register_guest",
       "qq_http_post",

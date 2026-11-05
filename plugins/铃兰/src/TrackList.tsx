@@ -20,6 +20,70 @@ interface Track {
   durationSecs: number;
   coverPath?: string;
   mvPath?: string;
+  // 以下来自后端 Track（music_service.rs），旧扫描缓存里没有这些键时是 undefined
+  albumArtist?: string | null;
+  composer?: string | null;
+  lyricist?: string | null;
+  genre?: string | null;
+  comment?: string | null;
+  year?: string | null;
+  trackNumber?: number | null;
+  trackTotal?: number | null;
+  discNumber?: number | null;
+  discTotal?: number | null;
+  /** 文件里已有的标签族；空数组 = lofty 认不出该容器（如 .wma） */
+  tagTypes?: string[];
+  hasPicture?: boolean;
+  properties?: {
+    sampleRate?: number | null;
+    bitDepth?: number | null;
+    channels?: number | null;
+    audioBitrate?: number | null;
+    overallBitrate?: number | null;
+  } | null;
+}
+
+/** 编辑弹窗的草稿：数字项一律用字符串存，便于输入框留空与逐位过滤 */
+/** 编辑弹窗草稿（导出给 index.tsx 做参数映射，避免两处各写一份字段名） */
+export interface EditDraft {
+  title: string;
+  artist: string;
+  album: string;
+  albumArtist: string;
+  trackNumber: string;
+  trackTotal: string;
+  discNumber: string;
+  discTotal: string;
+  year: string;
+  genre: string;
+  composer: string;
+  lyricist: string;
+  comment: string;
+}
+
+/** 草稿字段 → 后端 music_edit_track 的参数名（一处定义，避免两边漏项） */
+const DRAFT_KEYS = [
+  'title', 'artist', 'album', 'albumArtist', 'trackNumber', 'trackTotal',
+  'discNumber', 'discTotal', 'year', 'genre', 'composer', 'lyricist', 'comment',
+] as const;
+type DraftKey = (typeof DRAFT_KEYS)[number];
+
+/** 数字 → 输入框字符串；0 与缺失都算「没填」 */
+function numToText(v: number | null | undefined): string {
+  return v === null || v === undefined || v === 0 ? '' : String(v);
+}
+
+/** 一次写回的回报（后端 music_service::EditOutcome）：batchId 用来撤销 */
+interface EditOutcome {
+  batchId: string;
+  dropped: string[];
+}
+
+/** 后端字段支持矩阵（哪些格子该灰） */
+interface FieldSupport {
+  unsupported: string[];
+  writable: boolean;
+  targetTagType: string;
 }
 
 interface OtherPlaylist {
@@ -51,7 +115,6 @@ interface TrackListProps {
   favoriteIds?: Set<string>;
   onToggleFavorite?: (track: Track) => void;
   onRescanTrack?: (track: Track) => void;
-  onEditTrack?: (track: Track, fields: { title?: string; artist?: string; album?: string; trackNumber?: number }) => void | Promise<void>;
   // 下载单曲
   onDownloadTrack?: (track: Track) => void;
   // 插入 MV：传入后右键菜单出现「插入 MV」项（用于本地歌曲）。
@@ -62,6 +125,11 @@ interface TrackListProps {
   saveTrackLyrics?: (track: Track, lyrics: string, saveToLrc: boolean) => Promise<void>;
   // 自动获取元信息：检索候选 / 本地图片内嵌写封面 / 远程封面 URL 写内嵌 / 重置封面
   onFetchMetaCandidates?: (track: Track) => Promise<TrackMetaCandidate[]>;
+  // 查询该容器能写哪些标签字段（后端 music_tag_field_support，判据是 lofty 的帧映射）
+  onFetchFieldSupport?: (track: Track) => Promise<FieldSupport | null>;
+  // 写回后拿到的批次回报（含撤销用的 batchId）；以及「撤销这次」走的命令
+  onEditTrack?: (track: Track, fields: Partial<EditDraft>) => void | Promise<EditOutcome | null>;
+  onRollbackBatch?: (batchId: string) => Promise<void>;
   onPickAndEmbedCover?: (track: Track) => Promise<string | null>;
   onApplyCoverUrl?: (track: Track, coverUrl: string) => Promise<string | null>;
   onResetCoverEmbed?: (track: Track) => Promise<void>;
@@ -80,6 +148,47 @@ export interface LyricCandidate {
   neteaseId?: number;
   kugouHash?: string;
   kugouKeyword?: string;
+}
+
+const fieldLabelCls = "block text-xs text-neutral-500 dark:text-stone-400 mb-1.5";
+const fieldInputCls =
+  "w-full px-3 py-2 text-sm rounded-lg border border-neutral-200 dark:border-stone-600 bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-[var(--element-muted)] disabled:opacity-60 disabled:cursor-not-allowed";
+
+/** 编辑弹窗的一行普通字段（无「自动」按钮的那批用它，样式与已有四行保持一致） */
+function DraftField(props: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+  disabledHint?: string;
+  numeric?: boolean;
+}) {
+  return (
+    <div>
+      <label className={fieldLabelCls}>{props.label}</label>
+      <input
+        type="text"
+        {...(props.numeric ? { inputMode: "numeric" as const } : {})}
+        value={props.value}
+        disabled={props.disabled}
+        title={props.disabled ? props.disabledHint : undefined}
+        onChange={(e) =>
+          props.onChange(props.numeric ? e.target.value.replace(/[^0-9]/g, "") : e.target.value)
+        }
+        className={fieldInputCls}
+        placeholder={props.label}
+      />
+    </div>
+  );
+}
+
+/** 分组小标题（基本信息 / 发行与编号 / 署名与备注） */
+function GroupTitle({ text }: { text: string }) {
+  return (
+    <div className="pt-1 text-[11px] font-medium tracking-wide text-neutral-400 dark:text-stone-500">
+      {text}
+    </div>
+  );
 }
 
 // 候选源中文本地化：netease -> 网易云，kugou -> 酷狗，qq -> QQ音乐
@@ -111,6 +220,8 @@ export function TrackList({
   loadLyricsText,
   saveTrackLyrics,
   onFetchMetaCandidates,
+  onFetchFieldSupport,
+  onRollbackBatch,
   onPickAndEmbedCover,
   onApplyCoverUrl,
   onResetCoverEmbed,
@@ -138,9 +249,19 @@ export function TrackList({
 
   // 自定义「编辑曲目信息」弹窗状态
   const [editingTrack, setEditingTrack] = useState<Track | null>(null);
-  const [editDraft, setEditDraft] = useState<{ title: string; artist: string; album: string; trackNumber: string }>({
-    title: '', artist: '', album: '', trackNumber: '',
-  });
+  const EMPTY_DRAFT: EditDraft = {
+    title: '', artist: '', album: '', albumArtist: '', trackNumber: '', trackTotal: '',
+    discNumber: '', discTotal: '', year: '', genre: '', composer: '', lyricist: '', comment: '',
+  };
+  const [editDraft, setEditDraft] = useState<EditDraft>(EMPTY_DRAFT);
+  // 打开弹窗时的原值快照：提交时只下发**改动过**的项。
+  // 不做成"全量下发"是因为空串在后端语义是「清除该字段」，
+  // 全量下发会让用户没填的格子被顺手清掉。
+  const [editOrig, setEditOrig] = useState<EditDraft>(EMPTY_DRAFT);
+  // 该容器能写哪些字段（后端查 lofty 的帧映射，前端不猜扩展名）
+  const [fieldSupport, setFieldSupport] = useState<FieldSupport | null>(null);
+  // 最近一次写回的批次：给出「撤销这次」，并如实显示被格式丢掉的字段
+  const [lastSave, setLastSave] = useState<EditOutcome | null>(null);
   // 从候选选中的封面：**只暂存 URL**，点「确定」随标签一起写。
   // 此前点候选就立刻下载并内嵌封面，等于"选一下就算改盘"，反悔也退不回去。
   const [pendingCoverUrl, setPendingCoverUrl] = useState<string | null>(null);
@@ -340,29 +461,59 @@ export function TrackList({
     setDraftCoverPath(null);
     setPendingCoverUrl(null);
     setCandidates(null);
-    setEditDraft({
+    const draft: EditDraft = {
       title: t.title || '',
       artist: t.artist || '',
       album: t.album || '',
-      trackNumber: '',
-    });
+      albumArtist: t.albumArtist || '',
+      trackNumber: numToText(t.trackNumber),
+      trackTotal: numToText(t.trackTotal),
+      discNumber: numToText(t.discNumber),
+      discTotal: numToText(t.discTotal),
+      year: t.year || '',
+      genre: t.genre || '',
+      composer: t.composer || '',
+      lyricist: t.lyricist || '',
+      comment: t.comment || '',
+    };
+    setEditDraft(draft);
+    setEditOrig(draft);
+    setFieldSupport(null);
+    // 失败就当作「全部可写」：宁可让人多试一次并看到后端的跳过提示，
+    // 也不要因为查不到支持矩阵就把字段灰掉
+    if (onFetchFieldSupport) {
+      onFetchFieldSupport(t)
+        .then((r) => { if (r) setFieldSupport(r); })
+        .catch((e) => console.warn('[Music] 字段支持查询失败:', e));
+    }
   };
+
+  // 该字段在这个容器里没有帧位 → 置灰并说明原因。查不到支持矩阵时一律当作可写，
+  // 宁可让人试一次后看到后端的「已跳过」提示，也不要把好格子灰错。
+  const fieldOff = (key: DraftKey): boolean => {
+    if (!fieldSupport) return false;
+    if (!fieldSupport.writable) return true;
+    return fieldSupport.unsupported.includes(key);
+  };
+  const offHint = (key: DraftKey): string =>
+    fieldSupport && !fieldSupport.writable
+      ? T('music.track.fieldFormatUnwritable') || '此格式不支持标签读写，写回会整块失败'
+      : `${T('music.track.fieldUnsupported') || '该格式没有这个字段的位置'}：${key} @ ${fieldSupport?.targetTagType || '?'}`;
 
   const submitEdit = async () => {
     if (!editingTrack) return;
     const target = editingTrack;
-    const tn = editDraft.trackNumber.trim() ? Number(editDraft.trackNumber) : NaN;
     const cover = pendingCoverUrl;
+    const changed: Partial<EditDraft> = {};
+    for (const k of DRAFT_KEYS) {
+      if (editDraft[k] !== editOrig[k]) changed[k] = editDraft[k];
+    }
     setEditingTrack(null);
     // ★ 必须串行：文本标签写回与封面内嵌都是「整文件读→改→写」，
     //   并发跑就是后完成的那个把先完成的覆盖掉（表现为"标签没写进去"）。
     try {
-      await onEditTrack?.(target, {
-        title: editDraft.title.trim() || undefined,
-        artist: editDraft.artist.trim() || undefined,
-        album: editDraft.album.trim() || undefined,
-        trackNumber: Number.isNaN(tn) ? undefined : tn,
-      });
+      const outcome = await onEditTrack?.(target, changed);
+      if (outcome && outcome.batchId) setLastSave(outcome);
       if (cover && onApplyCoverUrl) await onApplyCoverUrl(target, cover);
     } catch (e) {
       console.warn('[Music] 标签/封面写回失败:', e);
@@ -730,6 +881,36 @@ export function TrackList({
         </div>
       </div>
 
+      {lastSave && (
+        <div className="mx-3 mt-2 flex items-center gap-2 px-3 py-1.5 text-xs rounded-lg bg-neutral-50 dark:bg-stone-800 border border-neutral-200 dark:border-stone-700">
+          <span className="text-neutral-600 dark:text-stone-300">
+            {T('music.track.savedHint') || '已写回原文件'}
+            {lastSave.dropped.length > 0
+              ? ` · ${T('music.track.droppedHint') || '该格式没有位置、已跳过'}：${lastSave.dropped.join('、')}`
+              : ''}
+          </span>
+          {onRollbackBatch && (
+            <button
+              onClick={() => {
+                onRollbackBatch(lastSave.batchId)
+                  .then(() => setLastSave(null))
+                  .catch((e) => console.warn('[Music] 撤销失败:', e));
+              }}
+              className="ml-auto px-2 py-0.5 rounded text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors"
+            >
+              {T('music.track.rollbackThis') || '撤销这次'}
+            </button>
+          )}
+          <button
+            onClick={() => setLastSave(null)}
+            className="px-1.5 text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300"
+            aria-label={T('common.close') || '关闭'}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {/* 选择模式工具条：全选 + 批量操作按钮，常态（非选择模式）下整条隐藏 */}
       {selectionMode && (
         <div className="flex items-center gap-2 px-4 py-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0 bg-[var(--element-muted)]/50">
@@ -1028,6 +1209,7 @@ export function TrackList({
               </div>
             </div>
             <div className="space-y-4">
+              <GroupTitle text={T('music.track.groupBasic') || '基本信息'} />
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="text-xs text-neutral-500 dark:text-stone-400">{T('music.track.editTitle')}</label>
@@ -1091,6 +1273,21 @@ export function TrackList({
                   placeholder={T('music.track.editAlbum')}
                 />
               </div>
+              <DraftField
+                label={T('music.track.editAlbumArtist') || '专辑艺人'}
+                value={editDraft.albumArtist}
+                disabled={fieldOff('albumArtist')}
+                disabledHint={offHint('albumArtist')}
+                onChange={(v) => setEditDraft((d) => ({ ...d, albumArtist: v }))}
+              />
+              <GroupTitle text={T('music.track.groupRelease') || '发行与编号'} />
+              <DraftField
+                label={T('music.track.editYear') || '年份'}
+                value={editDraft.year}
+                disabled={fieldOff('year')}
+                disabledHint={offHint('year')}
+                onChange={(v) => setEditDraft((d) => ({ ...d, year: v }))}
+              />
               <div>
                 <label className="block text-xs text-neutral-500 dark:text-stone-400 mb-1.5">{T('music.track.editTrackNo')}</label>
                 <input
@@ -1102,6 +1299,63 @@ export function TrackList({
                   placeholder={T('music.track.editTrackNo')}
                 />
               </div>
+              <DraftField
+                label={T('music.track.editTrackTotal') || '音轨总数'}
+                value={editDraft.trackTotal}
+                numeric
+                disabled={fieldOff('trackTotal')}
+                disabledHint={offHint('trackTotal')}
+                onChange={(v) => setEditDraft((d) => ({ ...d, trackTotal: v }))}
+              />
+              <div className="grid grid-cols-2 gap-3">
+                <DraftField
+                  label={T('music.track.editDiscNo') || '碟号'}
+                  value={editDraft.discNumber}
+                  numeric
+                  disabled={fieldOff('discNumber')}
+                  disabledHint={offHint('discNumber')}
+                  onChange={(v) => setEditDraft((d) => ({ ...d, discNumber: v }))}
+                />
+                <DraftField
+                  label={T('music.track.editDiscTotal') || '碟总数'}
+                  value={editDraft.discTotal}
+                  numeric
+                  disabled={fieldOff('discTotal')}
+                  disabledHint={offHint('discTotal')}
+                  onChange={(v) => setEditDraft((d) => ({ ...d, discTotal: v }))}
+                />
+              </div>
+              <DraftField
+                label={T('music.track.editGenre') || '流派'}
+                value={editDraft.genre}
+                disabled={fieldOff('genre')}
+                disabledHint={offHint('genre')}
+                onChange={(v) => setEditDraft((d) => ({ ...d, genre: v }))}
+              />
+              <GroupTitle text={T('music.track.groupCredit') || '署名与备注'} />
+              <div className="grid grid-cols-2 gap-3">
+                <DraftField
+                  label={T('music.track.editComposer') || '作曲'}
+                  value={editDraft.composer}
+                  disabled={fieldOff('composer')}
+                  disabledHint={offHint('composer')}
+                  onChange={(v) => setEditDraft((d) => ({ ...d, composer: v }))}
+                />
+                <DraftField
+                  label={T('music.track.editLyricist') || '作词'}
+                  value={editDraft.lyricist}
+                  disabled={fieldOff('lyricist')}
+                  disabledHint={offHint('lyricist')}
+                  onChange={(v) => setEditDraft((d) => ({ ...d, lyricist: v }))}
+                />
+              </div>
+              <DraftField
+                label={T('music.track.editComment') || '注释'}
+                value={editDraft.comment}
+                disabled={fieldOff('comment')}
+                disabledHint={offHint('comment')}
+                onChange={(v) => setEditDraft((d) => ({ ...d, comment: v }))}
+              />
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="text-xs text-neutral-500 dark:text-stone-400">{T('music.track.editLyrics')}</label>

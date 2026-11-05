@@ -28,6 +28,8 @@ import { isLikedPlaylist, likeNeteaseSong, downloadNeteaseTrack, searchSongs as 
 import { searchSongs as kugouSearchSongs, getLyric as kugouGetLyric, getFavorites, addKugouFavorite, removeKugouFavorite, type KugouAuth } from './kugouApi';
 import { qqSearchSongs } from './qqMusicApi';
 import { fetchExistingTranslation } from './lyricPlatformTranslation';
+import { buildEditArgs, type EditOutcome } from './tagEditArgs';
+import type { EditDraft } from './TrackList';
 import { readKugouAuth } from './kugouAuth';
 import type { LyricLine } from './lyricsSync';
 import type { TrackMetaCandidate, LyricCandidate } from './TrackList';
@@ -326,18 +328,14 @@ async function resumeLastPosition(selected: Playlist | null) {
 // 编辑曲目标签信息并写回文件
 async function editTrackTags(
   track: Track,
-  fields: { title?: string; artist?: string; album?: string; trackNumber?: number },
-): Promise<void> {
+  fields: Partial<EditDraft>,
+): Promise<EditOutcome | null> {
   const fp = track.filePath || track.id;
-  if (!fp) return;
+  if (!fp) return null;
   try {
-    await hostApi.invoke('music_edit_track', {
-      filePath: fp,
-      title: fields.title ?? null,
-      artist: fields.artist ?? null,
-      album: fields.album ?? null,
-      trackNumber: fields.trackNumber ?? null,
-    });
+    // 参数名/类型映射集中在 tagEditArgs.buildEditArgs（有单测），
+    // 因为 Tauri 只认 camelCase，且数字项与文本项的「空值」语义不同
+    return (await hostApi.invoke('music_edit_track', buildEditArgs(fp, fields))) as EditOutcome;
   } catch (e) {
     console.warn('[Music] 标签写回失败:', fp, e);
     throw e;
@@ -2285,8 +2283,9 @@ useEffect(() => {
   }, []);
 
   // 编辑曲目标签信息并写回文件 + 更新内存
-  const handleEditTrack = useCallback(async (track: Track, fields: { title?: string; artist?: string; album?: string; trackNumber?: number }) => {
-    await editTrackTags(track, fields);
+  const handleEditTrack = useCallback(async (track: Track, fields: Partial<EditDraft>): Promise<EditOutcome | null> => {
+    // editTrackTags 内部吞掉了异常（写失败只 warn），这里统一成 null 表示「没有可撤销的批次」
+    const outcome = (await editTrackTags(track, fields)) ?? null;
     const fp = track.filePath || track.id;
     const updateTracks = (tracks: Track[]) => tracks.map(t => {
       const tFp = t.filePath || t.id;
@@ -2303,6 +2302,34 @@ useEffect(() => {
     );
     // 同步当前选中歌单（UI 直接渲染 selectedPlaylist.tracks）
     setSelectedPlaylist(prev => (prev ? { ...prev, tracks: updateTracks(prev.tracks) } : prev));
+    return outcome;
+  }, []);
+
+  // 查该容器能写哪些字段（后端查 lofty 帧映射）；失败返回 null，前端按「全部可写」处理
+  const handleFetchFieldSupport = useCallback(async (track: Track) => {
+    const fp = track.filePath || track.id;
+    if (!fp) return null;
+    try {
+      // invoke 的返回是 unknown 形状，这里显式声明后端 TagFieldSupport 的三个用到的键
+      const r = (await hostApi.invoke('music_tag_field_support', { filePath: fp })) as
+        | { unsupported?: string[]; writable?: boolean; targetTagType?: string }
+        | null;
+      return r
+        ? {
+            unsupported: r.unsupported ?? [],
+            writable: r.writable ?? true,
+            targetTagType: r.targetTagType ?? '',
+          }
+        : null;
+    } catch (e) {
+      console.warn('[Music] 字段支持查询失败:', fp, e);
+      return null;
+    }
+  }, []);
+
+  // 撤销一次写回（含该批改过的封面）
+  const handleRollbackBatch = useCallback(async (batchId: string) => {
+    await hostApi.invoke('music_rollback_tag_edit', { batchId });
   }, []);
 
   // #4 添加歌曲：选择音频文件后真正加入当前歌单（自定义歌单持久化，目录歌单仅内存）
@@ -3010,6 +3037,8 @@ useEffect(() => {
               saveTrackLyrics={saveTrackLyrics}
               onFetchLyricCandidates={handleFetchLyricCandidates}
               onFetchExistingTranslation={handleFetchExistingTranslation}
+              onFetchFieldSupport={handleFetchFieldSupport}
+              onRollbackBatch={handleRollbackBatch}
               onFetchLyric={handleFetchLyric}
             />
           ) : (
