@@ -29,6 +29,11 @@ static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 static BOARD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static CANCELLED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
+/// 任务树最大层数（根任务算第 1 层）。模型无限拆子任务会把看板和预算拖垮。
+pub const MAX_TASK_DEPTH: usize = 4;
+/// 单房间同时未结束（queued / running / waiting）的任务上限。
+pub const MAX_ACTIVE_TASKS: usize = 64;
+
 fn board_lock() -> &'static Mutex<()> {
     BOARD_LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -108,6 +113,28 @@ pub fn emit_event(
     Ok(event)
 }
 
+/// 沿 parentId 向上数层数（父任务自身算 1 层），顺便挡住父子成环。
+fn parent_depth(existing: &[Assignment], parent_id: &str) -> Result<usize, String> {
+    let mut cursor = Some(parent_id.to_string());
+    let mut depth = 0usize;
+    let mut seen = HashSet::new();
+    while let Some(id) = cursor {
+        if !seen.insert(id.clone()) {
+            return Err("任务父子关系存在环".to_string());
+        }
+        let Some(task) = existing.iter().find(|task| task.id == id) else {
+            return Err(format!("父任务不存在: {id}"));
+        };
+        depth += 1;
+        // 已经超过上限就没必要继续走，调用方会判定新任务超限。
+        if depth >= MAX_TASK_DEPTH {
+            return Ok(depth);
+        }
+        cursor = task.parent_id.clone();
+    }
+    Ok(depth)
+}
+
 fn upsert_assignment(base: &Path, assignment: &Assignment) -> Result<(), String> {
     let _guard = board_lock().lock().map_err(|_| "任务表锁已损坏".to_string())?;
     // 进程内互斥挡不住 MCP 进程，读-改-写必须在跨进程写锁里做，否则会丢任务更新。
@@ -136,6 +163,34 @@ pub fn create_assignment_core(
     assignee_id: &str,
     brief: &str,
 ) -> Result<CreatedAssignment, String> {
+    // 预算型保护放在 core 里：UI 派单与 MCP 建任务走同一入口，规则不会漂移。
+    let existing = store::read_assignments(base)
+        .remove(&room.id)
+        .unwrap_or_default();
+    let active = existing
+        .iter()
+        .filter(|task| {
+            matches!(
+                task.status,
+                AssignmentStatus::Queued
+                    | AssignmentStatus::Running
+                    | AssignmentStatus::Waiting
+            )
+        })
+        .count();
+    if active >= MAX_ACTIVE_TASKS {
+        return Err(format!(
+            "房间活跃任务已达上限（{MAX_ACTIVE_TASKS}），请先完成或取消部分任务"
+        ));
+    }
+    let depth = match parent_id.as_deref() {
+        Some(parent) => parent_depth(&existing, parent)? + 1,
+        None => 1,
+    };
+    if depth > MAX_TASK_DEPTH {
+        return Err(format!("任务层级过深（最多 {MAX_TASK_DEPTH} 层）"));
+    }
+
     let now = now_ms();
     let assignment = Assignment {
         id: new_id("task"),
@@ -1384,5 +1439,45 @@ mod tests {
             .iter()
             .any(|event| event.text.as_deref().unwrap_or("").contains("已删除任务")));
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// P3 预算保护：层数上限、活跃任务上限、父任务不存在都要在建任务时就拒绝。
+    #[test]
+    fn task_depth_and_active_limits_are_enforced() {
+        let base = temp_base("limits");
+        let room = test_room("room_limits");
+
+        let mut parent: Option<String> = None;
+        for level in 1..=MAX_TASK_DEPTH {
+            let created = create_assignment_core(
+                &base,
+                &room,
+                parent.clone(),
+                "worker",
+                &format!("第{level}层"),
+            )
+            .unwrap();
+            parent = Some(created.assignment.id);
+        }
+        assert!(create_assignment_core(&base, &room, parent, "worker", "第5层").is_err());
+        assert!(create_assignment_core(
+            &base,
+            &room,
+            Some("task_missing".to_string()),
+            "worker",
+            "父任务不存在"
+        )
+        .is_err());
+
+        // 换一个房间测活跃上限，避免被上面的层级任务占额度。
+        let base2 = temp_base("limits-active");
+        let room2 = test_room("room_limits_active");
+        for _ in 0..MAX_ACTIVE_TASKS {
+            create_assignment_core(&base2, &room2, None, "worker", "批量任务").unwrap();
+        }
+        assert!(create_assignment_core(&base2, &room2, None, "worker", "超出上限").is_err());
+
+        let _ = std::fs::remove_dir_all(base);
+        let _ = std::fs::remove_dir_all(base2);
     }
 }

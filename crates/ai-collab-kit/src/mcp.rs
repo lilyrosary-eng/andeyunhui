@@ -206,7 +206,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "collab_create_task",
-            "description": "在房间里建任务（入队，不自动执行）。外部 harness 后续用 collab_claim_task 认领，再 collab_complete_task 交结果。",
+            "description": "在房间里建任务（入队，不自动执行）。外部 harness 后续用 collab_claim_task 认领，再 collab_complete_task 交结果。限制：任务树最多 4 层，房间未结束任务最多 64 个。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
