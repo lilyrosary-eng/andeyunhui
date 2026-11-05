@@ -1051,10 +1051,22 @@ pub fn batch_edit_tracks(
 ///
 /// 全部成功才删历史 —— 撤销是一次性的，留着成功部分的历史会让第二次点击
 /// 变成"把已经改回去的文件再改回旧快照"（那是重放，不是撤销）。
+///
+/// **只允许退最近一批**。每一行存的都是「那次写入之前」的状态，退更早的一批会把
+/// 之后其它写入的成果一起盖掉；而一旦把历史列成面板给人点，这种点法几乎一定会发生。
+/// 所以判据放在这里（后端），不是放在按钮的显示条件上（前端能绕）。
 pub fn rollback_tag_batch(app: &tauri::AppHandle, batch_id: &str) -> Result<RollbackReport, String> {
     let rows = crate::services::music_db::music_tag_history_rows(app, batch_id)?;
     if rows.is_empty() {
         return Err("这一批没有可撤销的写回记录".to_string());
+    }
+    if let Some(newest) = crate::services::music_db::music_tag_batches(app, 1)?.first() {
+        if newest.batch_id != batch_id {
+            return Err(format!(
+                "只能撤销最近一次写回（{}）；这批之后又写过别的内容，退它会把之后的改动一起盖掉",
+                newest.batch_id
+            ));
+        }
     }
     let mut report = RollbackReport { files: 0, covers_restored: 0, failed: Vec::new() };
     for row in rows {

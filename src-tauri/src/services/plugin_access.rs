@@ -552,6 +552,7 @@ mod tests {
         assert_eq!(capability_for("music_batch_edit_tracks"), Some("data"));
         assert_eq!(capability_for("music_rollback_tag_edit"), Some("data"));
         assert_eq!(capability_for("music_rank_tag_candidates"), Some("data"));
+        assert_eq!(capability_for("music_list_tag_batches"), Some("data"));
         assert_eq!(capability_for("read_file_base64"), Some("fs.read"));
         assert_eq!(capability_for("write_file_bytes"), Some("fs.write"));
         assert_eq!(capability_for("gongfang_scan"), Some("attack"));

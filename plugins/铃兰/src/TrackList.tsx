@@ -11,6 +11,7 @@ import { T, useLang } from '../../_shared/pluginRuntime';
 import { translateLyrics } from './lyricTranslate';
 import { BATCH_WRITABLE_FIELDS, type BatchPlan, type BatchAutoTagReport } from './batchAutoTag';
 import { coverBackupLabel } from './coverBackup';
+import { baseName, formatMillis } from './tagHistoryView';
 
 /** 字段中文展示名（批量确认面板与「分项自动获取」的来源提示共用） */
 const FIELD_LABEL_CN: Record<string, string> = { title: '标题', artist: '歌手', album: '专辑' };
@@ -110,6 +111,16 @@ export interface TrackMetaCandidate {
   score?: number;
 }
 
+/** 后端 music_db::TagBatchRow（写回记录面板用） */
+export interface TagBatch {
+  batchId: string;
+  files: number;
+  covers: number;
+  createdAt: number;
+  sample: string[];
+  latest: boolean;
+}
+
 interface TrackListProps {
   tracks: Track[];
   playlistName: string;
@@ -147,6 +158,9 @@ interface TrackListProps {
   // 封面留底：换封面时后端会把旧封面滚动留 3 份，这里负责「列出来 + 装回去」
   onListCoverBackups?: (track: Track) => Promise<string[]>;
   onRestoreCover?: (track: Track, backupPath: string) => Promise<string | null>;
+  // 写回记录：列出历史批次（后端 tag_edit_history 汇总）。只有最近一批能撤销，
+  // 更早那批存的是它自己动手之前的状态，退它会把之后的写入一起盖掉
+  onListTagBatches?: () => Promise<TagBatch[]>;
   // 自动获取歌词：检索歌词候选 / 按候选抓取纯歌词文本
   onFetchLyricCandidates?: (track: Track) => Promise<LyricCandidate[]>;  // 「取现成译文」：拿平台已有的官方/人工译文（网易云 tlyric、酷狗 trans）
   onFetchExistingTranslation?: (track: Track) => Promise<{ text: string; label: string; hit: number; total: number } | null>;
@@ -245,6 +259,7 @@ export function TrackList({
   onResetCoverEmbed,
   onListCoverBackups,
   onRestoreCover,
+  onListTagBatches,
   onFetchLyricCandidates,
   onFetchExistingTranslation,
   onFetchLyric,
@@ -613,6 +628,10 @@ export function TrackList({
   const [coverBackupBusy, setCoverBackupBusy] = useState(false);
   const [coverBackupNote, setCoverBackupNote] = useState<string | null>(null);
   useEffect(() => { setCoverBackups(null); setCoverBackupNote(null); }, [editingTrack]);
+  // 写回记录面板（表头那颗按钮开合，点开才查）
+  const [tagHistory, setTagHistory] = useState<TagBatch[] | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyNote, setHistoryNote] = useState<string | null>(null);
   // 一键自动获取：拉候选列表
   const fetchCandidates = async () => {
     if (!editingTrack || !onFetchMetaCandidates || candidateLoading) return;
@@ -710,6 +729,39 @@ export function TrackList({
     if (!editingTrack || !onResetCoverEmbed) return;
     await onResetCoverEmbed(editingTrack);
     setDraftCoverPath(null);
+  };
+
+  // 写回记录：开合面板（每次展开都重新查，撤销完历史就变，不能留着旧快照）
+  const toggleTagHistory = async () => {
+    if (!onListTagBatches) return;
+    if (tagHistory) { setTagHistory(null); setHistoryNote(null); return; }
+    setHistoryBusy(true);
+    try {
+      setTagHistory(await onListTagBatches());
+      setHistoryNote(null);
+    } catch (e) {
+      setTagHistory(null);
+      setHistoryNote(String((e as Error)?.message ?? e));
+    } finally {
+      setHistoryBusy(false);
+    }
+  };
+
+  // 撤销列出的那一批 —— 面板只给最近一批出这颗按钮，后端还会再拦一次
+  const rollbackHistoryBatch = async (batchId: string) => {
+    if (!onRollbackBatch || historyBusy) return;
+    if (!confirm(T('music.track.tagHistoryConfirm') || '把这一批写过的文件全部退回写入之前的状态（含封面）。这一步不能再做一次撤销。')) return;
+    setHistoryBusy(true);
+    try {
+      await onRollbackBatch(batchId);
+      setTagHistory(onListTagBatches ? await onListTagBatches() : null);
+      setHistoryNote(T('music.track.tagHistoryDone') || '已退回这批写入之前的状态');
+    } catch (e) {
+      // 后端拒绝（比如它判断这不是最近一批）时把原话给用户看，不改写、不吞掉
+      setHistoryNote(String((e as Error)?.message ?? e));
+    } finally {
+      setHistoryBusy(false);
+    }
   };
 
   // 打开歌词编辑器：从后端加载原始歌词文本
@@ -1020,8 +1072,81 @@ export function TrackList({
           >
             <CheckIcon />
           </button>
+          {onListTagBatches && (
+            <button
+              onClick={toggleTagHistory}
+              disabled={historyBusy}
+              title={T('music.track.tagHistoryEntryHint') || '看这个模块往文件里写过的标签，最近一次可整体退回'}
+              className={`btn-press text-xs px-2 py-1 rounded-lg transition-colors disabled:opacity-50 ${
+                tagHistory
+                  ? 'text-[var(--element-bg)] bg-[var(--element-muted)]'
+                  : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200'
+              }`}
+            >
+              {historyBusy ? (T('music.track.tagHistoryLoading') || '读取中…') : (T('music.track.tagHistoryEntry') || '写回记录')}
+            </button>
+          )}
         </div>
       </div>
+
+      {/* 写回记录面板：只列，不自动改任何东西 */}
+      {tagHistory && (
+        <div className="mx-3 mt-2 px-3 py-2 text-xs rounded-lg bg-neutral-50 dark:bg-stone-800 border border-neutral-200 dark:border-stone-700">
+          <div className="flex items-start justify-between gap-2">
+            <span className="text-neutral-500 dark:text-stone-400">
+              {T('music.track.tagHistoryTitle') || '标签写回记录 —— 只有最近一次能退回，再往前退会把之后的改动一起盖掉'}
+            </span>
+            <button
+              onClick={() => { setTagHistory(null); setHistoryNote(null); }}
+              className="btn-press text-neutral-400 dark:text-stone-500 hover:text-neutral-700 px-1"
+              aria-label={T('common.close') || '关闭'}
+            >
+              ×
+            </button>
+          </div>
+          {tagHistory.length === 0 && (
+            <div className="mt-1.5 text-neutral-400 dark:text-stone-500">
+              {T('music.track.tagHistoryEmpty') || '还没有写回记录（编辑标签或批量写入后才会产生）'}
+            </div>
+          )}
+          <ul className="mt-1.5 max-h-44 overflow-y-auto flex flex-col gap-1.5">
+            {tagHistory.map((b) => (
+              <li key={b.batchId} className="flex items-start gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="text-neutral-700 dark:text-stone-200">
+                    {formatMillis(b.createdAt)}
+                    <span className="text-neutral-400 dark:text-stone-500">
+                      {'  '}{b.files} 个文件{b.covers > 0 ? ` · 含 ${b.covers} 张封面` : ''}
+                    </span>
+                  </div>
+                  <div
+                    className="text-[10px] text-neutral-400 dark:text-stone-500 truncate"
+                    title={b.sample.map(baseName).join('\n')}
+                  >
+                    {b.sample.map(baseName).join('、')}
+                  </div>
+                </div>
+                {b.latest ? (
+                  <button
+                    onClick={() => rollbackHistoryBatch(b.batchId)}
+                    disabled={historyBusy}
+                    className="btn-press text-[11px] px-2 py-0.5 rounded-lg text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-40 shrink-0"
+                  >
+                    {T('music.track.rollbackThisBatch') || '撤销这批'}
+                  </button>
+                ) : (
+                  <span className="text-[10px] text-neutral-300 dark:text-stone-600 shrink-0 self-center">
+                    {T('music.track.tagHistoryNotUndoable') || '之后又写过，不可退'}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+          {historyNote && (
+            <div className="mt-1.5 text-[11px] text-neutral-500 dark:text-stone-400 break-words">{historyNote}</div>
+          )}
+        </div>
+      )}
 
       {lastSave && (
         <div className="mx-3 mt-2 flex items-center gap-2 px-3 py-1.5 text-xs rounded-lg bg-neutral-50 dark:bg-stone-800 border border-neutral-200 dark:border-stone-700">

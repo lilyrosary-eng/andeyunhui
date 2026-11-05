@@ -43,6 +43,7 @@
       "music_list_cover_backups",
       "music_list_playlist_tracks",
       "music_list_playlists",
+      "music_list_tag_batches",
       "music_record_play_session",
       "music_rank_tag_candidates",
       "music_rename_playlist",

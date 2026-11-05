@@ -1054,6 +1054,90 @@ pub fn music_drop_tag_history_batch(app: &AppHandle, batch_id: &str) -> Result<u
     drop_tag_history_batch_conn(&conn, batch_id)
 }
 
+/// 一批写回的概览（给「写回记录」面板列历史用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagBatchRow {
+    pub batch_id: String,
+    /// 这批动了几个文件
+    pub files: i64,
+    /// 这批里有封面留底的行数（= 换过封面的文件数）
+    pub covers: i64,
+    /// 这批最早一条快照的时间（毫秒）
+    pub created_at: i64,
+    /// 文件名样本（最多几条，够人认出是哪一批就行，整份列表在点撤销时才需要）
+    pub sample: Vec<String>,
+    /// 是否最近一批。**只有最近一批允许撤销**，理由见 music_service::rollback_tag_batch
+    pub latest: bool,
+}
+
+/// 按批次汇总历史，新的在前。
+///
+/// `sample_each` 是每条批次带几个文件名样本 —— 面板靠它认「这批是哪次操作」，
+/// 不需要全部文件名（一次批量刮库可能几百个文件，全塞进 IPC 只是白给）。
+pub fn tag_batches_conn(
+    conn: &Connection,
+    limit: i64,
+    sample_each: usize,
+) -> Result<Vec<TagBatchRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT batch_id, COUNT(*), MIN(created_at),
+                    SUM(CASE WHEN cover_backup IS NOT NULL THEN 1 ELSE 0 END)
+             FROM tag_edit_history
+             GROUP BY batch_id
+             ORDER BY MIN(created_at) DESC, batch_id DESC
+             LIMIT ?1",
+        )
+        .map_err(|e| format!("准备批次汇总失败: {}", e))?;
+    let mut rows: Vec<TagBatchRow> = Vec::new();
+    let listed = stmt
+        .query_map(params![limit], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|e| format!("汇总批次失败: {}", e))?;
+    for row in listed {
+        let (batch_id, files, created_at, covers) =
+            row.map_err(|e| format!("读取批次汇总失败: {}", e))?;
+        rows.push(TagBatchRow {
+            batch_id,
+            files,
+            covers,
+            created_at,
+            sample: Vec::new(),
+            latest: false,
+        });
+    }
+    // 文件名样本按批次数取，N 很小（面板一屏），不做 JOIN 是为了让 SQL 各自可读
+    for (i, r) in rows.iter_mut().enumerate() {
+        let mut s = conn
+            .prepare(
+                "SELECT file_path FROM tag_edit_history WHERE batch_id = ?1
+                 ORDER BY file_path ASC LIMIT ?2",
+            )
+            .map_err(|e| format!("准备批次文件样本失败: {}", e))?;
+        let got = s
+            .query_map(params![r.batch_id, sample_each as i64], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("查询批次文件样本失败: {}", e))?;
+        for v in got.flatten() {
+            r.sample.push(v);
+        }
+        // 排序第一条就是全表最新的一批（上面按 MIN(created_at) 倒排）
+        r.latest = i == 0;
+    }
+    Ok(rows)
+}
+
+pub fn music_tag_batches(app: &AppHandle, limit: i64) -> Result<Vec<TagBatchRow>, String> {
+    let conn = open_db(app)?;
+    tag_batches_conn(&conn, limit, 6)
+}
+
 #[cfg(test)]
 mod history_tests {
     use super::*;
@@ -1119,5 +1203,72 @@ mod history_tests {
         assert!(tag_history_rows_conn(&conn, "b1").unwrap().is_empty());
         // 其它批次不受牵连
         assert_eq!(tag_history_rows_conn(&conn, "b2").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn 批次汇总新的在前_只有第一条算最近一批() {
+        let conn = mem_db();
+        record_tag_snapshot_conn(&conn, "b1", "/m/a.flac", "{}", Some("/bak/a.jpg")).unwrap();
+        record_tag_snapshot_conn(&conn, "b1", "/m/b.flac", "{}", None).unwrap();
+        record_tag_snapshot_conn(&conn, "b2", "/m/c.flac", "{}", None).unwrap();
+
+        let all = tag_batches_conn(&conn, 20, 6).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].batch_id, "b2", "同毫秒时按批次号倒排，新写的批次在前");
+        assert_eq!(all[1].batch_id, "b1");
+        assert!(all[0].latest, "只有最近一批该是 latest");
+        assert!(!all[1].latest, "更早那批绝不能带 latest —— 前端据此不给撤销入口");
+        // 每批各自的计数不能互相串
+        assert_eq!((all[1].files, all[1].covers, all[1].latest), (2, 1, false));
+        assert_eq!((all[0].files, all[0].covers), (1, 0));
+    }
+
+    #[test]
+    fn 批次汇总的文件名样本有上限_条数受_limit_约束() {
+        let conn = mem_db();
+        for i in 0..10 {
+            record_tag_snapshot_conn(&conn, "big", &format!("/m/{}.flac", i), "{}", None).unwrap();
+        }
+        record_tag_snapshot_conn(&conn, "small", "/m/z.flac", "{}", None).unwrap();
+
+        let got = tag_batches_conn(&conn, 5, 3).unwrap();
+        assert_eq!(got.len(), 2, "批次数少于 limit 时全给");
+        let big_row = got.iter().find(|b| b.batch_id == "big").unwrap();
+        assert_eq!(big_row.files, 10, "计数是总数，不受样本条数影响");
+        assert_eq!(big_row.sample.len(), 3, "样本按 sample_each 截断，一次刮库几百文件不该全进 IPC");
+        assert!(big_row.sample.iter().all(|p| p.starts_with("/m/")));
+        assert!(!got.iter().any(|b| b.batch_id == "不存在的批次"));
+
+        let only_one = tag_batches_conn(&conn, 1, 6).unwrap();
+        assert_eq!(only_one.len(), 1);
+        assert_eq!(only_one[0].batch_id, "small");
+        assert!(only_one[0].latest, "limit=1 时那一条就是全表最新");
+    }
+
+    #[test]
+    fn 闸门_撤销更早批次必须被后端拦住() {
+        // 判据要在后端：面板上列历史 = 多给了一种点法，只靠前端隐藏按钮等于没拦
+        let src = include_str!("music_service.rs");
+        let body = src
+            .split("pub fn rollback_tag_batch(")
+            .nth(1)
+            .expect("rollback_tag_batch 应存在")
+            .split("\n}\n")
+            .next()
+            .unwrap();
+        assert!(
+            body.contains("music_tag_batches(app, 1)"),
+            "撤销必须先比对是不是最近一批"
+        );
+        let at = body
+            .find("music_tag_batches(app, 1)")
+            .expect("批次比对应在 rollback 体内");
+        let write_at = body
+            .find("restore_one(")
+            .expect("restore_one 调用应存在");
+        assert!(
+            at < write_at,
+            "批次比对必须排在真正写回之前 —— 先拦再动文件"
+        );
     }
 }

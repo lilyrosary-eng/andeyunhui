@@ -239,6 +239,20 @@ pub fn music_rollback_tag_edit(
     music_service::rollback_tag_batch(&app, &batch_id)
 }
 
+/// 列出标签写回的历史批次（新的在前），供「写回记录」面板认出是哪一次操作。
+///
+/// 面板上只有**最近一批**给撤销入口 —— 更早那批存的是它自己写入之前的状态，
+/// 退它会把之后其它写入一起盖掉（这条判据在后端 `rollback_tag_batch` 里也拦着，
+/// 不靠前端隐藏按钮）。
+#[tauri::command]
+pub fn music_list_tag_batches(
+    app: tauri::AppHandle,
+    limit: Option<i64>,
+) -> Result<Vec<music_db::TagBatchRow>, String> {
+    let n = limit.unwrap_or(20).clamp(1, 100);
+    music_db::music_tag_batches(&app, n)
+}
+
 /// 查询该文件的容器能写哪些标签字段。
 ///
 /// 编辑弹窗按这张表置灰字段 —— 判据在 Rust 侧（lofty 的帧映射），

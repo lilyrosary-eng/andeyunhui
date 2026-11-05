@@ -40,7 +40,7 @@ import {
 import type { EditDraft } from './TrackList';
 import { readKugouAuth } from './kugouAuth';
 import type { LyricLine } from './lyricsSync';
-import type { TrackMetaCandidate, LyricCandidate } from './TrackList';
+import type { TrackMetaCandidate, LyricCandidate, TagBatch } from './TrackList';
 import { NETEASE_DOWNLOAD_DIR_KEY } from './NeteaseDownloadManager';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
@@ -2400,6 +2400,13 @@ useEffect(() => {
     await hostApi.invoke('music_rollback_tag_edit', { batchId });
   }, []);
 
+  // 写回记录：列出历史批次。读失败就抛给面板显示原话，不静默成「没有记录」——
+  // 「明明有却显示没有」比报错更难排查
+  const handleListTagBatches = useCallback(async (): Promise<TagBatch[]> => {
+    const raw = await hostApi.invoke('music_list_tag_batches', { limit: 20 });
+    return Array.isArray(raw) ? (raw as TagBatch[]) : [];
+  }, []);
+
   // 批量「自动匹配并写入」的取候选阶段：逐首走**弹窗同一条**链（网易云 → 酷狗 → QQ ＋ 宿主打分引擎），
   // 只算不改。门槛、跳过原因、字段筛选都在纯函数 planBatchAutoTag 里（有单测），这里只管取数。
   // 批量「自动匹配并写入」的**计划**阶段：只算不改 —— 用户要在弹窗外也先看一眼要改什么。
@@ -3190,6 +3197,7 @@ useEffect(() => {
               onCommitBatchAutoTag={handleCommitBatchAutoTag}
               onListCoverBackups={handleListCoverBackups}
               onRestoreCover={handleRestoreCover}
+              onListTagBatches={handleListTagBatches}
               onFetchLyric={handleFetchLyric}
             />
           ) : (

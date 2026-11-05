@@ -330,6 +330,25 @@ describe('封面留底的入口（后端两个命令早就有，UI 曾经零接�
   });
 });
 
+describe('写回记录面板：历史要看得见，且只有最近一批给撤销入口', () => {
+  it('接线在 TrackList/index，命令在 manifest', () => {
+    mustContain('TrackList.tsx', [
+      'onListTagBatches',
+      'toggleTagHistory',
+      'rollbackHistoryBatch',
+      'tagHistoryNotUndoable',
+      'b.latest ?',
+    ]);
+    mustContain('index.tsx', ['music_list_tag_batches']);
+    expect(readManifest()).toContain('"music_list_tag_batches"');
+  });
+
+  it('时间/文件名换算走独立纯函数，不在 JSX 里现搓（那里没法单测）', () => {
+    mustContain('tagHistoryView.ts', ['export function formatMillis', 'export function baseName']);
+    expect(read('TrackList.tsx')).toContain('formatMillis(b.createdAt)');
+  });
+});
+
 describe('插件权限声明不能被顺手删', () => {
   it('歌词与标签写回相关命令仍在 manifest 内', () => {
     const m = readManifest();
