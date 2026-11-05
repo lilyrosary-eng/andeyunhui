@@ -118,6 +118,8 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("qq_http_post", "net"),
     ("qq_http_get", "net"),
     ("bilibili_request", "net"),
+    // 宿主多节点翻译服务（歌词 AI 翻译复用，节点/凭证仍归用户设置）
+    ("translate_text", "net"),
     // ---- 窗口 / 浮层 ----
     ("show_lyrics_widget", "window"),
     ("hide_lyrics_widget", "window"),

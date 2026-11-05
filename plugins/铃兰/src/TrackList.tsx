@@ -8,6 +8,8 @@ import { musicPlayer } from './musicPlayer';
 import { formatTime } from '../../_shared/utils';
 import { PlusIcon, CheckIcon, MoreIcon, MusicIcon, HeartIcon, VideoIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
+import { translateLyrics } from './lyricTranslate';
+import { loadTargetLang } from '@/lib/translateLanguages';
 
 interface Track {
   id: string;
@@ -149,6 +151,9 @@ export function TrackList({
   const [lyricsSource, setLyricsSource] = useState('none');
   const [lyricsLoading, setLyricsLoading] = useState(false);
   const [lyricsError, setLyricsError] = useState<string | null>(null);
+  // AI 翻译：进行中标志 + 过程如实回显（实际节点 / 源语言 / 分段数 / 全部 notices，不截断）
+  const [lyricsTranslating, setLyricsTranslating] = useState(false);
+  const [lyricsTranslateNotice, setLyricsTranslateNotice] = useState<string | null>(null);
 
   const currentTrack = musicPlayer.getCurrentTrack();
 
@@ -418,6 +423,7 @@ export function TrackList({
     setLyricsError(null);
     setReviewBefore(null);
     setLyricCandidates(null);
+    setLyricsTranslateNotice(null);
     setLyricsLoading(true);
     try {
       const res = await loadLyricsText(t);
@@ -437,6 +443,8 @@ export function TrackList({
     setReviewBefore(null);
     setLyricCandidates(null);
     setLyricCandidateLoading(false);
+    setLyricsTranslateNotice(null);
+    setLyricsTranslating(false);
   };
 
   // 进入歌词对照（AI 翻译等）：以当前内容为「修改前」快照，右侧成为可编辑的「修改后」。
@@ -445,6 +453,35 @@ export function TrackList({
     if (!lyricsTrack || lyricsLoading) return;
     setReviewBefore(lyricsDraft);
     setLyricCandidates(null);
+  };
+
+  // AI 翻译歌词：走宿主的多节点翻译服务（translate_text，免费节点免 key，见设置页「翻译节点」）。
+  // 结果只写进「修改后」面板，所以「取消（回退为原文）」与两条保存通路原样复用，不另设一套。
+  // 时间轴保真交给 lyricTranslate：译文行数与原文不一致时**不硬贴**，
+  // 宁可输出无时间轴版本并在下方明说 —— 错轴的译文会让跟唱逐行错位。
+  const runAiTranslate = async () => {
+    if (!lyricsTrack || lyricsLoading || lyricsTranslating) return;
+    // 复用既有的「进入对照」原语（快照修改前 + 收起候选面板），不另开一套状态迁移
+    enterLyricsReview();
+    setLyricsTranslateNotice(null);
+    if (!lyricsDraft.trim()) {
+      setLyricsTranslateNotice(T('music.lyrics.aiTranslateEmpty') || '当前没有歌词文本，可先「自动获取」再翻译');
+      return;
+    }
+    setLyricsTranslating(true);
+    try {
+      const res = await translateLyrics(lyricsDraft, {
+        invoke: hostApi?.invoke ? (cmd, args) => hostApi.invoke(cmd, args) : undefined,
+        targetLang: loadTargetLang(),
+      });
+      setLyricsDraft(res.text);
+      setLyricsTranslateNotice(res.meta || null);
+    } catch (e) {
+      // 失败时「修改前」内容保持原样，也不假装成功
+      setLyricsTranslateNotice(String((e as Error)?.message ?? e));
+    } finally {
+      setLyricsTranslating(false);
+    }
   };
 
   // 自动获取歌词：检索候选并展示在左侧，点选候选抓取纯歌词填入「修改后」。
@@ -1167,11 +1204,12 @@ export function TrackList({
                 {lyricCandidateLoading ? (T('music.lyrics.autoFetching') || '检索中…') : (T('music.lyrics.autoFetch') || '自动获取')}
               </button>
               <button
-                onClick={enterLyricsReview}
-                title={T('music.lyrics.aiTranslateDevHint') || 'AI 翻译歌词（支持架空语），开发中'}
-                className="px-3 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors"
+                onClick={runAiTranslate}
+                disabled={lyricsTranslating || lyricsLoading}
+                title={T('music.lyrics.aiTranslateHint') || 'AI 翻译当前歌词到你在设置页「翻译节点」里选的目标语言，结果进「修改后」，可回退'}
+                className="px-3 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors disabled:opacity-50"
               >
-                {T('music.lyrics.aiTranslate') || 'AI 翻译'}
+                {lyricsTranslating ? (T('music.lyrics.aiTranslating') || '翻译中…') : (T('music.lyrics.aiTranslate') || 'AI 翻译')}
               </button>
               {(reviewBefore !== null || lyricCandidates !== null) && (
                 <button
@@ -1183,6 +1221,13 @@ export function TrackList({
                 </button>
               )}
             </div>
+
+            {/* 翻译过程如实回显：实际节点 / 源语言 / 分段 / 全部 notices，不截断不改写 */}
+            {lyricsTranslateNotice && (
+              <div className="px-5 pb-2 text-[11px] leading-relaxed text-neutral-500 dark:text-stone-400 whitespace-pre-wrap break-words">
+                {lyricsTranslateNotice}
+              </div>
+            )}
 
             <div className="flex-1 p-4 overflow-hidden">
               {lyricsLoading ? (

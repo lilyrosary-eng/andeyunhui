@@ -26,6 +26,7 @@
       "hide_lyrics_widget",
       "import_to_openwith_dir",
       "kugou_http_post",
+      "translate_text",
       "load_music_cache",
       "media_http_url",
       "music_create_playlist",

@@ -84,6 +84,27 @@ describe('歌词编辑器（与标签编辑同居 TrackList.tsx，最易被误�
   it('歌词在线候选「自动获取」', () => {
     mustContain('TrackList.tsx', ['fetchLyricCandidates', 'autoFetch']);
   });
+
+  it('AI 翻译已接到宿主翻译服务（不是"开发中"空位）', () => {
+    mustContain('TrackList.tsx', [
+      'runAiTranslate',
+      'onClick={runAiTranslate}',
+      'translateLyrics',
+      'translate_text',
+      'loadTargetLang',
+      'lyricsTranslateNotice',
+    ]);
+  });
+});
+
+describe('歌词翻译的时间轴保真', () => {
+  it('行数对不上时不硬贴时间戳（错轴译文比无轴更坏）', () => {
+    mustContain('lyricTranslate.ts', ['rejoinTranslated', 'aligned: false', '译文行数与原文不一致']);
+  });
+
+  it('元信息头不参与翻译', () => {
+    mustContain('lyricTranslate.ts', ['metaRe']);
+  });
 });
 
 describe('歌词「译 / 音」三态与桌面歌词联动', () => {
@@ -148,6 +169,7 @@ describe('插件权限声明不能被顺手删', () => {
       'get_lyrics',
       'get_lyrics_text',
       'save_track_lyrics',
+      'translate_text',
     ]) {
       expect(m, `manifest 缺少命令声明：${cmd}`).toContain(`"${cmd}"`);
     }
