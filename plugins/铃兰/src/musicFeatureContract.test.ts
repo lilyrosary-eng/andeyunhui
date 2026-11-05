@@ -349,6 +349,17 @@ describe('写回记录面板：历史要看得见，且只有最近一批给撤�
   });
 });
 
+describe('写完/撤销后内存必须跟到文件真值（13 字段那条线的教训）', () => {
+  it('重扫是整体覆盖，不是手挑三个字段；撤销按后端给回的路径逐个重扫', () => {
+    const src = read('index.tsx');
+    expect(src).toContain('{ ...t, ...rescanned, coverPath: cov }');
+    expect(src).toContain('music_rollback_tag_edit');
+    expect(src).toContain('restoredPaths');
+    // 写回成功后一律重扫，不再手拼 updateTracks
+    expect(src).not.toContain('title: fields.title ?? t.title');
+  });
+});
+
 describe('插件权限声明不能被顺手删', () => {
   it('歌词与标签写回相关命令仍在 manifest 内', () => {
     const m = readManifest();

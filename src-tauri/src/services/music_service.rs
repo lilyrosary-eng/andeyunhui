@@ -1021,6 +1021,9 @@ pub struct RollbackReport {
     pub covers_restored: usize,
     /// 形如 `路径: 原因`；非空时这批历史**不会**被删除，用户还能再撤剩下的
     pub failed: Vec<String>,
+    /// 真正被退回的文件路径。前端拿它逐个重扫，界面才会显示退回后的值 ——
+    /// 只给个数字的话，撤销完列表还停在撤销前，看着就像「按钮没生效」
+    pub restored_paths: Vec<String>,
 }
 
 /// 批量写回。顺序执行、逐项回报，一项失败不影响其余项。
@@ -1068,11 +1071,12 @@ pub fn rollback_tag_batch(app: &tauri::AppHandle, batch_id: &str) -> Result<Roll
             ));
         }
     }
-    let mut report = RollbackReport { files: 0, covers_restored: 0, failed: Vec::new() };
+    let mut report = RollbackReport { files: 0, covers_restored: 0, failed: Vec::new(), restored_paths: Vec::new() };
     for row in rows {
         match restore_one(app, &row) {
             Ok(cover_restored) => {
                 report.files += 1;
+                report.restored_paths.push(row.file_path.clone());
                 if cover_restored {
                     report.covers_restored += 1;
                 }

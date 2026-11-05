@@ -2251,7 +2251,10 @@ useEffect(() => {
           const tFp = t.filePath || t.id;
           if (tFp !== fp) return t;
           const cov = coverOverrides.get(fp) ?? rescanned.coverPath;
-          return { ...t, title: rescanned.title, artist: rescanned.artist, album: rescanned.album, durationSecs: rescanned.durationSecs, coverPath: cov };
+          // 整体覆盖而不是只挑标题/歌手/专辑：`{...t, ...rescanned}` 保留客户端自己挂的键，
+          // 同时把作曲/作词/流派/年份这些新字段也刷新成文件真值 —— 只挑三个字段的话，
+          // 用户写完重开弹窗会看到自己刚填的值没了
+          return { ...t, ...rescanned, coverPath: cov };
         }),
       }))
     );
@@ -2351,27 +2354,16 @@ useEffect(() => {
   }, []);
 
   // 编辑曲目标签信息并写回文件 + 更新内存
-  const handleEditTrack = useCallback(async (track: Track, fields: Partial<EditDraft>): Promise<EditOutcome | null> => {
-    // editTrackTags 内部吞掉了异常（写失败只 warn），这里统一成 null 表示「没有可撤销的批次」
-    const outcome = (await editTrackTags(track, fields)) ?? null;
-    const fp = track.filePath || track.id;
-    const updateTracks = (tracks: Track[]) => tracks.map(t => {
-      const tFp = t.filePath || t.id;
-      if (tFp !== fp) return t;
-      return {
-        ...t,
-        title: fields.title ?? t.title,
-        artist: fields.artist ?? t.artist,
-        album: fields.album ?? t.album,
-      };
-    });
-    setPlaylists(prev =>
-      prev.map(p => ({ ...p, tracks: updateTracks(p.tracks) }))
-    );
-    // 同步当前选中歌单（UI 直接渲染 selectedPlaylist.tracks）
-    setSelectedPlaylist(prev => (prev ? { ...prev, tracks: updateTracks(prev.tracks) } : prev));
-    return outcome;
-  }, []);
+  const handleEditTrack = useCallback(
+    async (track: Track, fields: Partial<EditDraft>): Promise<EditOutcome | null> => {
+      // editTrackTags 内部吞掉了异常（写失败只 warn），这里统一成 null 表示「没有可撤销的批次」
+      const outcome = (await editTrackTags(track, fields)) ?? null;
+      // 写完一律以文件为准重扫（含 13 个字段与容器信息），不在这里手挑要更新哪几个
+      if (outcome) await handleRescanTrack(track);
+      return outcome;
+    },
+    [handleRescanTrack],
+  );
 
   // 查该容器能写哪些字段（后端查 lofty 帧映射）；失败返回 null，前端按「全部可写」处理
   const handleFetchFieldSupport = useCallback(async (track: Track) => {
@@ -2395,10 +2387,23 @@ useEffect(() => {
     }
   }, []);
 
-  // 撤销一次写回（含该批改过的封面）
+  // 撤销一批写回（含该批改过的封面）
   const handleRollbackBatch = useCallback(async (batchId: string) => {
-    await hostApi.invoke('music_rollback_tag_edit', { batchId });
-  }, []);
+    const rep = (await hostApi.invoke('music_rollback_tag_edit', { batchId })) as
+      | { restoredPaths?: string[] }
+      | null;
+    const paths = Array.isArray(rep?.restoredPaths) ? rep.restoredPaths : [];
+    if (!paths.length) return;
+    // 撤销动的是磁盘原件，内存里那份必须跟着刷新，否则界面停在「撤销前」的值 ——
+    // 看着就跟按钮没生效一样。太多就退化成整库重扫，别把 IPC 打满
+    if (paths.length > 40) {
+      setRescanFlag((n) => n + 1);
+      return;
+    }
+    for (const p of paths) {
+      await handleRescanTrack({ filePath: p, id: p } as Track);
+    }
+  }, [handleRescanTrack]);
 
   // 写回记录：列出历史批次。读失败就抛给面板显示原话，不静默成「没有记录」——
   // 「明明有却显示没有」比报错更难排查
