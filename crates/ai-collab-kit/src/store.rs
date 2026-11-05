@@ -301,7 +301,9 @@ pub fn read_events(base: &Path, room_id: &str, after_seq: Option<u64>) -> Result
 //     room.json       房间元数据（成员 / 来源 / 工作目录）
 //     events.ndjson   完整事件流（追加写，按 seq 消费）
 //     inbox/          外部 harness 投递消息的 JSON 文件
-//     processed/      已导入的外部消息
+//     processed/      已导入的外部消息 / 已回收的信箱结果
+//     tasks/          宿主投递给外部 harness 的任务（每个任务一个 JSON）
+//     results/        外部 harness 写回的任务结果
 //     README.md       扫描与投递约定
 // 这是「通用参与层」：任何能读写文件的 harness 都能参加，不需要为它写适配器。
 
@@ -326,7 +328,9 @@ const MIRROR_README: &str = r#"# AI 协作共享会话
 - `room.json`：房间元数据（成员、主导、来源、工作目录）
 - `events.ndjson`：完整事件流，每行一个 JSON，`seq` 单调递增
 - `inbox/`：外部 harness 往这里写消息
-- `processed/`：已导入的外部消息
+- `tasks/`：宿主投递给外部 harness 的任务（每个任务一个 JSON）
+- `results/`：外部 harness 写回的任务结果
+- `processed/`：已导入的外部消息 / 已回收的信箱结果
 
 ## 扫描（任何 harness 都能做）
 
@@ -343,7 +347,35 @@ const MIRROR_README: &str = r#"# AI 协作共享会话
 ```
 
 主程序下次同步房间时导入，并把文件移到 `processed/`。
+
+## 领任务（IDE-only harness 也能参与）
+
+1. 扫 `tasks/*.json`，每份是一个待办任务（含 `taskId` / `brief` / `assigneeId`）；
+2. 做完后把结果写到 `results/`，文件名随意，内容必须含 `taskId`：
+
+```json
+{ "taskId": "task_xxx", "text": "这是结果正文" }
+```
+
+失败时写 `{ "taskId": "task_xxx", "error": "失败原因" }`。
+
+主程序下次同步时把结果写回任务与会话消息，`tasks/` 与 `results/` 里的文件会被归档到 `processed/`。
 "#;
+
+/// 建好镜像目录与约定文件，返回目录路径。任何失败都返回 None（镜像不是事实源）。
+fn prepare_mirror_dir(room: &Room) -> Option<PathBuf> {
+    let dir = mirror_dir(room)?;
+    fs::create_dir_all(&dir).ok()?;
+    for sub in ["inbox", "processed", "tasks", "results"] {
+        let _ = fs::create_dir_all(dir.join(sub));
+    }
+    let _ = write_if_missing(&dir.join("README.md"), MIRROR_README.as_bytes());
+    let _ = write_if_missing(
+        &dir.join("room.json"),
+        &serde_json::to_vec_pretty(room).unwrap_or_default(),
+    );
+    Some(dir)
+}
 
 fn write_if_missing(path: &Path, body: &[u8]) -> Result<(), String> {
     if path.exists() {
@@ -375,19 +407,9 @@ pub fn mirror_event(base: &Path, event: &CollabEvent) {
     let Some(room) = rooms.iter().find(|room| room.id == event.room_id) else {
         return;
     };
-    let Some(dir) = mirror_dir(room) else {
+    let Some(dir) = prepare_mirror_dir(room) else {
         return;
     };
-    if fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let _ = fs::create_dir_all(dir.join("inbox"));
-    let _ = fs::create_dir_all(dir.join("processed"));
-    let _ = write_if_missing(&dir.join("README.md"), MIRROR_README.as_bytes());
-    let _ = write_if_missing(
-        &dir.join("room.json"),
-        &serde_json::to_vec_pretty(room).unwrap_or_default(),
-    );
     let line = match serde_json::to_string(event) {
         Ok(line) => line,
         Err(_) => return,
@@ -405,15 +427,9 @@ pub fn mirror_event(base: &Path, event: &CollabEvent) {
 /// 房间首次绑定工作目录 / 换绑时，把已有事件全量重建到镜像目录。
 /// 与 `mirror_event` 不同：这里用覆盖写，保证新绑定的目录拿到完整历史而不是空文件。
 pub fn mirror_rebuild(base: &Path, room: &Room) {
-    let Some(dir) = mirror_dir(room) else {
+    let Some(dir) = prepare_mirror_dir(room) else {
         return;
     };
-    if fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let _ = fs::create_dir_all(dir.join("inbox"));
-    let _ = fs::create_dir_all(dir.join("processed"));
-    let _ = write_if_missing(&dir.join("README.md"), MIRROR_README.as_bytes());
     if let Ok(body) = serde_json::to_vec_pretty(room) {
         let _ = write_atomic(&dir.join("room.json"), &body);
     }
@@ -426,6 +442,108 @@ pub fn mirror_rebuild(base: &Path, room: &Room) {
         }
     }
     let _ = write_atomic(&dir.join("events.ndjson"), body.as_bytes());
+}
+
+/// 把一个任务投递到 `.Talk` 信箱（`tasks/<taskId>.json`）。
+/// 返回是否成功：房间没有绑定有效工作目录时投递不了。
+pub fn publish_mailbox_task(room: &Room, assignment: &Assignment) -> bool {
+    let Some(dir) = prepare_mirror_dir(room) else {
+        return false;
+    };
+    let body = serde_json::json!({
+        "taskId": assignment.id,
+        "roomId": room.id,
+        "assigneeId": assignment.assignee_id,
+        "brief": assignment.brief,
+        "parentId": assignment.parent_id,
+        "createdAt": assignment.created_at,
+        "howto": "把结果写到 results/<任意文件名>.json：{\"taskId\":\"...\",\"text\":\"...\"}；失败写 error 字段。",
+    });
+    let Ok(bytes) = serde_json::to_vec_pretty(&body) else {
+        return false;
+    };
+    write_atomic(
+        &dir.join("tasks").join(format!("{}.json", assignment.id)),
+        &bytes,
+    )
+    .is_ok()
+}
+
+/// 外部 harness 写回的一条任务结果。
+#[derive(Debug, Clone)]
+pub struct MailboxResult {
+    pub task_id: String,
+    pub text: String,
+    pub failed: bool,
+}
+
+/// 取出并归档 `results/*.json`。内容需含 `taskId`，可选 `text` / `result` 或 `error`。
+pub fn take_mailbox_results(room: &Room) -> Vec<MailboxResult> {
+    let Some(dir) = prepare_mirror_dir(room) else {
+        return Vec::new();
+    };
+    let results_dir = dir.join("results");
+    let Ok(entries) = fs::read_dir(&results_dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(task_id) = value
+            .get("taskId")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        else {
+            continue;
+        };
+        let error = value
+            .get("error")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty());
+        let body = value
+            .get("text")
+            .or_else(|| value.get("result"))
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        if error.is_none() && body.is_empty() {
+            continue;
+        }
+        out.push(MailboxResult {
+            task_id: task_id.to_string(),
+            text: crate::runtime::clip_text(error.unwrap_or(body), 8000),
+            failed: error.is_some(),
+        });
+        archive_mailbox_file(&dir, &path);
+        // 任务文件同步归档，避免外部 harness 重复领取同一单。
+        let _ = fs::remove_file(dir.join("tasks").join(format!("{task_id}.json")));
+    }
+    out
+}
+
+fn archive_mailbox_file(dir: &Path, path: &Path) {
+    let processed = dir.join("processed");
+    let _ = fs::create_dir_all(&processed);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("mailbox");
+    let target = processed.join(format!(
+        "{stem}.{}.json",
+        chrono::Utc::now().timestamp_millis()
+    ));
+    let _ = fs::rename(path, target);
 }
 
 /// 外部 harness 通过 `inbox/*.json` 投递的消息。
@@ -633,6 +751,69 @@ mod tests {
         // 写锁必须在结束后清理，否则下一个进程会一直等到陈旧锁超时。
         assert!(!base.join(".collab-write.lock").exists());
         let _ = fs::remove_dir_all(base);
+    }
+
+    /// `.Talk` 信箱：任务落到 tasks/，结果从 results/ 回收并归档。
+    #[test]
+    fn mailbox_task_and_result_roundtrip() {
+        let base = temp_base("mailbox");
+        let workspace = temp_base("mailbox-ws");
+        let room = Room {
+            id: "room_mailbox".to_string(),
+            name: "信箱房间".to_string(),
+            lead_id: "lead".to_string(),
+            agents: vec![],
+            workspace: Some(workspace.to_string_lossy().to_string()),
+            source: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let assignment = Assignment {
+            id: "task_mailbox".to_string(),
+            room_id: room.id.clone(),
+            parent_id: None,
+            assignee_id: "ide".to_string(),
+            brief: "写一段说明".to_string(),
+            status: AssignmentStatus::Queued,
+            result: None,
+            claimed_by: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        assert!(publish_mailbox_task(&room, &assignment));
+        let dir = workspace
+            .join(".adyh")
+            .join("collab")
+            .join("rooms")
+            .join(&room.id);
+        assert!(dir.join("tasks").join("task_mailbox.json").exists());
+        assert!(dir.join("results").is_dir());
+
+        fs::write(
+            dir.join("results").join("r1.json"),
+            r#"{"taskId":"task_mailbox","text":"结果正文"}"#,
+        )
+        .unwrap();
+        let results = take_mailbox_results(&room);
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].failed);
+        assert_eq!(results[0].text, "结果正文");
+        // 领取过的任务文件要归档，避免外部 harness 重复接单。
+        assert!(!dir.join("tasks").join("task_mailbox.json").exists());
+        assert!(!dir.join("results").join("r1.json").exists());
+
+        fs::write(
+            dir.join("results").join("r2.json"),
+            r#"{"taskId":"task_mailbox","error":"做不了"}"#,
+        )
+        .unwrap();
+        let failed = take_mailbox_results(&room);
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].failed);
+        assert_eq!(failed[0].text, "做不了");
+
+        let _ = fs::remove_dir_all(base);
+        let _ = fs::remove_dir_all(workspace);
     }
 
     #[test]

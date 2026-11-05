@@ -28,6 +28,9 @@ interface AiCollabViewProps {
   /** 新建 stream-json 房间（需要先配置 stream-json.json） */
   onCreateStreamJsonRoom?: () => void;
   streamJsonAvailable?: boolean;
+  /** 新建 .Talk 信箱房间（需绑定工作目录后任务才会投递） */
+  onCreateMailboxRoom?: () => void;
+  mailboxAvailable?: boolean;
   deepseekAvailable?: boolean;
   dshSessions: DshSessionSummary[];
   dshSessionsLoading: boolean;
@@ -368,6 +371,8 @@ export const AiCollabView = memo(function AiCollabView({
   onCreateMcpRoom,
   onCreateStreamJsonRoom,
   streamJsonAvailable,
+  onCreateMailboxRoom,
+  mailboxAvailable,
   deepseekAvailable,
   dshSessions,
   dshSessionsLoading,
@@ -436,6 +441,15 @@ export const AiCollabView = memo(function AiCollabView({
                 className="btn-press rounded-full border border-neutral-300 px-5 py-2 text-sm font-medium text-neutral-600 hover:bg-neutral-100 dark:border-stone-600 dark:text-stone-300 dark:hover:bg-stone-800"
               >
                 stream-json 房间
+              </button>
+            )}
+            {mailboxAvailable && onCreateMailboxRoom && (
+              <button
+                onClick={onCreateMailboxRoom}
+                title="创建后先在房间绑定工作目录，任务才会投递到 .adyh/collab/.../tasks/"
+                className="btn-press rounded-full border border-neutral-300 px-5 py-2 text-sm font-medium text-neutral-600 hover:bg-neutral-100 dark:border-stone-600 dark:text-stone-300 dark:hover:bg-stone-800"
+              >
+                .Talk 信箱房间
               </button>
             )}
             {deepseekAvailable && (

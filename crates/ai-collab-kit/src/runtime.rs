@@ -215,6 +215,19 @@ pub fn create_assignment_core(
         Some(assignment.clone()),
         None,
     )?;
+
+    // `.Talk` 信箱成员：任务直接投递到绑定的工作目录，等外部 harness 写回结果。
+    // 放在 core 里是因为 MCP 建的任务不经过 spawn，也必须能投递。
+    if room
+        .agents
+        .iter()
+        .find(|agent| agent.id == assignee_id)
+        .map(|agent| agent.harness_id.as_str())
+        == Some(crate::harness::MAILBOX)
+    {
+        store::publish_mailbox_task(room, &assignment);
+    }
+
     Ok(CreatedAssignment { assignment, event })
 }
 
@@ -253,6 +266,46 @@ pub fn set_assignment_status_core(
         None,
     )?;
     Ok(updated)
+}
+
+/// 外部写完结果后的收尾（信箱 / 其它无 AppHandle 的通道共用）：
+/// 任务置 completed，并补一条 agent 消息让时间线可见。
+pub fn complete_assignment_core(
+    base: &Path,
+    room: &Room,
+    assignment: &Assignment,
+    text: &str,
+    data: Option<Value>,
+) -> Result<Assignment, String> {
+    let text = clip_text(text.trim(), 8000);
+    let done = update_assignment(
+        base,
+        &room.id,
+        &assignment.id,
+        AssignmentStatus::Completed,
+        Some(text.clone()),
+    )?;
+    append_event_core(
+        base,
+        &room.id,
+        "assignment.completed",
+        Some(done.assignee_id.clone()),
+        Some(done.id.clone()),
+        Some(text.clone()),
+        Some(done.clone()),
+        data,
+    )?;
+    append_event_core(
+        base,
+        &room.id,
+        "message",
+        Some(done.assignee_id.clone()),
+        Some(done.id.clone()),
+        Some(text),
+        None,
+        Some(json!({ "role": "agent", "external": true })),
+    )?;
+    Ok(done)
 }
 
 /// 外部 harness 认领任务：queued/waiting → running，并记录认领者。
@@ -744,6 +797,27 @@ async fn run_assignment(app: AppHandle, base: PathBuf, room: Room, assignment: A
             Some(assignment.assignee_id.clone()),
             Some(assignment.id.clone()),
             Some("任务已入队，等待外部 harness 通过 MCP 认领".to_string()),
+            None,
+            None,
+        );
+        return;
+    }
+
+    // `.Talk` 信箱：宿主只负责把任务写进工作目录，执行交给外部 harness。
+    if harness_id == crate::harness::MAILBOX {
+        let delivered = store::publish_mailbox_task(&room, &assignment);
+        let _ = emit_event(
+            &app,
+            &base,
+            &room.id,
+            "assignment.progress",
+            Some(assignment.assignee_id.clone()),
+            Some(assignment.id.clone()),
+            Some(if delivered {
+                "任务已投递到 .Talk 信箱（.adyh/collab/.../tasks/），等待外部写回 results/".to_string()
+            } else {
+                "未绑定工作目录，无法投递到 .Talk 信箱；请先在房间绑定目录".to_string()
+            }),
             None,
             None,
         );
@@ -1666,6 +1740,57 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(base);
         let _ = std::fs::remove_dir_all(base2);
+    }
+
+    /// `.Talk` 信箱成员：建任务即投递到工作目录，结果回传时走 complete_assignment_core。
+    #[test]
+    fn mailbox_member_publishes_task_and_completes() {
+        let base = temp_base("mailbox-runtime");
+        let workspace = temp_base("mailbox-runtime-ws");
+        let mut room = test_room("room_mailbox_runtime");
+        room.workspace = Some(workspace.to_string_lossy().to_string());
+        room.agents.push(AgentSpec {
+            id: "ide".to_string(),
+            name: "IDE".to_string(),
+            harness_id: crate::harness::MAILBOX.to_string(),
+            persona: String::new(),
+            model: String::new(),
+            native_session_id: None,
+        });
+
+        let created = create_assignment_core(&base, &room, None, "ide", "在 IDE 里完成")
+            .unwrap()
+            .assignment;
+        let dir = workspace
+            .join(".adyh")
+            .join("collab")
+            .join("rooms")
+            .join(&room.id);
+        assert!(dir
+            .join("tasks")
+            .join(format!("{}.json", created.id))
+            .exists());
+
+        complete_assignment_core(
+            &base,
+            &room,
+            &created,
+            "已写完",
+            Some(json!({ "transport": "mailbox" })),
+        )
+        .unwrap();
+        let tasks = store::read_assignments(&base).remove(&room.id).unwrap();
+        assert_eq!(
+            tasks.iter().find(|task| task.id == created.id).unwrap().status,
+            AssignmentStatus::Completed
+        );
+        let events = store::read_events(&base, &room.id, None).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "message" && event.text.as_deref() == Some("已写完")));
+
+        let _ = std::fs::remove_dir_all(base);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     /// P3：挂起写 waiting + 问题；恢复（认领）回到 running 并清掉旧问题。

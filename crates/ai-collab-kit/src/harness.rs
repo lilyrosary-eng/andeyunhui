@@ -351,8 +351,8 @@ pub fn catalog(app: &AppHandle) -> Vec<HarnessInfo> {
             id: MAILBOX.to_string(),
             name: ".Talk 信箱".to_string(),
             kind: MAILBOX.to_string(),
-            available: false,
-            detail: "P3：复用项目 `.Talk` 文件通道，适配只能开 IDE 的 harness 与人工协作者。".to_string(),
+            available: true,
+            detail: "P3：房间绑定工作目录后生效 —— 任务写进 .adyh/collab/rooms/<id>/tasks/，外部 harness 写 results/ 回传结果；适合只能开 IDE 的参与者。".to_string(),
         },
     ]
 }

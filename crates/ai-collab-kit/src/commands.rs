@@ -14,7 +14,8 @@ use crate::harness;
 use crate::runtime;
 use crate::store;
 use crate::types::{
-    AgentSpec, Assignment, CollabEvent, HarnessInfo, Room, RoomSnapshot, RoomSource,
+    AgentSpec, Assignment, AssignmentStatus, CollabEvent, HarnessInfo, Room, RoomSnapshot,
+    RoomSource,
 };
 
 fn find_room(app: &AppHandle, room_id: &str) -> Result<Room, String> {
@@ -248,6 +249,27 @@ pub fn collab_set_room_workspace(
 
     if workspace.is_some() {
         store::mirror_rebuild(&base, &room);
+        // 绑定目录后补投递：之前没有目录时创建的 `.Talk` 信箱任务现在能落地了。
+        for task in store::read_assignments(&base)
+            .remove(&room.id)
+            .unwrap_or_default()
+        {
+            if !matches!(
+                task.status,
+                AssignmentStatus::Queued | AssignmentStatus::Waiting
+            ) {
+                continue;
+            }
+            let is_mailbox = room
+                .agents
+                .iter()
+                .find(|agent| agent.id == task.assignee_id)
+                .map(|agent| agent.harness_id.as_str())
+                == Some(harness::MAILBOX);
+            if is_mailbox {
+                store::publish_mailbox_task(&room, &task);
+            }
+        }
     }
     runtime::emit_event(
         &app,
@@ -371,7 +393,7 @@ pub fn collab_sync_external(app: AppHandle, room_id: String) -> Result<usize, St
 
 fn sync_external_room(app: &AppHandle, base: &std::path::Path, room: &Room) -> usize {
     let messages = store::take_external_messages(base, room);
-    let count = messages.len();
+    let mut count = messages.len();
     for message in messages {
         let _ = runtime::emit_event(
             app,
@@ -384,6 +406,44 @@ fn sync_external_room(app: &AppHandle, base: &std::path::Path, room: &Room) -> u
             None,
             Some(json!({ "role": "agent", "external": true })),
         );
+    }
+
+    // `.Talk` 信箱结果：外部写回 results/*.json 后，完成任务并回到会话时间线。
+    let tasks = store::read_assignments(base)
+        .remove(&room.id)
+        .unwrap_or_default();
+    for result in store::take_mailbox_results(room) {
+        let Some(task) = tasks.iter().find(|task| task.id == result.task_id) else {
+            continue;
+        };
+        if matches!(
+            task.status,
+            AssignmentStatus::Completed
+                | AssignmentStatus::Failed
+                | AssignmentStatus::Cancelled
+        ) {
+            continue;
+        }
+        if result.failed {
+            let _ = runtime::set_assignment_status_core(
+                base,
+                &room.id,
+                &task.id,
+                AssignmentStatus::Failed,
+                Some(result.text.clone()),
+                "assignment.failed",
+                Some(result.text),
+            );
+        } else {
+            let _ = runtime::complete_assignment_core(
+                base,
+                room,
+                task,
+                &result.text,
+                Some(json!({ "transport": "mailbox" })),
+            );
+        }
+        count += 1;
     }
     count
 }
