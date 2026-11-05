@@ -62,25 +62,38 @@ pub fn collab_recover(app: AppHandle) -> Result<runtime::RecoverySummary, String
 
 /// MCP 接入信息：设置页展示，外部 harness 直接复制。
 ///
-/// MCP server 是独立进程（`ai-collab-mcp`），用同一份文件事实源，
-/// 因此 root / 环境变量必须与宿主完全一致，不能另起一份数据。
+/// 随包分发方式：**宿主 exe 自身带 `--mcp` 参数**就进入 stdio 模式，
+/// 因此 command 一律指向当前应用可执行文件，args 为 `["--mcp"]`。
+/// 这样升级应用即同步升级 MCP，不会出现「应用是新版、MCP 还是旧版」；
+/// 独立二进制只作为开发/冒烟测试的备用入口展示。
 #[tauri::command]
 pub fn collab_mcp_info(app: AppHandle) -> Result<serde_json::Value, String> {
     let base = store::base_dir(&app)?;
-    let exe_name = if cfg!(windows) {
+    let standalone_name = if cfg!(windows) {
         "ai-collab-mcp.exe"
     } else {
         "ai-collab-mcp"
     };
+    let configured = std::env::current_exe()
+        .map(|exe| exe.to_string_lossy().to_string())
+        .unwrap_or_else(|_| {
+            if cfg!(windows) {
+                "andeyunhui.exe".to_string()
+            } else {
+                "andeyunhui".to_string()
+            }
+        });
     let binary = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(exe_name)))
+        .and_then(|exe| exe.parent().map(|dir| dir.join(standalone_name)))
         .filter(|path| path.exists())
         .map(|path| path.to_string_lossy().to_string());
     let root = base.to_string_lossy().to_string();
-    let command = binary.clone().unwrap_or_else(|| exe_name.to_string());
     Ok(json!({
         "root": root,
+        "mode": "embedded",
+        "command": configured,
+        "args": [crate::mcp::ARG],
         "binary": binary,
         "buildCommand": "cargo build -p ai-collab-kit --bin ai-collab-mcp",
         "env": { "ANDY_COLLAB_ROOT": root },
@@ -88,8 +101,8 @@ pub fn collab_mcp_info(app: AppHandle) -> Result<serde_json::Value, String> {
         "config": {
             "mcpServers": {
                 "ai-collab": {
-                    "command": command,
-                    "args": [],
+                    "command": configured,
+                    "args": [crate::mcp::ARG],
                     "env": { "ANDY_COLLAB_ROOT": root }
                 }
             }

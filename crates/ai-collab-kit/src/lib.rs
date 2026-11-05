@@ -19,6 +19,8 @@ pub mod acp_client;
 pub mod commands;
 pub mod dsh_sessions;
 pub mod harness;
+/// MCP 控制面（stdio JSON-RPC）：宿主 exe `--mcp` 模式与独立 bin 共用同一实现。
+pub mod mcp;
 pub mod runtime;
 pub mod store;
 pub mod types;

@@ -309,15 +309,15 @@ function McpDialog({ onClose }: { onClose: () => void }) {
                 </div>
               </div>
 
-              {!info.binary && (
-                <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-[11px] text-amber-700 dark:text-amber-300">
-                  未在应用目录找到 ai-collab-mcp 可执行文件。先构建：
-                  <div className="mt-1 flex items-center gap-2">
-                    <code className="break-all font-mono">{info.buildCommand}</code>
-                    <CopyButton text={info.buildCommand} />
+              <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-3 text-[11px] leading-relaxed text-indigo-700 dark:text-indigo-300">
+                MCP 由应用本体以 <code className="rounded bg-white/60 px-1 font-mono dark:bg-stone-800">{info.args.join(' ')}</code>
+                模式提供，安装包不需要额外二进制；升级应用即同步升级 MCP。
+                {info.binary && (
+                  <div className="mt-1 break-all font-mono text-[10px] text-neutral-500 dark:text-stone-400">
+                    开发用独立二进制：{info.binary}
                   </div>
-                </div>
-              )}
+                )}
+              </div>
 
               <div>
                 <div className="mb-1 flex items-center gap-2">

@@ -108,6 +108,11 @@ export interface CollabRecovery {
 /** MCP 控制面接入信息（`collab_mcp_info`）：给 Trae / WorkBuddy 等 harness 直接复制。 */
 export interface CollabMcpInfo {
   root: string;
+  /** embedded：MCP 由应用本体以 `--mcp` 模式提供 */
+  mode: string;
+  command: string;
+  args: string[];
+  /** 开发用的独立二进制（安装版不需要） */
   binary: string | null;
   buildCommand: string;
   env: Record<string, string>;

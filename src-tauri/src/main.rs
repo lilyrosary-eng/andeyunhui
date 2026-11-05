@@ -736,6 +736,12 @@ fn marker_exists(name: &str) -> bool {
 }
 
 fn main() {
+    // MCP 随包分发：同一个 exe 带 --mcp 时只跑 stdio 协议，直接返回，不初始化窗口 / WebView。
+    // 放在最前面是有意的：托盘、单实例锁、日志、数据库都不该在这个模式下启动。
+    if ai_collab_kit::mcp::uses_args(std::env::args().skip(1)) {
+        std::process::exit(ai_collab_kit::mcp::run_stdio());
+    }
+
     // Linux：DMA-BUF 渲染器**默认保持开启**。
     //
     // 2026-10-27 实测过两次，结论是个硬取舍：
