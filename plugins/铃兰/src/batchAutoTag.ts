@@ -16,6 +16,14 @@ import { buildDraftPayload } from './tagEditArgs';
 /** 自动写入的最低匹配分（满 6 = 标题/歌手/专辑全等） */
 export const MIN_AUTO_WRITE_SCORE = 4;
 
+/**
+ * 连带换封面要的分数（用户定的默认：只有高分才动封面）。
+ *
+ * 改三个文本字段错了能一眼看出来，换封面错了要多绕一层（图也进了文件、还占一份留底），
+ * 所以门槛比写字段高一档：5 = 标题全等 + 歌手全等 + 专辑至少搭上。
+ */
+export const MIN_AUTO_COVER_SCORE = 5;
+
 /** 批量只认这三个字段：候选源给不出年份/碟号，硬凑会写成空值 */
 export const BATCH_WRITABLE_FIELDS = ['title', 'artist', 'album'] as const;
 
@@ -36,6 +44,8 @@ export interface TopCandidate {
   score: number;
   /** 来源标识，仅用于报告里说清「这条是哪来的」 */
   source?: string;
+  /** 候选带的封面远程地址（有且分数够高才会连带换） */
+  coverUrl?: string;
 }
 
 export interface PlannedItem {
@@ -44,6 +54,8 @@ export interface PlannedItem {
   draft: Record<string, unknown>;
   score: number;
   source: string;
+  /** 非空表示这一首除了字段还要换封面 */
+  coverUrl?: string;
 }
 
 export interface SkippedItem {
@@ -103,6 +115,8 @@ export async function planBatchAutoTag(
       if (v && !sameText(v, t[key])) changed[key] = v;
     }
     if (Object.keys(changed).length === 0) {
+      // 字段都一样就整首跳过：不做「只换封面」这一档 —— 我们没有「这文件本来没封面」
+      // 的信息源，盲换会把已有封面盖掉，而那是这份计划里唯一看不见的判断
       skipped.push({ filePath: t.filePath, title: label, reason: '已是这个值，无需写' });
       continue;
     }
@@ -111,6 +125,7 @@ export async function planBatchAutoTag(
       draft: buildDraftPayload(changed),
       score: top.score,
       source: top.source || '?',
+      coverUrl: top.coverUrl?.trim() && top.score >= MIN_AUTO_COVER_SCORE ? top.coverUrl.trim() : undefined,
     });
   }
   return { items, skipped };
@@ -153,6 +168,9 @@ export interface BatchAutoTagReport {
   /** 后端确认写成功的文件数（= 可撤销的范围） */
   written: number;
   failed: number;
+  /** 连带换掉的封面数 / 换失败的封面数 */
+  coversChanged: number;
+  coverFailed: number;
   skipped: SkippedItem[];
   /** 各容器格式没帧位而被跳过的字段名（去重） */
   droppedFields: string[];
@@ -164,21 +182,36 @@ export interface BatchAutoTagReport {
  *
  * `written` 只算后端点头的那些：批次号里含失败文件的历史行（快照是写盘**之前**记的），
  * 所以撤销整批时失败文件也会被"恢复"成它本来的样子 —— 无害，但不能因此把它算成功。
+ *
+ * `covers` 是换封面那条通路的逐条结果（走的是 `music_set_cover_url`，与字段写回共用
+ * 同一个批次号，所以一次撤销能把字段和封面一起退回）。
  */
 export function buildBatchReport(
   plan: BatchPlan,
   batchId: string,
   results: BatchItemResultLike[],
+  covers: Array<{ ok?: boolean; error?: string | null }> = [],
 ): BatchAutoTagReport {
   const arr = Array.isArray(results) ? results : [];
+  const cv = Array.isArray(covers) ? covers : [];
   const dropped = new Set<string>();
   for (const r of arr) for (const d of r.dropped ?? []) dropped.add(d);
+  const coverFailed = cv.filter((c) => !c?.ok).length;
+  const summary = [
+    describeBatchResults(arr, plan),
+    cv.length ? `封面 ${cv.length - coverFailed}/${cv.length}` : '',
+    coverFailed ? String(cv.find((c) => !c?.ok)?.error ?? '换封面失败') : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
   return {
     batchId,
     written: arr.filter((r) => r.ok).length,
     failed: arr.filter((r) => !r.ok).length,
+    coversChanged: cv.length - coverFailed,
+    coverFailed,
     skipped: plan.skipped,
     droppedFields: Array.from(dropped),
-    summary: describeBatchResults(arr, plan),
+    summary,
   };
 }

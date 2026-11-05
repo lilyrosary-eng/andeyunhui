@@ -286,6 +286,16 @@ describe('批量「自动匹配并写入」：门槛与命令接线', () => {
   });
 });
 
+describe('批量写入的连带换封面（用户定的默认：只有高分才动图）', () => {
+  it('封面门槛比写字段高，且与字段写回共用同一批次号（撤销才能一起退回）', () => {
+    mustContain('batchAutoTag.ts', ['MIN_AUTO_COVER_SCORE', 'coverUrl']);
+    const src = read('index.tsx');
+    expect(src).toContain("await hostApi.invoke('music_set_cover_url', { filePath: it.filePath, url: it.coverUrl, batchId })");
+    // 确认面板上必须看得出哪几首会动图
+    expect(read('TrackList.tsx')).toContain('+封面');
+  });
+});
+
 describe('歌词候选的源数量：网易云 → 酷狗 → QQ（QQ 歌词此前是死代码）', () => {
   it('候选链里有 QQ 兜底，且抓取分支认得 qqMid', () => {
     const src = read('index.tsx');
@@ -301,6 +311,22 @@ describe('歌词候选的源数量：网易云 → 酷狗 → QQ（QQ 歌词此�
     expect(iface.length, '切片没截到 LyricCandidate，断言会假绿').toBeGreaterThan(60);
     expect(iface).toContain("'netease' | 'kugou' | 'qq'");
     expect(iface).toContain('qqMid?: string;');
+  });
+});
+
+describe('封面留底的入口（后端两个命令早就有，UI 曾经零接线）', () => {
+  it('弹窗里有「旧封面…」列表与装回动作，且装回后刷新预览', () => {
+    mustContain('TrackList.tsx', [
+      'onListCoverBackups',
+      'onRestoreCover',
+      'toggleCoverBackups',
+      'pickCoverBackup',
+      'coverBackupLabel',
+    ]);
+    const src = read('TrackList.tsx');
+    // 装回成功后必须把新路径写进预览，否则就是「点了没反应」
+    expect(src).toContain('if (path) setDraftCoverPath(path);');
+    mustContain('index.tsx', ['music_list_cover_backups', 'music_restore_cover', 'handleRestoreCover']);
   });
 });
 

@@ -2257,6 +2257,36 @@ useEffect(() => {
     );
   }, [coverOverrides]);
 
+  // 封面留底：列出该文件换封面时留下的旧图（新→旧）。读不到就当没有 ——
+  // 「从没换过封面」和「目录读失败」在界面上都该是一句「还没有留底」，不该弹错
+  const handleListCoverBackups = useCallback(async (track: Track): Promise<string[]> => {
+    const fp = track.filePath || track.id;
+    if (!fp) return [];
+    try {
+      const r = await hostApi.invoke('music_list_cover_backups', { filePath: fp });
+      return Array.isArray(r) ? (r as string[]) : [];
+    } catch (e) {
+      console.warn('[Music] 封面留底列表读取失败:', fp, e);
+      return [];
+    }
+  }, []);
+
+  // 装回一张留底 = 一次新的覆盖写入（后端会先把「现在这张」再留一份，所以装错了还能装回来）。
+  // 成功后必须更新 override 表并重扫，封面预览才会立刻跟上 —— 只写盘不刷新就是「点了没反应」。
+  const handleRestoreCover = useCallback(
+    async (track: Track, backupPath: string): Promise<string | null> => {
+      const fp = track.filePath || track.id;
+      if (!fp) return null;
+      const coverPath = await hostApi.invoke<string>('music_restore_cover', { filePath: fp, backupPath });
+      const next = new Map(coverOverrides); next.set(fp, coverPath);
+      setCoverOverrides(next);
+      setPlaylists(prev => applyCoverOverrides(prev, next));
+      setSelectedPlaylist(prev => (prev ? applyCoverOverrides([prev], next)[0] : prev));
+      await handleRescanTrack(track);
+      return coverPath;
+    },
+    [coverOverrides, handleRescanTrack],
+  );
   // 下载单曲：仅网易云源（track.id 形如 netease-{数字}）。失败 toast 提示。
   const handleDownloadTrack = useCallback(async (track: Track) => {
     const m = /^netease-(\d+)$/.exec(track.id);
@@ -2395,7 +2425,14 @@ useEffect(() => {
         // 打分器没跑成（超时/报错）时 score 是 undefined → 按 0 处理 = 不写。
         // 确认面板上人也只看得到分数与三项文本，看不出「同名不同人」，所以宁可不改。
         return top
-          ? { title: top.title, artist: top.artist, album: top.album, score: top.score ?? 0, source: top.source }
+          ? {
+              title: top.title,
+              artist: top.artist,
+              album: top.album,
+              score: top.score ?? 0,
+              source: top.source,
+              coverUrl: top.coverUrl || undefined,
+            }
           : null;
       });
       return { plan, batchId: newClientBatchId() };
@@ -2412,13 +2449,27 @@ useEffect(() => {
           batchId: '',
           written: 0,
           failed: 0,
+          coversChanged: 0,
+          coverFailed: 0,
           skipped: plan.skipped,
           droppedFields: [],
           summary: `没有够格自动写入的曲目（跳过 ${plan.skipped.length} 首）`,
         };
       }
       const raw = await hostApi.invoke('music_batch_edit_tracks', buildBatchArgs(plan, batchId));
-      const report = buildBatchReport(plan, batchId, Array.isArray(raw) ? raw : []);
+      // 高分才连带换封面（MIN_AUTO_COVER_SCORE），且用**同一个批次号**：
+      // 后端换封面前会先把当前那张留一份底并记进同批历史，所以「撤销这批」能把字段和封面一起退回
+      const coverResults: Array<{ ok: boolean; error?: string | null }> = [];
+      for (const it of plan.items) {
+        if (!it.coverUrl) continue;
+        try {
+          await hostApi.invoke('music_set_cover_url', { filePath: it.filePath, url: it.coverUrl, batchId });
+          coverResults.push({ ok: true });
+        } catch (e) {
+          coverResults.push({ ok: false, error: String((e as Error)?.message ?? e) });
+        }
+      }
+      const report = buildBatchReport(plan, batchId, Array.isArray(raw) ? raw : [], coverResults);
       for (const item of plan.items) {
         // handleRescanTrack 只用到 filePath / id 两个键，不必回查整条 Track
         await handleRescanTrack({ filePath: item.filePath, id: item.filePath } as Track);
@@ -3137,6 +3188,8 @@ useEffect(() => {
               onRollbackBatch={handleRollbackBatch}
               onPlanBatchAutoTag={handlePlanBatchAutoTag}
               onCommitBatchAutoTag={handleCommitBatchAutoTag}
+              onListCoverBackups={handleListCoverBackups}
+              onRestoreCover={handleRestoreCover}
               onFetchLyric={handleFetchLyric}
             />
           ) : (

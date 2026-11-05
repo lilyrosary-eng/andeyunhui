@@ -10,6 +10,7 @@ import { PlusIcon, CheckIcon, MoreIcon, MusicIcon, HeartIcon, VideoIcon } from '
 import { T, useLang } from '../../_shared/pluginRuntime';
 import { translateLyrics } from './lyricTranslate';
 import { BATCH_WRITABLE_FIELDS, type BatchPlan, type BatchAutoTagReport } from './batchAutoTag';
+import { coverBackupLabel } from './coverBackup';
 
 /** 字段中文展示名（批量确认面板与「分项自动获取」的来源提示共用） */
 const FIELD_LABEL_CN: Record<string, string> = { title: '标题', artist: '歌手', album: '专辑' };
@@ -143,6 +144,9 @@ interface TrackListProps {
   onPickAndEmbedCover?: (track: Track) => Promise<string | null>;
   onApplyCoverUrl?: (track: Track, coverUrl: string) => Promise<string | null>;
   onResetCoverEmbed?: (track: Track) => Promise<void>;
+  // 封面留底：换封面时后端会把旧封面滚动留 3 份，这里负责「列出来 + 装回去」
+  onListCoverBackups?: (track: Track) => Promise<string[]>;
+  onRestoreCover?: (track: Track, backupPath: string) => Promise<string | null>;
   // 自动获取歌词：检索歌词候选 / 按候选抓取纯歌词文本
   onFetchLyricCandidates?: (track: Track) => Promise<LyricCandidate[]>;  // 「取现成译文」：拿平台已有的官方/人工译文（网易云 tlyric、酷狗 trans）
   onFetchExistingTranslation?: (track: Track) => Promise<{ text: string; label: string; hit: number; total: number } | null>;
@@ -239,6 +243,8 @@ export function TrackList({
   onPickAndEmbedCover,
   onApplyCoverUrl,
   onResetCoverEmbed,
+  onListCoverBackups,
+  onRestoreCover,
   onFetchLyricCandidates,
   onFetchExistingTranslation,
   onFetchLyric,
@@ -602,6 +608,11 @@ export function TrackList({
   // 界面必须把来源说破，否则等于让人凭空信一个值
   const [fieldAutoHint, setFieldAutoHint] = useState<string | null>(null);
   useEffect(() => { setFieldAutoHint(null); }, [editingTrack]);
+  // 留底列表按点开才查（每次开弹窗都查一次是白白的 IPC），换完/装回后收起
+  const [coverBackups, setCoverBackups] = useState<string[] | null>(null);
+  const [coverBackupBusy, setCoverBackupBusy] = useState(false);
+  const [coverBackupNote, setCoverBackupNote] = useState<string | null>(null);
+  useEffect(() => { setCoverBackups(null); setCoverBackupNote(null); }, [editingTrack]);
   // 一键自动获取：拉候选列表
   const fetchCandidates = async () => {
     if (!editingTrack || !onFetchMetaCandidates || candidateLoading) return;
@@ -649,6 +660,45 @@ export function TrackList({
       setFieldAutoBusy(null);
     }
   };
+  // 列出/装回封面留底：装回是一次新的覆盖，所以后端会先把「现在这张」再留一份，
+  // 也就是说装回错了还能再装回去，不会把唯一一张旧封面盖掉。
+  const toggleCoverBackups = async () => {
+    if (!editingTrack || !onListCoverBackups) return;
+    if (coverBackups) { setCoverBackups(null); return; }
+    setCoverBackupBusy(true);
+    setCoverBackupNote(null);
+    try {
+      const list = await onListCoverBackups(editingTrack);
+      if (!list.length) {
+        setCoverBackupNote(T('music.track.noCoverBackups') || '这个文件还没有封面留底（只有换过封面才会留）');
+        setCoverBackups(null);
+      } else {
+        setCoverBackups(list);
+      }
+    } catch (e) {
+      setCoverBackupNote(String((e as Error)?.message ?? e));
+      setCoverBackups(null);
+    } finally {
+      setCoverBackupBusy(false);
+    }
+  };
+
+  const pickCoverBackup = async (backupPath: string) => {
+    if (!editingTrack || !onRestoreCover || coverBackupBusy) return;
+    setCoverBackupBusy(true);
+    try {
+      const path = await onRestoreCover(editingTrack, backupPath);
+      // 装回成功后预览要立刻跟上，否则用户看到的还是上一张 —— 「点了没反应」就是这么来的
+      if (path) setDraftCoverPath(path);
+      setCoverBackups(null);
+      setCoverBackupNote(T('music.track.coverRestored') || '已装回这张旧封面');
+    } catch (e) {
+      setCoverBackupNote(String((e as Error)?.message ?? e));
+    } finally {
+      setCoverBackupBusy(false);
+    }
+  };
+
   // 更换封面：选本地图片 → 内嵌写入 → 本地预览
   const changeCover = async () => {
     if (!editingTrack || !onPickAndEmbedCover) return;
@@ -1098,6 +1148,15 @@ export function TrackList({
         <div className="px-4 py-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0 bg-[var(--element-muted)]/40">
           <div className="text-xs text-neutral-600 dark:text-stone-300 mb-1">
             {(T('music.track.batchWillWrite') || '将写入 {n} 首，跳过 {s} 首 —— 确认前一个文件都没动').replace('{n}', String(batchPlan.plan.items.length)).replace('{s}', String(batchPlan.plan.skipped.length))}
+            {batchPlan.plan.items.filter((i) => i.coverUrl).length > 0 && (
+              <span className="text-neutral-400 dark:text-stone-500">
+                {'  '}
+                {(T('music.track.batchWillCover') || '其中 {c} 首分数够高，连带换封面').replace(
+                  '{c}',
+                  String(batchPlan.plan.items.filter((i) => i.coverUrl).length),
+                )}
+              </span>
+            )}
           </div>
           {batchPlan.plan.items.length > 0 && (
             <ul className="max-h-32 overflow-y-auto flex flex-col gap-0.5">
@@ -1111,6 +1170,7 @@ export function TrackList({
                       .join('  ')}
                     {'  '}
                     {sourceLabel(it.source)} {it.score}
+                    {it.coverUrl ? '  +封面' : ''}
                   </span>
                 </li>
               ))}
@@ -1387,7 +1447,40 @@ export function TrackList({
                       {T('music.track.editResetCover') || '重置封面'}
                     </button>
                   ) : null}
+                  {onListCoverBackups ? (
+                    <button
+                      onClick={toggleCoverBackups}
+                      disabled={coverBackupBusy}
+                      className="px-2.5 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors disabled:opacity-50"
+                    >
+                      {coverBackupBusy
+                        ? (T('music.track.coverBackupLoading') || '读取中…')
+                        : (T('music.track.coverBackupPick') || '旧封面…')}
+                    </button>
+                  ) : null}
                 </div>
+                {coverBackupNote && (
+                  <div className="text-[10px] text-neutral-400 dark:text-stone-500 max-w-[280px] break-words">
+                    {coverBackupNote}
+                  </div>
+                )}
+                {coverBackups && (
+                  <div className="rounded-lg border border-neutral-200 dark:border-stone-600 p-1.5 max-w-[280px]">
+                    <div className="text-[10px] text-neutral-400 dark:text-stone-500 mb-1">
+                      {T('music.track.coverBackupHint') || '换封面时旧图最多留 3 份，点一张装回去'}
+                    </div>
+                    {coverBackups.map((b) => (
+                      <button
+                        key={b}
+                        onClick={() => pickCoverBackup(b)}
+                        title={b}
+                        className="w-full text-left px-1.5 py-1 text-[11px] rounded hover:bg-[var(--element-muted)] transition-colors text-neutral-600 dark:text-stone-300"
+                      >
+                        {coverBackupLabel(b)}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
             <div className="space-y-4">

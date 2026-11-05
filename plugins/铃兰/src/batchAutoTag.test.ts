@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   BATCH_WRITABLE_FIELDS,
+  MIN_AUTO_COVER_SCORE,
   MIN_AUTO_WRITE_SCORE,
   buildBatchArgs,
   buildBatchReport,
@@ -145,5 +146,47 @@ describe('逐首派发', () => {
     expect(spy).toHaveBeenCalledTimes(2);
     expect(plan.items.length).toBe(1);
     expect(plan.skipped.length).toBe(1);
+  });
+});
+
+describe('高分才连带换封面（用户定的默认）', () => {
+  const withCover = (score: number, coverUrl?: string) =>
+    planBatchAutoTag([local({ album: '旧专辑' })], oneShot(top({ album: '叶惠美', score, coverUrl })));
+
+  it('写字段的门槛（4）不足以换封面：5 分才开始动图', async () => {
+    const p4 = await withCover(MIN_AUTO_WRITE_SCORE, 'https://c/1.jpg');
+    expect(p4.items[0].coverUrl).toBeUndefined();
+    const p5 = await withCover(MIN_AUTO_COVER_SCORE, 'https://c/1.jpg');
+    expect(p5.items[0].coverUrl).toBe('https://c/1.jpg');
+    expect(MIN_AUTO_COVER_SCORE).toBeGreaterThan(MIN_AUTO_WRITE_SCORE);
+  });
+
+  it('候选没给封面 / 只给空白 → 不换', async () => {
+    expect((await withCover(6, undefined)).items[0].coverUrl).toBeUndefined();
+    expect((await withCover(6, '   ')).items[0].coverUrl).toBeUndefined();
+  });
+
+  it('字段全都一样时整首跳过，不做「只换封面」这一档', async () => {
+    const plan = await planBatchAutoTag([local()], oneShot(top({ score: 6, coverUrl: 'https://c/1.jpg' })));
+    expect(plan.items).toEqual([]);
+    expect(plan.skipped[0].reason).toContain('无需写');
+  });
+
+  it('报告把封面成功/失败单独计进 summary', () => {
+    const plan = { items: [], skipped: [] };
+    const r = buildBatchReport(plan, 'batch_1', [{ ok: true }], [
+      { ok: true },
+      { ok: false, error: '下载封面失败' },
+    ]);
+    expect(r.coversChanged).toBe(1);
+    expect(r.coverFailed).toBe(1);
+    expect(r.summary).toContain('封面 1/2');
+    expect(r.summary).toContain('下载封面失败');
+  });
+
+  it('没换封面的批次，summary 不出现「封面」字样', () => {
+    const r = buildBatchReport({ items: [], skipped: [] }, 'batch_1', [{ ok: true }]);
+    expect(r.summary).not.toContain('封面');
+    expect(r.coversChanged).toBe(0);
   });
 });
