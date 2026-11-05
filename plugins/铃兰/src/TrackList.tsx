@@ -35,7 +35,7 @@ export interface TrackMetaCandidate {
   album: string;
   durationSecs?: number;
   coverUrl?: string;
-  source: 'netease' | 'kugou';
+  source: 'netease' | 'kugou' | 'qq';
 }
 
 interface TrackListProps {
@@ -81,11 +81,12 @@ export interface LyricCandidate {
   kugouKeyword?: string;
 }
 
-// 候选源中文本地化：netease -> 网易云，kugou -> 酷狗
-export function sourceLabel(source: 'netease' | 'kugou' | string): string {
+// 候选源中文本地化：netease -> 网易云，kugou -> 酷狗，qq -> QQ音乐
+export function sourceLabel(source: 'netease' | 'kugou' | 'qq' | string): string {
   switch (source) {
     case 'netease': return '网易云';
     case 'kugou': return '酷狗';
+    case 'qq': return 'QQ音乐';
     default: return source;
   }
 }

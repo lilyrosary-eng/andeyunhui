@@ -135,6 +135,13 @@ describe('标签编辑弹窗既有用能力', () => {
     mustContain('TrackList.tsx', ['fetchCandidates', 'autoFillField', 'applyCandidate']);
   });
 
+  it('候选链已含 QQ 音乐，且候选经过打分排序', () => {
+    mustContain('index.tsx', ['qqSearchSongs', 'music_rank_tag_candidates']);
+    // 全部候选被打分器淘汰时退回原顺序，不能报「没找到」
+    const src = read('index.tsx');
+    expect(src).toContain('return sorted.length > 0 ? sorted : out;');
+  });
+
   it('宿主侧写回与封面链路仍被调用', () => {
     mustContain('index.tsx', [
       'music_edit_track',

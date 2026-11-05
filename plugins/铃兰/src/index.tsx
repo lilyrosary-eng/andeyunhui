@@ -26,6 +26,7 @@ import KugouStatsView from './KugouStatsView';
 import KugouSettingsPanel from './KugouSettingsPanel';
 import { isLikedPlaylist, likeNeteaseSong, downloadNeteaseTrack, searchSongs as neteaseSearchSongs, neteaseGetLyric, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
 import { searchSongs as kugouSearchSongs, getLyric as kugouGetLyric, getFavorites, addKugouFavorite, removeKugouFavorite, type KugouAuth } from './kugouApi';
+import { qqSearchSongs } from './qqMusicApi';
 import { readKugouAuth } from './kugouAuth';
 import type { LyricLine } from './lyricsSync';
 import type { TrackMetaCandidate, LyricCandidate } from './TrackList';
@@ -2047,6 +2048,44 @@ useEffect(() => {
           });
         }
       } catch (e) { console.warn('[Music] 酷狗检索失败:', e); }
+    }
+    // QQ 音乐作第三兜底（探针实测免签名可用；空结果由客户端内部退避重试，不当「没搜到」）
+    if (out.length === 0) {
+      try {
+        const qq = await qqSearchSongs(kw, 9);
+        for (const s of qq) {
+          out.push({
+            key: 'qq-' + s.mid,
+            title: s.title || '',
+            artist: s.artist || '',
+            album: s.album || '',
+            durationSecs: s.durationSecs || undefined,
+            coverUrl: s.coverUrl || '',
+            source: 'qq',
+          });
+        }
+      } catch (e) { console.warn('[Music] QQ 音乐检索失败:', e); }
+    }
+    // 用宿主打分引擎排序（标题/歌手/专辑三维，「同名不同人」会被记 -2 压到队尾）。
+    // 弹窗里「分项自动获取」直接取第 0 条，所以排序一生效它就自动受益，不必动编辑器。
+    // 注意：打分器会淘汰标题完全不搭的候选；若全部被淘汰则退回原顺序 ——
+    // 明明搜到了却告诉用户「没找到」，是最难排查的那种坏体验。
+    if (out.length > 1) {
+      try {
+        const joinArr = (v: unknown) => (Array.isArray(v) ? v.join(' / ') : String(v ?? ''));
+        const ranked = await hostApi.invoke('music_rank_tag_candidates', {
+          local: {
+            title: joinArr(track.title),
+            artist: joinArr(track.artist),
+            album: joinArr((track as { album?: unknown }).album),
+          },
+          candidates: out.map((c) => ({ name: c.title, artist: c.artist, album: c.album })),
+        });
+        if (Array.isArray(ranked) && ranked.length > 0) {
+          const sorted = ranked.map((r: { index: number }) => out[r.index]).filter(Boolean);
+          return sorted.length > 0 ? sorted : out;
+        }
+      } catch (e) { console.warn('[Music] 候选打分失败，按原顺序返回:', e); }
     }
     return out;
   }, []);
