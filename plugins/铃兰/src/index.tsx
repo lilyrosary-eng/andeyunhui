@@ -27,6 +27,7 @@ import KugouSettingsPanel from './KugouSettingsPanel';
 import { isLikedPlaylist, likeNeteaseSong, downloadNeteaseTrack, searchSongs as neteaseSearchSongs, neteaseGetLyric, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
 import { searchSongs as kugouSearchSongs, getLyric as kugouGetLyric, getFavorites, addKugouFavorite, removeKugouFavorite, type KugouAuth } from './kugouApi';
 import { qqSearchSongs } from './qqMusicApi';
+import { fetchExistingTranslation } from './lyricPlatformTranslation';
 import { readKugouAuth } from './kugouAuth';
 import type { LyricLine } from './lyricsSync';
 import type { TrackMetaCandidate, LyricCandidate } from './TrackList';
@@ -2012,7 +2013,25 @@ useEffect(() => {
     return uploadAndReflectCover(fp, b64, picked.type || 'image/jpeg');
   }, [uploadAndReflectCover]);
 
-  // 自动获取元信息候选（网易云为主，酷狗回退）
+  // 「取现成译文」：先要平台已有的人工/官方译文（网易云 tlyric、酷狗 trans）。
+  // 覆盖率达标才算数；拿不到就返回 null 让界面明说，绝不静默改用机器翻译。
+  const handleFetchExistingTranslation = useCallback(
+    async (track: Track): Promise<{ text: string; label: string; hit: number; total: number } | null> => {
+      const title = (Array.isArray(track.title) ? track.title.join('') : (track.title || '')).trim();
+      const artist = (Array.isArray(track.artist) ? track.artist.join(' ') : (track.artist || '')).trim();
+      const kw = [title, artist].filter(Boolean).join(' ');
+      if (!kw) return null;
+      const got = await fetchExistingTranslation({
+        kw,
+        neteaseSearch: async (k, n) => neteaseSearchSongs(k, n),
+        neteaseLyric: async (id) => neteaseGetLyric(id),
+        kugouSearch: async (k, n) => kugouSearchSongs(k, n),
+        kugouLyric: async (hash) => kugouGetLyric(hash),
+      });
+      return got ? { text: got.text, label: got.sourceLabel, hit: got.hit, total: got.total } : null;
+    },
+    [],
+  );  // 自动获取元信息候选（网易云为主，酷狗回退）
   const handleFetchMetaCandidates = useCallback(async (track: Track): Promise<TrackMetaCandidate[]> => {
     const title = (Array.isArray(track.title) ? track.title.join('') : (track.title || '')).trim();
     const artist = (Array.isArray(track.artist) ? track.artist.join(' ') : (track.artist || '')).trim();
@@ -2990,6 +3009,7 @@ useEffect(() => {
               loadLyricsText={loadLyricsText}
               saveTrackLyrics={saveTrackLyrics}
               onFetchLyricCandidates={handleFetchLyricCandidates}
+              onFetchExistingTranslation={handleFetchExistingTranslation}
               onFetchLyric={handleFetchLyric}
             />
           ) : (

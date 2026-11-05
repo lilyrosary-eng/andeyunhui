@@ -138,3 +138,24 @@ describe('语言下拉（既有语义不回归）', () => {
     expect(loadSourceLang()).toBe('日语');
   });
 });
+
+describe('术语表开关', () => {
+  it('没设过开关时照常下发术语表（老配置无需迁移）', () => {
+    saveTranslateSettings({ glossary: 'heart=心' });
+    expect(translateSettingsFor().glossary).toBe('heart=心');
+  });
+
+  it('关掉时本次不发术语表，但存好的表不被清空', () => {
+    saveTranslateSettings({ glossary: 'heart=心', glossaryOn: false });
+    expect(translateSettingsFor().glossary).toBeUndefined();
+    // 关键：关一下不该把用户攒的术语表抹掉
+    expect(loadTranslateSettings().glossary).toBe('heart=心');
+    saveTranslateSettings({ glossary: 'heart=心', glossaryOn: true });
+    expect(translateSettingsFor().glossary).toBe('heart=心');
+  });
+
+  it('glossaryOn 只是前端开关，不发后端', () => {
+    saveTranslateSettings({ glossary: 'a=b', glossaryOn: false });
+    expect('glossaryOn' in translateSettingsFor()).toBe(false);
+  });
+});

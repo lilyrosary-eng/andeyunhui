@@ -87,6 +87,18 @@ describe('歌词编辑器（与标签编辑同居 TrackList.tsx，最易被误�
     mustContain('TrackList.tsx', ['fetchLyricCandidates', 'autoFetch']);
   });
 
+  it('两颗翻译按钮分工明确：取现成译文不许偷偷改用机器翻译', () => {
+    const src = read('TrackList.tsx');
+    const start = src.indexOf('const runFetchExistingTranslation');
+    const fn = src.slice(start, src.indexOf('const fetchLyricCandidates', start));
+    expect(start).toBeGreaterThan(-1);
+    expect(fn.length, '切片没截到函数体，断言会假绿').toBeGreaterThan(20);
+    expect(fn).toContain('onFetchExistingTranslation');
+    expect(fn, '这颗按钮只许取平台现成译文').not.toContain('translateLyrics');
+    // 拿不到时必须说破，不能静默空着
+    expect(fn).toContain('noExistingTranslation');
+  });
+
   it('翻译已接到宿主服务，且节点可选（不是"开发中"空位）', () => {
     mustContain('TrackList.tsx', [
       'runAiTranslate',

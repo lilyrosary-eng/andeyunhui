@@ -118,6 +118,9 @@ export interface TranslateSettings {
   profileId?: string;
   /** 术语表，每行 `原词=译法`；只对 AI 节点生效（用了别的节点会显式提示） */
   glossary?: string;
+  /** 术语表开关。false = 本次不下发术语表（后端就不注入），
+   *  但用户存好的表原样留在设置里，不会因为关掉而丢词条。缺省视为启用。 */
+  glossaryOn?: boolean;
   cache?: boolean;
   /** 测试模式：强制单节点、绕过缓存、返回 via/stage/detail 诊断 */
   probe?: boolean;
@@ -164,13 +167,16 @@ export function saveTranslateSettings(s: TranslateSettings): void {
 
 /** 本次调用要下发的设置：把「当前选中的节点」并进去，并可强制单节点测试。 */
 export function translateSettingsFor(node?: string, probe = false): TranslateSettings {
-  const s = loadTranslateSettings();
-  const out: TranslateSettings = { ...s };
+  // glossaryOn 只是前端开关，不发后端（后端契约里没有这个字段）
+  const { glossaryOn, ...stored } = loadTranslateSettings();
+  const out: TranslateSettings = { ...stored };
   if (node !== undefined) out.node = node;
   if (probe) {
     out.probe = true;
     out.cache = false; // 测试必须真发请求，不能被缓存命中掩盖
   }
+  // 关掉 = 本次不带术语表；开着或从没设过 = 照常带上（老配置无需迁移）
+  if (glossaryOn === false) out.glossary = undefined;
   return out;
 }
 

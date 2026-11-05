@@ -172,10 +172,22 @@ export function TranslatePanel({ t }: { t: TFunc }) {
 
           {/* 术语表 */}
           <div>
-            <label className={labelCls}>{t('modelSettings.translate.glossary')}</label>
+            <label className={labelCls}>
+              {/* 开关关掉 = 本次翻译不注入术语表（已存的表内容不清空）。
+                  不新增 i18n 键：这 7 个 locale 文件此刻正被另一条线改，且勾选框本身已表意。 */}
+              <span className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={cfg.glossaryOn !== false}
+                  onChange={(e) => save({ glossaryOn: e.target.checked })}
+                />
+                {t('modelSettings.translate.glossary')}
+              </span>
+            </label>
             <textarea
-              className={`${inputCls} min-h-[56px] resize-y font-mono`}
+              className={`${inputCls} min-h-[56px] resize-y font-mono disabled:opacity-50`}
               value={cfg.glossary ?? ''}
+              disabled={cfg.glossaryOn === false}
               onChange={(e) => save({ glossary: e.target.value })}
             />
             <p className="text-[10px] text-neutral-400 dark:text-stone-500 mt-1">

@@ -66,7 +66,8 @@ interface TrackListProps {
   onApplyCoverUrl?: (track: Track, coverUrl: string) => Promise<string | null>;
   onResetCoverEmbed?: (track: Track) => Promise<void>;
   // 自动获取歌词：检索歌词候选 / 按候选抓取纯歌词文本
-  onFetchLyricCandidates?: (track: Track) => Promise<LyricCandidate[]>;
+  onFetchLyricCandidates?: (track: Track) => Promise<LyricCandidate[]>;  // 「取现成译文」：拿平台已有的官方/人工译文（网易云 tlyric、酷狗 trans）
+  onFetchExistingTranslation?: (track: Track) => Promise<{ text: string; label: string; hit: number; total: number } | null>;
   onFetchLyric?: (c: LyricCandidate) => Promise<string>;
 }
 
@@ -114,6 +115,7 @@ export function TrackList({
   onApplyCoverUrl,
   onResetCoverEmbed,
   onFetchLyricCandidates,
+  onFetchExistingTranslation,
   onFetchLyric,
 }: TrackListProps) {
   useLang();
@@ -159,6 +161,8 @@ export function TrackList({
   const [lyricsError, setLyricsError] = useState<string | null>(null);
   // AI 翻译：进行中标志 + 过程如实回显（实际节点 / 源语言 / 分段数 / 全部 notices，不截断）
   const [lyricsTranslating, setLyricsTranslating] = useState(false);
+  // 「取现成译文」进行中（与「翻译」分开，两颗按钮互不阻塞）
+  const [existingBusy, setExistingBusy] = useState(false);
   const [lyricsTranslateNotice, setLyricsTranslateNotice] = useState<string | null>(null);
 
   const currentTrack = musicPlayer.getCurrentTrack();
@@ -499,6 +503,30 @@ export function TrackList({
       setLyricsTranslateNotice(String((e as Error)?.message ?? e));
     } finally {
       setLyricsTranslating(false);
+    }
+  };
+
+  // 取现成译文：平台已有人工/官方译文就直接用 —— 比机器翻译更准，也省一次请求。
+  // 拿不到时**明说拿不到**，不偷偷改用机器翻译顶上去（那是另一颗按钮的职责）。
+  const runFetchExistingTranslation = async () => {
+    if (!lyricsTrack || !onFetchExistingTranslation || lyricsLoading || existingBusy) return;
+    enterLyricsReview();
+    setLyricsTranslateNotice(null);
+    setExistingBusy(true);
+    try {
+      const got = await onFetchExistingTranslation(lyricsTrack);
+      if (got && got.text) {
+        setLyricsDraft(got.text);
+        setLyricsTranslateNotice(
+          `${T('music.lyrics.existingFound') || '现成译文'}：${got.label} ${got.hit}/${got.total} ${T('music.lyrics.existingLines') || '行已译'}`,
+        );
+      } else {
+        setLyricsTranslateNotice(T('music.lyrics.noExistingTranslation') || '平台没有现成译文，可改用「翻译」');
+      }
+    } catch (e) {
+      setLyricsTranslateNotice(String((e as Error)?.message ?? e));
+    } finally {
+      setExistingBusy(false);
     }
   };
 
@@ -1220,6 +1248,14 @@ export function TrackList({
                 className="px-3 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors disabled:opacity-50"
               >
                 {lyricCandidateLoading ? (T('music.lyrics.autoFetching') || '检索中…') : (T('music.lyrics.autoFetch') || '自动获取')}
+              </button>
+              <button
+                onClick={runFetchExistingTranslation}
+                disabled={existingBusy || lyricsLoading}
+                title={T('music.lyrics.existingHint') || '优先取平台已有的人工译文（网易云/酷狗）；没有就直说，不会改用机器翻译'}
+                className="px-3 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors disabled:opacity-50"
+              >
+                {existingBusy ? (T('music.lyrics.existingFetching') || '取译中…') : (T('music.lyrics.existingFetch') || '取现成译文')}
               </button>
               <button
                 onClick={runAiTranslate}
