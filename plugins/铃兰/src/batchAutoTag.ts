@@ -40,8 +40,8 @@ export interface TopCandidate {
   title: string;
   artist: string;
   album: string;
-  /** 宿主打分引擎给出的分（0..6，可能为负） */
-  score: number;
+  /** 宿主打分引擎给出的分（0..6，可能为负）；`undefined` = 这条候选**压根没被打过分** */
+  score?: number;
   /** 来源标识，仅用于报告里说清「这条是哪来的」 */
   source?: string;
   /** 候选带的封面远程地址（有且分数够高才会连带换） */
@@ -97,6 +97,16 @@ export async function planBatchAutoTag(
     const top = await resolveTop(t);
     if (!top) {
       skipped.push({ filePath: t.filePath, title: label, reason: '没检索到候选，或候选都被打分器淘汰' });
+      continue;
+    }
+    if (top.score === undefined) {
+      // 没打过分 ≠ 打了 0 分：本地标题是垃圾（文件名与歌名不符）时候选会被打分器
+      // 整批淘汰并退回原顺序，此时说「分数不够」是把我们的没数据甩锅给用户的内容
+      skipped.push({
+        filePath: t.filePath,
+        title: label,
+        reason: '这条候选没被打过分（多半是文件里的标题与歌名对不上），自动改不敢下手',
+      });
       continue;
     }
     if (top.score < MIN_AUTO_WRITE_SCORE) {

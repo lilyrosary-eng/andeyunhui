@@ -190,3 +190,20 @@ describe('高分才连带换封面（用户定的默认）', () => {
     expect(r.coversChanged).toBe(0);
   });
 });
+
+describe('没打过分 ≠ 打了低分', () => {
+  it('score 缺失 → 跳过原因说「没被打过分」，不许冒充「低于门槛」', async () => {
+    const plan = await planBatchAutoTag(
+      [local()],
+      oneShot({ title: '晴天', artist: '周杰伦', album: '叶惠美', source: 'netease' }),
+    );
+    expect(plan.items).toEqual([]);
+    expect(plan.skipped[0].reason).toContain('没被打过分');
+    expect(plan.skipped[0].reason).not.toContain('门槛');
+  });
+
+  it('0 分仍然算「低于门槛」（是真打过分、确实不搭）', async () => {
+    const plan = await planBatchAutoTag([local()], oneShot(top({ score: 0 })));
+    expect(plan.skipped[0].reason).toContain('门槛');
+  });
+});

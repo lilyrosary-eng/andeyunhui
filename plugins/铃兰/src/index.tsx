@@ -2111,7 +2111,11 @@ useEffect(() => {
     // 弹窗里「分项自动获取」直接取第 0 条，所以排序一生效它就自动受益，不必动编辑器。
     // 注意：打分器会淘汰标题完全不搭的候选；若全部被淘汰则退回原顺序 ——
     // 明明搜到了却告诉用户「没找到」，是最难排查的那种坏体验。
-    if (out.length > 1) {
+    //
+    // 条件必须是 `> 0` 而不是 `> 1`：批量写入拿 score 当门槛，而只检索到一条候选
+    // （精确歌名+歌手常见这样就一条）在过去不打分 → score 缺失按 0 → 每首都"低于门槛"被跳过，
+    // 用户看到的是「批量一个都不改」。分数对单条候选同样有意义，没理由不算。
+    if (out.length > 0) {
       try {
         const joinArr = (v: unknown) => (Array.isArray(v) ? v.join(' / ') : String(v ?? ''));
         const ranked = await withTimeout(hostApi.invoke('music_rank_tag_candidates', {
@@ -2434,14 +2438,15 @@ useEffect(() => {
         if (!t) return null;
         const list = await handleFetchMetaCandidates(t);
         const top = list[0];
-        // 打分器没跑成（超时/报错）时 score 是 undefined → 按 0 处理 = 不写。
-        // 确认面板上人也只看得到分数与三项文本，看不出「同名不同人」，所以宁可不改。
+        // 分数原样带过去：`undefined` 表示这条压根没被打过分（本地标题是垃圾、或打分器
+        // 没跑成），批量把它算成「不敢下手」而不是「0 分不配」——两种跳过原因不一样，
+        // 给用户看的话更不能混成一句
         return top
           ? {
               title: top.title,
               artist: top.artist,
               album: top.album,
-              score: top.score ?? 0,
+              score: top.score,
               source: top.source,
               coverUrl: top.coverUrl || undefined,
             }

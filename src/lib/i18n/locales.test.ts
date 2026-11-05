@@ -103,3 +103,60 @@ describe('i18n key 完整性', () => {
     });
   }
 });
+
+/**
+ * 插件里 `T('key')` 的兜底是个陷阱：宿主 `translate()` 在 key 完全不存在时
+ * **返回 key 本身**（真值），所以 `T(key) || '中文兜底'` 永远不会走兜底分支，
+ * 界面直接显示 `music.track.tagHistoryEntry` 这种原始 key。
+ * 2026-11-05 实机截图就是这么抓到的（音乐模块 65 个 key 泄漏）。
+ * 这个卡口把「代码里用到的 key 必须在源语言里存在」变成硬约束。
+ */
+const PLUGIN_SRC = import.meta.glob('../../../plugins/**/*.{ts,tsx}', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+}) as Record<string, string>;
+
+const ALL_LOCALES: Array<[string, Record<string, string>]> = [
+  ['zh-CN', zhCN], ['zh-TW', zhTW], ['en-US', enUS], ['ja-JP', jaJP],
+  ['ko-KR', koKR], ['de-DE', deDE], ['fr-FR', frFR],
+];
+
+describe('插件用到的 i18n key 必须真的存在（否则界面显示原始 key）', () => {
+  const KEY_RE = /\bT\(\s*'([a-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+)'\s*[,)]/g;
+
+  it('glob 命中音乐模块源码（空 glob 会让下面的断言假绿）', () => {
+    const files = Object.keys(PLUGIN_SRC).filter((k) => k.includes('铃兰/src/'));
+    expect(files.length, '没读到音乐模块源码').toBeGreaterThan(8);
+  });
+
+  it('音乐模块每个 T(key) 都在 zh-CN 里', () => {
+    const missing: string[] = [];
+    for (const [file, src] of Object.entries(PLUGIN_SRC)) {
+      if (!file.includes('铃兰/src/')) continue;
+      for (const m of src.matchAll(KEY_RE)) {
+        if (!(m[1] in zhCN)) missing.push(`${m[1]} ← ${file.split('/').pop()}`);
+      }
+    }
+    expect(
+      [...new Set(missing)].sort(),
+      '这些 key 只在代码里写了中文兜底、没进 locale —— 兜底永远不会生效，界面会显示原始 key',
+    ).toEqual([]);
+  });
+
+  it('带 {占位符} 的文案，7 种语言都必须带同一组占位符', () => {
+    const ph = (s: string) => (s.match(/\{\w+\}/g) || []).sort().join(',');
+    const bad: string[] = [];
+    for (const key of Object.keys(zhCN)) {
+      const want = ph(zhCN[key]);
+      if (!want) continue;
+      for (const [name, dict] of ALL_LOCALES) {
+        if (name === 'zh-CN') continue;
+        const value = dict[key];
+        if (value === undefined) continue; // 存量缺口由上面的基线卡口管
+        if (ph(value) !== want) bad.push(`${key} @ ${name}: 期望 ${want}，实际 ${ph(value) || '（无）'}`);
+      }
+    }
+    expect(bad, '占位符丢了会显示成字面 {n}').toEqual([]);
+  });
+});

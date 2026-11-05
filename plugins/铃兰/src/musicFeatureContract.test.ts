@@ -254,7 +254,7 @@ describe('批量「自动匹配并写入」：门槛与命令接线', () => {
     const src = read('index.tsx');
     expect(src).toContain('planBatchAutoTag');
     expect(src).toContain('music_batch_edit_tracks');
-    expect(src).toContain('score: top.score ?? 0');
+    expect(src).toContain('score: top.score,');
   });
 
   it('入口是「先看计划再落盘」两段，且写完给撤销入口（整批一个批次号）', () => {
@@ -293,6 +293,14 @@ describe('批量写入的连带换封面（用户定的默认：只有高分才�
     expect(src).toContain("await hostApi.invoke('music_set_cover_url', { filePath: it.filePath, url: it.coverUrl, batchId })");
     // 确认面板上必须看得出哪几首会动图
     expect(read('TrackList.tsx')).toContain('+封面');
+  });
+
+  it('每条候选都必须拿到分数（只检索到 1 条时也要）—— 批量的门槛靠 score', () => {
+    const src = read('index.tsx');
+    // 过去写成 `out.length > 1`：精确检索常常就返回一条，于是不打分 →
+    // 批量按 score≥门槛判断时把它当 0 分跳过，界面表现是「批量一首都不改」
+    expect(src).toContain('if (out.length > 0) {');
+    expect(src).not.toContain('out.length > 1');
   });
 });
 

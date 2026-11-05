@@ -1515,7 +1515,7 @@ export function TrackList({
         >
           <div className="flex items-start gap-4">
           <div
-            className="w-full max-w-md rounded-xl bg-white dark:bg-stone-800 shadow-2xl p-6"
+            className="w-full max-w-md max-h-[86vh] flex flex-col overflow-hidden rounded-xl bg-white dark:bg-stone-800 shadow-2xl p-6"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-5">
@@ -1608,7 +1608,11 @@ export function TrackList({
                 )}
               </div>
             </div>
-            <div className="space-y-4">
+            {/* 字段区是唯一的滚动容器：13 个字段 + 3 个分组标题早就高过一屏，
+                以前这里既没 max-height 也没 overflow-y-auto，结果上下两头都被裁掉
+                —— 标题看不见、确定/取消也点不到。flex-1 + min-h-0 是让 flex 子项
+                真的能滚起来的最小配方（少了 min-h-0，flex 会把高度撑回内容高）。 */}
+            <div className="flex-1 min-h-0 overflow-y-auto space-y-4 pr-1">
               <GroupTitle text={T('music.track.groupBasic') || '基本信息'} />
               <div>
                 <div className="flex items-center justify-between mb-1.5">
@@ -1771,7 +1775,7 @@ export function TrackList({
                 </div>
               </div>
             </div>
-            <div className="mt-6 flex justify-end gap-2">
+            <div className="mt-4 shrink-0 flex justify-end gap-2">
               <button
                 onClick={() => setEditingTrack(null)}
                 className="px-4 py-2 text-sm rounded-lg text-neutral-600 dark:text-stone-300 hover:bg-neutral-100 dark:hover:bg-stone-700 transition-colors"
