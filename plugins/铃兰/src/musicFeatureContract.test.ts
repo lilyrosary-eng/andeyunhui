@@ -236,6 +236,18 @@ describe('歌词浮窗与播放链路未被牵连', () => {
   });
 });
 
+describe('术语表「整句回写」：关掉表时翻译要能学，且只学对得上的', () => {
+  it('配对逻辑在 lyricTranslate，写入在 TrackList，两边都还得在', () => {
+    mustContain('lyricTranslate.ts', ['sourceTargetPairs', 'pairs:']);
+    mustContain('TrackList.tsx', ['learnGlossaryPairs', 'isGlossaryOff', 'res.pairs']);
+  });
+
+  it('未对齐时不给对子 —— 错轴译文进表比不进表坏得多', () => {
+    const src = read('lyricTranslate.ts');
+    expect(src).toContain('if (src.length === 0 || src.length !== dst.length) return [];');
+  });
+});
+
 describe('插件权限声明不能被顺手删', () => {
   it('歌词与标签写回相关命令仍在 manifest 内', () => {
     const m = readManifest();

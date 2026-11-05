@@ -7,9 +7,15 @@
 // 显示 stage / 原始错误 / 实际端点 / 每一次兜底。失败不做分类改写、不做截断，
 // 否则就是把「让用户猜」换个地方继续。
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Languages, ChevronDown, Loader2, RotateCcw } from 'lucide-react';
 import { api } from '@/lib/api';
+import {
+  listAutoGlossary,
+  deleteAutoGlossary,
+  clearAutoGlossary,
+  type GlossaryPair,
+} from '@/lib/translateGlossary';
 import {
   TRANSLATE_NODES,
   DEFAULT_TRANSLATE_CHAIN,
@@ -37,6 +43,11 @@ export function TranslatePanel({ t }: { t: TFunc }) {
   const [cfg, setCfg] = useState<TranslateSettings>(() => loadTranslateSettings());
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState<{ node: string; out: TestOut } | null>(null);
+  // 每次展开都重读：歌词翻译在插件里写这个键，两边不在同一个组件树上
+  const [autoEntries, setAutoEntries] = useState<GlossaryPair[]>([]);
+  useEffect(() => {
+    if (open) setAutoEntries(listAutoGlossary());
+  }, [open]);
 
   const save = (patch: Partial<TranslateSettings>) => {
     const next = { ...cfg, ...patch };
@@ -193,6 +204,52 @@ export function TranslatePanel({ t }: { t: TFunc }) {
             <p className="text-[10px] text-neutral-400 dark:text-stone-500 mt-1">
               {t('modelSettings.translate.glossaryHint')}
             </p>
+            {/* 开关关掉时翻出来的整句会存到这里（不是上面那个框）：手写的词条和机器
+                学来的混在一格，用户就没法判断哪行是自己定的、也删不干净。
+                同样不新增 i18n 键，理由与上面的勾选框一致。 */}
+            {autoEntries.length > 0 && (
+              <div className="mt-1.5 rounded-lg border border-neutral-200 dark:border-stone-700 px-2 py-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-neutral-500 dark:text-stone-400">
+                    自动学习 {autoEntries.length} 条（开着表时一起下发）
+                  </span>
+                  <button
+                    type="button"
+                    className="text-[10px] text-neutral-400 hover:text-red-500 dark:text-stone-500"
+                    onClick={() => {
+                      clearAutoGlossary();
+                      setAutoEntries([]);
+                    }}
+                  >
+                    清空
+                  </button>
+                </div>
+                <ul className="mt-1 max-h-24 overflow-y-auto flex flex-col gap-0.5">
+                  {autoEntries
+                    .slice(-20)
+                    .reverse()
+                    .map((p) => (
+                      <li key={p.src} className="flex items-start gap-1 text-[10px] font-mono">
+                        <span className="flex-1 min-w-0 break-all text-neutral-600 dark:text-stone-300">
+                          {p.src}
+                          <span className="text-neutral-400"> = </span>
+                          {p.dst}
+                        </span>
+                        <button
+                          type="button"
+                          className="text-neutral-400 hover:text-red-500 shrink-0"
+                          onClick={() => {
+                            deleteAutoGlossary(p.src);
+                            setAutoEntries(listAutoGlossary());
+                          }}
+                        >
+                          ×
+                        </button>
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            )}
           </div>
 
           {/* 节点清单 + 逐节点测试 */}

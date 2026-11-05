@@ -9,7 +9,8 @@ import { formatTime } from '../../_shared/utils';
 import { PlusIcon, CheckIcon, MoreIcon, MusicIcon, HeartIcon, VideoIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 import { translateLyrics } from './lyricTranslate';
-import { loadTargetLang, TARGET_LANGS, TRANSLATE_NODES, translateSettingsFor } from '@/lib/translateLanguages';
+import { loadTargetLang, TARGET_LANGS, TRANSLATE_NODES, translateSettingsFor, loadTranslateSettings } from '@/lib/translateLanguages';
+import { isGlossaryOff, learnGlossaryPairs } from '@/lib/translateGlossary';
 
 interface Track {
   id: string;
@@ -641,6 +642,7 @@ export function TrackList({
     }
     setLyricsTranslating(true);
     try {
+      const storedSettings = loadTranslateSettings();
       const res = await translateLyrics(lyricsDraft, {
         invoke: hostApi?.invoke ? (cmd, args) => hostApi.invoke(cmd, args) : undefined,
         targetLang: loadTargetLang(),
@@ -648,7 +650,21 @@ export function TrackList({
         settings: translateSettingsFor(translateNode || undefined),
       });
       setLyricsDraft(res.text);
-      setLyricsTranslateNotice(res.meta || null);
+      // 只有「关掉术语表翻」才学：开着翻时译文本来就被表约束，记回去等于
+      // 拿自己的输出当下一次的标准，越用越死。学的东西存在另一个键里，
+      // 不写进用户手写的词条框（那是人能改的东西，机器不该往里塞）。
+      let learnedCount = 0;
+      if (isGlossaryOff(storedSettings) && res.pairs.length) learnedCount = learnGlossaryPairs(res.pairs);
+      setLyricsTranslateNotice(
+        [
+          res.meta,
+          learnedCount
+            ? `${T('music.lyrics.glossaryLearned') || '已把'} ${learnedCount} ${T('music.lyrics.glossaryLearnedUnit') || '句记入术语表（下次开着表就会用到）'}`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' | ') || null,
+      );
     } catch (e) {
       // 失败时「修改前」内容保持原样，也不假装成功
       setLyricsTranslateNotice(String((e as Error)?.message ?? e));

@@ -4,6 +4,7 @@ import {
   describeOutcome,
   parseLrc,
   rejoinTranslated,
+  sourceTargetPairs,
   translateLyrics,
 } from './lyricTranslate';
 
@@ -153,5 +154,41 @@ describe('describeOutcome', () => {
   });
   it('缓存命中标出来', () => {
     expect(describeOutcome({ node: 'bing', fromCache: true }, true)).toContain('缓存命中');
+  });
+});
+
+describe('sourceTargetPairs（术语表「整句回写」的数据源）', () => {
+  it('行数对得上才给逐句对；对不上给空数组，不能把错位句子记进表', () => {
+    const lines = parseLrc(LRC);
+    const n = buildTranslatablePayload(lines).split('\n').length;
+    const ok = sourceTargetPairs(lines, Array.from({ length: n }, (_, i) => `T${i}`).join('\n'));
+    expect(ok.length).toBe(n);
+    expect(ok.every((p) => p.src && p.dst)).toBe(true);
+    expect(sourceTargetPairs(lines, '只有一行')).toEqual([]);
+  });
+
+  it('元信息头与空行不参与成对（它们本来就没被翻译）', () => {
+    const lines = parseLrc('[ti:晴天]\n[00:01.00]A\n\n[00:02.00]B');
+    expect(sourceTargetPairs(lines, 'A2\nB2')).toEqual([
+      { src: 'A', dst: 'A2' },
+      { src: 'B', dst: 'B2' },
+    ]);
+  });
+
+  it('translateLyrics 在未对齐时 pairs 为空', async () => {
+    const invoke = vi.fn(async () => ({ text: 'one\ntwo\nthree', node: 'bing' }));
+    const r = await translateLyrics('[00:01.00]A\n[00:02.00]B', { invoke });
+    expect(r.aligned).toBe(false);
+    expect(r.pairs).toEqual([]);
+  });
+
+  it('translateLyrics 在对齐时给出与正文行数的对子', async () => {
+    const invoke = vi.fn(async () => ({ text: 'A2\nB2', node: 'bing' }));
+    const r = await translateLyrics('[00:01.00]A\n[00:02.00]B', { invoke });
+    expect(r.aligned).toBe(true);
+    expect(r.pairs).toEqual([
+      { src: 'A', dst: 'A2' },
+      { src: 'B', dst: 'B2' },
+    ]);
   });
 });

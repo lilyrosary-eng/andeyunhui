@@ -80,6 +80,23 @@ export function rejoinTranslated(lines: LrcLine[], translated: string): RejoinRe
   return { text: out.join('\n'), aligned: true };
 }
 
+/**
+ * 逐句「原文 → 译文」。只在行数对得上时才给，行数对不上返回空数组 ——
+ * 把错位的句子记进术语表，之后每一首都跟着错，比不记更糟。
+ */
+export function sourceTargetPairs(
+  lines: LrcLine[],
+  translated: string,
+): Array<{ src: string; dst: string }> {
+  const src = lines.filter((l) => l.meta === null && l.text !== '').map((l) => l.text);
+  const dst = translated
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter((s) => s !== '');
+  if (src.length === 0 || src.length !== dst.length) return [];
+  return src.map((s, i) => ({ src: s, dst: dst[i] }));
+}
+
 export interface TranslateOutcomeLike {
   text?: string;
   node?: string;
@@ -120,6 +137,8 @@ export interface TranslateLyricsResult {
   meta: string;
   /** 译文与原文一致：多半是本来就已是目标语言，界面必须明说，别让按钮看起来"没效果" */
   unchanged: boolean;
+  /** 对齐时才有的逐句原文→译文，供「术语表自动学习」记词条；不对齐是空数组 */
+  pairs: Array<{ src: string; dst: string }>;
 }
 
 export async function translateLyrics(
@@ -149,5 +168,11 @@ export async function translateLyrics(
   if (unchanged) {
     metaBits.push('译文与原文一致：多半原文已是目标语言，或该节点未实际翻译');
   }
-  return { text: joined.text, aligned: joined.aligned, meta: metaBits.join(' | '), unchanged };
+  return {
+    text: joined.text,
+    aligned: joined.aligned,
+    meta: metaBits.join(' | '),
+    unchanged,
+    pairs: joined.aligned ? sourceTargetPairs(lines, outcome.text || '') : [],
+  };
 }

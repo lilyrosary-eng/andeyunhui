@@ -1,6 +1,8 @@
 // 中转站翻译页（主站 / 浮窗）共用的语言下拉数据 + 上次选择记忆
 // 2026-11-04 起还承载「多节点翻译」的节点表与设置（见 Rust translate_service.rs）。
 
+import { mergeGlossary } from './translateGlossary';
+
 export interface TranslateLang {
   /** 传给后端的语言描述（如「中文」「英语」），自动识别用 "auto" */
   code: string;
@@ -175,8 +177,9 @@ export function translateSettingsFor(node?: string, probe = false): TranslateSet
     out.probe = true;
     out.cache = false; // 测试必须真发请求，不能被缓存命中掩盖
   }
-  // 关掉 = 本次不带术语表；开着或从没设过 = 照常带上（老配置无需迁移）
+  // 关掉 = 本次不带术语表（那是「学词条」的一条路）；开着 = 手写的加上学到的整句
   if (glossaryOn === false) out.glossary = undefined;
+  else out.glossary = mergeGlossary(out.glossary);
   return out;
 }
 
