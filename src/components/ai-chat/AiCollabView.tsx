@@ -25,6 +25,9 @@ interface AiCollabViewProps {
   onCreateDeepSeekRoom?: () => void;
   /** 新建 MCP 房间：任务只入队，交给外部 harness 认领 */
   onCreateMcpRoom?: () => void;
+  /** 新建 stream-json 房间（需要先配置 stream-json.json） */
+  onCreateStreamJsonRoom?: () => void;
+  streamJsonAvailable?: boolean;
   deepseekAvailable?: boolean;
   dshSessions: DshSessionSummary[];
   dshSessionsLoading: boolean;
@@ -363,6 +366,8 @@ export const AiCollabView = memo(function AiCollabView({
   onCreateRoom,
   onCreateDeepSeekRoom,
   onCreateMcpRoom,
+  onCreateStreamJsonRoom,
+  streamJsonAvailable,
   deepseekAvailable,
   dshSessions,
   dshSessionsLoading,
@@ -422,6 +427,15 @@ export const AiCollabView = memo(function AiCollabView({
                 className="btn-press rounded-full border border-sky-500/40 bg-sky-500/10 px-5 py-2 text-sm font-medium text-sky-700 hover:bg-sky-500/20 dark:text-sky-300"
               >
                 MCP 协作房间
+              </button>
+            )}
+            {streamJsonAvailable && onCreateStreamJsonRoom && (
+              <button
+                onClick={onCreateStreamJsonRoom}
+                title="先编辑 ai-collab/stream-json.json 指定 CLI 命令"
+                className="btn-press rounded-full border border-neutral-300 px-5 py-2 text-sm font-medium text-neutral-600 hover:bg-neutral-100 dark:border-stone-600 dark:text-stone-300 dark:hover:bg-stone-800"
+              >
+                stream-json 房间
               </button>
             )}
             {deepseekAvailable && (

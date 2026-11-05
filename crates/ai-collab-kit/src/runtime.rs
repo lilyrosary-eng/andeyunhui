@@ -478,6 +478,138 @@ fn emit_status(
     Ok(())
 }
 
+/// stream-json 执行器：通用 CLI，一次任务一个进程，stdout 按行解析 JSON 文本。
+async fn run_stream_json_assignment(
+    app: AppHandle,
+    base: PathBuf,
+    room: Room,
+    assignment: Assignment,
+    config: crate::harness::StreamJsonConfig,
+) {
+    if is_cancelled(&assignment.id) {
+        return;
+    }
+    let name = agent_name(&room, &assignment.assignee_id);
+    let _ = emit_status(
+        &app,
+        &base,
+        &room,
+        &assignment,
+        AssignmentStatus::Running,
+        "assignment.running",
+        Some(format!(
+            "{name} 正在调用 stream-json harness（{}）",
+            config.command
+        )),
+    );
+    let _ = emit_event(
+        &app,
+        &base,
+        &room.id,
+        "assignment.progress",
+        Some(assignment.assignee_id.clone()),
+        Some(assignment.id.clone()),
+        Some("等待 harness 输出…".to_string()),
+        None,
+        None,
+    );
+
+    let workspace = room
+        .workspace
+        .as_ref()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.exists())
+        .unwrap_or_else(|| base.join("workspaces").join(&room.id));
+    let prompt = build_prompt(&base, &room, &assignment, true);
+
+    let app_cb = app.clone();
+    let base_cb = base.clone();
+    let room_cb = room.clone();
+    let assignment_cb = assignment.clone();
+    let mut last_progress = std::time::Instant::now();
+    let on_text = move |text: &str| {
+        // 与 ACP 一样的节流：CLI 可能按字符流式输出，事件太密会拖慢镜像写入。
+        if last_progress.elapsed() < Duration::from_millis(300) {
+            return;
+        }
+        last_progress = std::time::Instant::now();
+        let clipped = clip_text(text.trim(), 300);
+        if clipped.is_empty() {
+            return;
+        }
+        let _ = emit_event(
+            &app_cb,
+            &base_cb,
+            &room_cb.id,
+            "assignment.progress",
+            Some(assignment_cb.assignee_id.clone()),
+            Some(assignment_cb.id.clone()),
+            Some(clipped),
+            None,
+            None,
+        );
+    };
+
+    let outcome = crate::harness::run_stream_json_turn(
+        &config,
+        &workspace,
+        &prompt,
+        &assignment.id,
+        on_text,
+    )
+    .await;
+
+    // 取消事件已由 cancel_assignment 发过，这里不要再补 failed/completed。
+    if is_cancelled(&assignment.id) {
+        return;
+    }
+    match outcome {
+        Ok(outcome) if outcome.cancelled => {}
+        Ok(outcome) => {
+            if outcome.exit_code != Some(0) {
+                let reason = if outcome.text.trim().is_empty() {
+                    outcome.stderr.clone()
+                } else {
+                    outcome.text.clone()
+                };
+                fail_assignment(
+                    &app,
+                    &base,
+                    &room,
+                    &assignment,
+                    &format!(
+                        "stream-json 退出码 {:?}: {}",
+                        outcome.exit_code,
+                        clip_text(&reason, 600)
+                    ),
+                );
+                return;
+            }
+            let text = if outcome.text.trim().is_empty() {
+                format!(
+                    "（stream-json 未返回文本）\n{}",
+                    clip_text(&outcome.stderr, 400)
+                )
+            } else {
+                outcome.text
+            };
+            complete_assignment(
+                &app,
+                &base,
+                &room,
+                &assignment,
+                &text,
+                Some(json!({
+                    "transport": "stream-json",
+                    "exitCode": outcome.exit_code,
+                    "stderr": clip_text(&outcome.stderr, 300),
+                })),
+            );
+        }
+        Err(error) => fail_assignment(&app, &base, &room, &assignment, &error),
+    }
+}
+
 /// echo 执行器：把一次任务从 running 走到 completed。
 /// P1 的 ACP / CLI 适配器会替换这个函数体，但事件与状态语义保持不变。
 pub async fn run_echo_assignment(app: AppHandle, base: PathBuf, room: Room, assignment: Assignment) {
@@ -615,6 +747,19 @@ async fn run_assignment(app: AppHandle, base: PathBuf, room: Room, assignment: A
             None,
             None,
         );
+        return;
+    }
+
+    if harness_id == crate::harness::STREAM_JSON {
+        match crate::harness::resolve_stream_json(&base) {
+            Ok(config) => run_stream_json_assignment(app, base, room, assignment, config).await,
+            Err(error) => {
+                if is_cancelled(&assignment.id) {
+                    return;
+                }
+                fail_assignment(&app, &base, &room, &assignment, &error);
+            }
+        }
         return;
     }
 

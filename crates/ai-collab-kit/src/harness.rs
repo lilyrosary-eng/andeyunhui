@@ -290,6 +290,22 @@ pub fn resolve_dsh(app: &AppHandle) -> Result<DshConfig, String> {
 /// harness 目录。DeepSeek 的可用性取决于本机 CLI 是否可定位，不影响 Echo 房间。
 pub fn catalog(app: &AppHandle) -> Vec<HarnessInfo> {
     let dsh = resolve_dsh(app);
+    let base = crate::store::base_dir(app).ok();
+    let (stream_available, stream_detail) = match base.as_deref() {
+        Some(base) => match resolve_stream_json(base) {
+            Ok(config) => (
+                true,
+                format!(
+                    "P3：命令 {}；promptMode {}；配置 {}",
+                    config.command,
+                    config.prompt_mode,
+                    stream_json_config_path(base).display()
+                ),
+            ),
+            Err(error) => (false, format!("P3：{error}")),
+        },
+        None => (false, "P3：无法定位协作数据目录".to_string()),
+    };
     let (available, detail) = match &dsh {
         Ok(config) => (
             true,
@@ -328,8 +344,8 @@ pub fn catalog(app: &AppHandle) -> Vec<HarnessInfo> {
             id: STREAM_JSON.to_string(),
             name: "通用 CLI（stream-json）".to_string(),
             kind: STREAM_JSON.to_string(),
-            available: false,
-            detail: "P2：命令 + 事件映射表，适配 Trae CLI 等非 ACP harness。".to_string(),
+            available: stream_available,
+            detail: stream_detail,
         },
         HarnessInfo {
             id: MAILBOX.to_string(),
@@ -432,6 +448,265 @@ pub async fn dsh_run_turn(
     })
 }
 
+// ========== stream-json 通用 CLI（P3）==========
+//
+// 适配「一次任务、stdout 按行输出 JSON」的 harness（Claude Code / Trae CLI 等）。
+// 不做协议级适配，只做两件事：把 prompt 交给进程、把 stdout 里的文本抽出来。
+// 配置落在 `<base>/stream-json.json`，首次访问自动写模板（command 为空 = 未接入）。
+
+const STREAM_JSON_CONFIG_FILE: &str = "stream-json.json";
+/// 流式累计的答案上限，避免把整段输出无限堆在内存里。
+const MAX_STREAM_TEXT: usize = 20_000;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamJsonConfig {
+    /// 可执行文件或命令名；空表示未配置。
+    #[serde(default)]
+    pub command: String,
+    /// 参数模板：含 `{prompt}` 时原位替换，否则按 promptMode 处理。
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// `arg`：prompt 作为最后一个参数；`stdin`：prompt 写入 stdin。
+    #[serde(default = "default_prompt_mode")]
+    pub prompt_mode: String,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    #[serde(default = "default_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_prompt_mode() -> String {
+    "arg".to_string()
+}
+
+/// 配置文件路径（catalog 与错误信息里直接展示，用户照着改）。
+pub fn stream_json_config_path(base: &Path) -> PathBuf {
+    base.join(STREAM_JSON_CONFIG_FILE)
+}
+
+/// 读取 stream-json 配置；缺文件时写模板。可用环境变量 `ANDY_STREAM_JSON_CMD` 临时覆盖命令。
+pub fn resolve_stream_json(base: &Path) -> Result<StreamJsonConfig, String> {
+    let path = stream_json_config_path(base);
+    let mut config = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<StreamJsonConfig>(&text).ok())
+        .unwrap_or_else(|| {
+            let template = StreamJsonConfig {
+                command: String::new(),
+                args: vec![
+                    "--output-format".to_string(),
+                    "stream-json".to_string(),
+                    "{prompt}".to_string(),
+                ],
+                prompt_mode: default_prompt_mode(),
+                env: std::collections::HashMap::new(),
+                timeout_secs: DEFAULT_TIMEOUT_SECS,
+            };
+            let body = serde_json::to_vec_pretty(&template).unwrap_or_default();
+            let _ = fs::write(&path, body);
+            template
+        });
+
+    if let Ok(command) = env::var("ANDY_STREAM_JSON_CMD") {
+        let command = command.trim();
+        if !command.is_empty() {
+            config.command = command.to_string();
+        }
+    }
+    if config.command.trim().is_empty() {
+        return Err(format!(
+            "未配置 stream-json 命令：请编辑 {}（command / args / promptMode）",
+            path.display()
+        ));
+    }
+    Ok(config)
+}
+
+pub struct StreamJsonOutcome {
+    pub text: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    /// 调用方主动取消（进程已被杀掉），上层不要再补 failed。
+    pub cancelled: bool,
+}
+
+/// stdout 里抽出来的一段内容：`Text` 是流式增量，`Final` 是显式最终结果。
+#[derive(Debug, PartialEq)]
+enum StreamPiece {
+    Text(String),
+    Final(String),
+}
+
+fn parse_stream_line(line: &str) -> Option<StreamPiece> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('{') {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    // 显式结果优先：`{"type":"result","result":"..."}` 这类终止事件。
+    if let Some(text) = value.get("result").and_then(|item| item.as_str()) {
+        let text = text.trim();
+        if !text.is_empty() {
+            return Some(StreamPiece::Final(text.to_string()));
+        }
+    }
+    let text = text_from_json(&value)?;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(StreamPiece::Text(text.to_string()))
+}
+
+/// 从任一层级里找文本：兼容 text / delta / content / message.content / 数组。
+fn text_from_json(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+    if let Some(items) = value.as_array() {
+        let joined: String = items.iter().filter_map(text_from_json).collect();
+        return if joined.is_empty() { None } else { Some(joined) };
+    }
+    let object = value.as_object()?;
+    for key in ["text", "delta", "content", "output_text"] {
+        if let Some(inner) = object.get(key) {
+            if let Some(text) = text_from_json(inner) {
+                return Some(text);
+            }
+        }
+    }
+    object.get("message").and_then(text_from_json)
+}
+
+/// 运行一次 stream-json 任务：边读边回调文本，结束时返回最终答案与诊断。
+pub async fn run_stream_json_turn(
+    config: &StreamJsonConfig,
+    workspace: &Path,
+    prompt: &str,
+    assignment_id: &str,
+    mut on_text: impl FnMut(&str),
+) -> Result<StreamJsonOutcome, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
+    fs::create_dir_all(workspace)
+        .map_err(|e| format!("创建 Harness 工作目录失败 {}: {e}", workspace.display()))?;
+
+    let mut args: Vec<String> = config
+        .args
+        .iter()
+        .map(|arg| arg.replace("{prompt}", prompt))
+        .collect();
+    let has_placeholder = config.args.iter().any(|arg| arg.contains("{prompt}"));
+    let use_stdin = config.prompt_mode.eq_ignore_ascii_case("stdin") && !has_placeholder;
+    if !has_placeholder && !use_stdin {
+        args.push(prompt.to_string());
+    }
+
+    let mut command = tokio::process::Command::new(&config.command);
+    command
+        .args(&args)
+        .current_dir(workspace)
+        .stdin(if use_stdin {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("NO_COLOR", "1")
+        .kill_on_drop(true);
+    for (key, value) in &config.env {
+        command.env(key, value);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("启动 stream-json harness 失败（{}）: {e}", config.command))?;
+    if use_stdin {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(prompt.as_bytes()).await;
+            let _ = stdin.flush().await;
+            drop(stdin);
+        }
+    }
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "无法读取 stream-json stdout".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "无法读取 stream-json stderr".to_string())?;
+    let stderr_task = tokio::spawn(async move {
+        let mut buffer = Vec::new();
+        let _ = stderr.read_to_end(&mut buffer).await;
+        buffer
+    });
+
+    let mut streamed = String::new();
+    let mut final_text: Option<String> = None;
+    let mut cancelled = false;
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let timeout = Duration::from_secs(config.timeout_secs.max(10));
+
+    let read_stream = async {
+        loop {
+            if crate::runtime::is_cancelled(assignment_id) {
+                cancelled = true;
+                return Ok::<(), String>(());
+            }
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    let Some(piece) = parse_stream_line(&line) else {
+                        continue;
+                    };
+                    match piece {
+                        StreamPiece::Text(text) => {
+                            on_text(&text);
+                            if streamed.len() < MAX_STREAM_TEXT {
+                                streamed.push_str(&text);
+                            }
+                        }
+                        StreamPiece::Final(text) => {
+                            on_text(&text);
+                            final_text = Some(text);
+                        }
+                    }
+                }
+                Ok(None) => return Ok(()),
+                Err(error) => return Err(format!("读取 stream-json stdout 失败: {error}")),
+            }
+        }
+    };
+
+    match tokio::time::timeout(timeout, read_stream).await {
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err(format!("stream-json 超时（{}s）", timeout.as_secs()));
+        }
+        Ok(Err(error)) => {
+            let _ = child.kill().await;
+            return Err(error);
+        }
+        Ok(Ok(())) => {}
+    }
+    if cancelled {
+        let _ = child.kill().await;
+    }
+    let status = child.wait().await.ok();
+    let stderr_bytes = stderr_task.await.unwrap_or_default();
+
+    Ok(StreamJsonOutcome {
+        text: final_text.unwrap_or(streamed).trim().to_string(),
+        stderr: String::from_utf8_lossy(&stderr_bytes).trim().to_string(),
+        exit_code: status.as_ref().and_then(|status| status.code()),
+        cancelled,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +772,73 @@ mod tests {
         .expect("dsh headless run failed");
         println!("stdout={:?}\nstderr={:?}", outcome.stdout, outcome.stderr);
         assert!(!outcome.stdout.trim().is_empty(), "empty stdout from dsh");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// 常见 stream-json 事件形状（Claude Code / 通用 CLI）都要能抽出文本。
+    #[test]
+    fn stream_json_extracts_common_event_shapes() {
+        let assistant =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"你好"}]}}"#;
+        assert_eq!(
+            parse_stream_line(assistant),
+            Some(StreamPiece::Text("你好".to_string()))
+        );
+
+        let delta =
+            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"世界"}}"#;
+        assert_eq!(
+            parse_stream_line(delta),
+            Some(StreamPiece::Text("世界".to_string()))
+        );
+
+        // 显式结果优先于流式文本
+        let result = r#"{"type":"result","result":"最终答案"}"#;
+        assert_eq!(
+            parse_stream_line(result),
+            Some(StreamPiece::Final("最终答案".to_string()))
+        );
+
+        // 非 JSON / 空对象忽略，避免日志行污染答案
+        assert_eq!(parse_stream_line("plain text"), None);
+        assert_eq!(parse_stream_line("{}"), None);
+    }
+
+    /// stream-json 实跑（用 powershell 充当 CLI，默认忽略）：
+    /// `cargo test -p ai-collab-kit stream_json_smoke -- --ignored --nocapture`
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore]
+    async fn stream_json_smoke() {
+        let config = StreamJsonConfig {
+            command: "powershell.exe".to_string(),
+            args: vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Write-Output '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}'"
+                    .to_string(),
+            ],
+            prompt_mode: "stdin".to_string(),
+            ..Default::default()
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "ai-collab-stream-json-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let outcome = run_stream_json_turn(
+            &config,
+            &dir,
+            "prompt",
+            "smoke",
+            |text| println!("delta={text}"),
+        )
+        .await
+        .expect("stream-json run failed");
+        assert_eq!(outcome.text, "hello");
+        assert_eq!(outcome.exit_code, Some(0));
         let _ = fs::remove_dir_all(dir);
     }
 }

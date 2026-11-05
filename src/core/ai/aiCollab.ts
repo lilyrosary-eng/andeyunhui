@@ -408,7 +408,9 @@ export function useAiCollab(): UseAiCollabResult {
         ? 'DeepSeek 本地协作'
         : harnessId === 'mcp'
           ? 'MCP 协作房间'
-          : '协作房间';
+          : harnessId === 'stream-json'
+            ? 'stream-json 协作'
+            : '协作房间';
       const room = await invoke<CollabRoom>('collab_room_create', {
         name: name?.trim() || fallbackName,
         agents,

@@ -495,6 +495,8 @@ const Root = memo(function Root() {
         onCreateRoom={() => void collab.createRoom()}
         onCreateDeepSeekRoom={() => void collab.createRoom(undefined, 'dsh')}
         onCreateMcpRoom={() => void collab.createRoom(undefined, 'mcp')}
+        onCreateStreamJsonRoom={() => void collab.createRoom(undefined, 'stream-json')}
+        streamJsonAvailable={collab.harnesses.find((harness) => harness.id === 'stream-json')?.available ?? false}
         deepseekAvailable={collab.harnesses.find((h) => h.id === 'dsh')?.available ?? false}
         dshSessions={collab.dshSessions}
         dshSessionsLoading={collab.dshSessionsLoading}

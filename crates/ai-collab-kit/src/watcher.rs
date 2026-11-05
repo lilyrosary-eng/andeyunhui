@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use notify::{Event, RecursiveMode, Watcher};
+use notify::{RecursiveMode, Watcher};
 use tauri::{AppHandle, Emitter};
 
 use crate::store;
