@@ -272,6 +272,33 @@ describe('批量「自动匹配并写入」：门槛与命令接线', () => {
     // 撤销用的是报告里的批次号，不是另起一个
     expect(src).toContain('onRollbackBatch(batchReport.batchId)');
   });
+
+  it('三个候选面板都必须标出来源（用户问的：这条是网易云还是酷狗）', () => {
+    const src = read('TrackList.tsx');
+    expect(src).toContain("case 'netease': return '网易云'");
+    expect(src).toContain("case 'qq': return 'QQ音乐'");
+    // 元信息候选、歌词候选、批量确认面板三处各用一次
+    const uses = src.split('sourceLabel(').length - 1;
+    expect(uses, '来源徽标被删到少于三处').toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe('歌词候选的源数量：网易云 → 酷狗 → QQ（QQ 歌词此前是死代码）', () => {
+  it('候选链里有 QQ 兜底，且抓取分支认得 qqMid', () => {
+    const src = read('index.tsx');
+    expect(src).toContain('qq-lyric-');
+    expect(src).toContain('qqMid: s.mid');
+    expect(src).toContain('if (c.qqMid)');
+    expect(src).toContain('await qqGetLyric(');
+  });
+
+  it('歌词候选的类型也允许 qq，否则徽标与分支都会被 tsc 判死', () => {
+    const src = read('TrackList.tsx');
+    const iface = src.slice(src.indexOf('export interface LyricCandidate'), src.indexOf('const fieldLabelCls'));
+    expect(iface.length, '切片没截到 LyricCandidate，断言会假绿').toBeGreaterThan(60);
+    expect(iface).toContain("'netease' | 'kugou' | 'qq'");
+    expect(iface).toContain('qqMid?: string;');
+  });
 });
 
 describe('插件权限声明不能被顺手删', () => {

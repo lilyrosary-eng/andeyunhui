@@ -154,10 +154,12 @@ export interface LyricCandidate {
   key: string;
   title: string;
   artist: string;
-  source: 'netease' | 'kugou';
+  source: 'netease' | 'kugou' | 'qq';
   neteaseId?: number;
   kugouHash?: string;
   kugouKeyword?: string;
+  /** QQ 音乐的 songmid（歌词接口按它取） */
+  qqMid?: string;
 }
 
 const fieldLabelCls = "block text-xs text-neutral-500 dark:text-stone-400 mb-1.5";
@@ -1101,7 +1103,7 @@ export function TrackList({
                       .map((k) => `${BATCH_FIELD_LABEL[k] || k}→${String(it.draft[k])}`)
                       .join('  ')}
                     {'  '}
-                    {it.source} {it.score}
+                    {sourceLabel(it.source)} {it.score}
                   </span>
                 </li>
               ))}

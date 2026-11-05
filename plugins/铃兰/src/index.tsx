@@ -26,7 +26,7 @@ import KugouStatsView from './KugouStatsView';
 import KugouSettingsPanel from './KugouSettingsPanel';
 import { isLikedPlaylist, likeNeteaseSong, downloadNeteaseTrack, searchSongs as neteaseSearchSongs, neteaseGetLyric, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
 import { searchSongs as kugouSearchSongs, getLyric as kugouGetLyric, getFavorites, addKugouFavorite, removeKugouFavorite, type KugouAuth } from './kugouApi';
-import { qqSearchSongs } from './qqMusicApi';
+import { qqSearchSongs, qqGetLyric } from './qqMusicApi';
 import { fetchExistingTranslation } from './lyricPlatformTranslation';
 import { buildEditArgs, type EditOutcome } from './tagEditArgs';
 import {
@@ -2176,6 +2176,23 @@ useEffect(() => {
         }
       } catch (e) { console.warn('[Music] 酷狗歌词检索失败:', e); }
     }
+    // QQ 音乐作第三兜底：网易云与酷狗都没词时（小众/新发行常见）才有机会出词。
+    // 此前 qqGetLyric 已实现且实测能拿到整首 LRC，却没接进候选链 —— 等于白写。
+    if (out.length === 0) {
+      try {
+        const qq = (await qqSearchSongs(kw, 9)) ?? [];
+        for (const s of qq) {
+          if (!s.mid) continue;
+          out.push({
+            key: 'qq-lyric-' + s.mid,
+            title: s.title || '',
+            artist: s.artist || '',
+            source: 'qq',
+            qqMid: s.mid,
+          });
+        }
+      } catch (e) { console.warn('[Music] QQ 歌词检索失败:', e); }
+    }
     return out;
   }, []);
 
@@ -2194,6 +2211,12 @@ useEffect(() => {
       const r = await kugouGetLyric(c.kugouHash, c.kugouKeyword ?? '');
       const text = (r?.lyric || '').trim();
       if (!text) throw new Error('kugou lyric empty');
+      return text;
+    }
+    if (c.qqMid) {
+      // QQ 返回的是带时间轴的整首 LRC，与酷狗那条同源，编辑器直接吃
+      const text = (await qqGetLyric(c.qqMid)).trim();
+      if (!text) throw new Error('qq lyric empty');
       return text;
     }
     throw new Error('unknown candidate source');
