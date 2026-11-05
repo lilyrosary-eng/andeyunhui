@@ -103,6 +103,9 @@ export function describeOutcome(o: TranslateOutcomeLike, aligned: boolean): stri
 export interface TranslateLyricsDeps {
   invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
   targetLang?: string;
+  /** 随请求下发的翻译设置（节点 + 凭证 + 链）；由调用方用宿主 translateSettingsFor 构造，
+   *  这样"选哪个节点"和设置页共用同一份配置，不在插件里另立一套。 */
+  settings?: unknown;
 }
 
 /**
@@ -111,10 +114,18 @@ export interface TranslateLyricsDeps {
  * 返回的 `text` 一定可以直接放进歌词编辑器的「修改后」；`meta` 是要如实展示给用户的
  * 过程信息（含所有 notices 原文，不截断不分类改写 —— 对齐宿主翻译工作区的既定原则）。
  */
+export interface TranslateLyricsResult {
+  text: string;
+  aligned: boolean;
+  meta: string;
+  /** 译文与原文一致：多半是本来就已是目标语言，界面必须明说，别让按钮看起来"没效果" */
+  unchanged: boolean;
+}
+
 export async function translateLyrics(
   raw: string,
   deps: TranslateLyricsDeps = {},
-): Promise<{ text: string; aligned: boolean; meta: string }> {
+): Promise<TranslateLyricsResult> {
   const lines = parseLrc(raw);
   const payload = buildTranslatablePayload(lines);
   if (!payload) throw new Error('当前没有可翻译的歌词文本');
@@ -124,12 +135,19 @@ export async function translateLyrics(
   const res = (await invoke('translate_text', {
     text: payload,
     targetLang: deps.targetLang || undefined,
+    // settings 缺省时 Rust 侧落默认链（bing→mymemory→ai），无需任何 key 也能翻
+    settings: deps.settings,
   })) as TranslateOutcomeLike | string;
 
   // 兼容：老签名直接返回裸字符串
   const outcome: TranslateOutcomeLike = typeof res === 'string' ? { text: res } : res || {};
   const joined = rejoinTranslated(lines, outcome.text || '');
   const notices = Array.isArray(outcome.notices) ? outcome.notices : [];
-  const meta = [describeOutcome(outcome, joined.aligned), ...notices].filter(Boolean).join(' | ');
-  return { text: joined.text, aligned: joined.aligned, meta };
+  // 译文与原文一样时，用户看到的就是「点了没反应」——必须把它说破
+  const unchanged = (outcome.text || '').trim() !== '' && (outcome.text || '').trim() === payload.trim();
+  const metaBits = [describeOutcome(outcome, joined.aligned), ...notices].filter(Boolean);
+  if (unchanged) {
+    metaBits.push('译文与原文一致：多半原文已是目标语言，或该节点未实际翻译');
+  }
+  return { text: joined.text, aligned: joined.aligned, meta: metaBits.join(' | '), unchanged };
 }

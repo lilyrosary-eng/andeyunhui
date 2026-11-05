@@ -71,9 +71,11 @@ describe('歌词编辑器（与标签编辑同居 TrackList.tsx，最易被误�
     ]);
   });
 
-  it('AI 翻译按钮与歌词对照审阅（修改前 → 修改后）及回退原文', () => {
+  it('翻译按钮与歌词对照审阅（修改前 → 修改后）及回退原文', () => {
     mustContain('TrackList.tsx', [
-      'aiTranslate',
+      'music.lyrics.translate',
+      'translateSettingsFor',
+      'TRANSLATE_NODES',
       'enterLyricsReview',
       'revertLyricsReview',
       'reviewBefore',
@@ -85,7 +87,7 @@ describe('歌词编辑器（与标签编辑同居 TrackList.tsx，最易被误�
     mustContain('TrackList.tsx', ['fetchLyricCandidates', 'autoFetch']);
   });
 
-  it('AI 翻译已接到宿主翻译服务（不是"开发中"空位）', () => {
+  it('翻译已接到宿主服务，且节点可选（不是"开发中"空位）', () => {
     mustContain('TrackList.tsx', [
       'runAiTranslate',
       'onClick={runAiTranslate}',
@@ -93,7 +95,30 @@ describe('歌词编辑器（与标签编辑同居 TrackList.tsx，最易被误�
       'translate_text',
       'loadTargetLang',
       'lyricsTranslateNotice',
+      'setTranslateNode',
     ]);
+  });
+});
+
+describe('候选点击不得直接写盘（用户实测反馈的毛病）', () => {
+  it('选候选只暂存封面 URL，不立刻下载内嵌', () => {
+    const src = read('TrackList.tsx');
+    const fn = src.slice(src.indexOf('const applyCandidate'), src.indexOf('const autoFillField'));
+    expect(fn.length, '切片没截到 applyCandidate 函数体，断言会假绿').toBeGreaterThan(20);
+    expect(fn, 'applyCandidate 不该再直接调用 onApplyCoverUrl 写盘').not.toContain('onApplyCoverUrl(');
+    expect(fn).toContain('setPendingCoverUrl(c.coverUrl)');
+  });
+
+  it('提交时标签与封面必须串行写（并发读-改-写会互相覆盖）', () => {
+    const src = read('TrackList.tsx');
+    const fn = src.slice(src.indexOf('const submitEdit'), src.indexOf('// ===== 自动获取元信息'));
+    expect(fn.length, '切片没截到 submitEdit 函数体，断言会假绿').toBeGreaterThan(20);
+    expect(fn).toContain('await onEditTrack?.(target');
+    expect(fn).toContain('await onApplyCoverUrl(target, cover)');
+    const a = fn.indexOf('await onEditTrack?.(target');
+    const b = fn.indexOf('await onApplyCoverUrl(target, cover)');
+    expect(a).toBeGreaterThan(-1);
+    expect(b).toBeGreaterThan(a);
   });
 });
 

@@ -120,6 +120,19 @@ describe('translateLyrics 调用与如实回报', () => {
     await expect(translateLyrics('[00:01.00]A', {})).rejects.toThrow('宿主翻译通道不可用');
   });
 
+  it('译文与原文一致时明确标出 unchanged，不让按钮看起来像没反应', async () => {
+    const invoke = vi.fn(async () => ({ text: 'A', node: 'bing' }));
+    const r = await translateLyrics('[00:01.00]A', { invoke });
+    expect(r.unchanged).toBe(true);
+    expect(r.meta).toContain('译文与原文一致');
+  });
+
+  it('settings 随请求下发（节点选择与设置页共用同一份配置）', async () => {
+    const invoke = vi.fn(async () => ({ text: 'x', node: 'deepl' }));
+    await translateLyrics('[00:01.00]A', { invoke, settings: { node: 'deepl', deeplKey: 'k' } });
+    expect((invoke.mock.calls[0] as unknown as Record<string, unknown>[])[1].settings).toEqual({ node: 'deepl', deeplKey: 'k' });
+  });
+
   it('兼容只返回裸字符串的老接口形态', async () => {
     const invoke = vi.fn(async () => 'plain translation');
     const r = await translateLyrics('原文一行', { invoke });
@@ -130,7 +143,7 @@ describe('translateLyrics 调用与如实回报', () => {
   it('请求参数名是 camelCase 的 targetLang', async () => {
     const invoke = vi.fn(async () => ({ text: 'a', node: 'bing' }));
     await translateLyrics('[00:01.00]A', { invoke, targetLang: '英语' });
-    expect(invoke).toHaveBeenCalledWith('translate_text', { text: 'A', targetLang: '英语' });
+    expect(invoke).toHaveBeenCalledWith('translate_text', { text: 'A', targetLang: '英语', settings: undefined });
   });
 });
 

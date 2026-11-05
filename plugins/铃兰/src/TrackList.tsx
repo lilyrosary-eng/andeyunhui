@@ -9,7 +9,7 @@ import { formatTime } from '../../_shared/utils';
 import { PlusIcon, CheckIcon, MoreIcon, MusicIcon, HeartIcon, VideoIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 import { translateLyrics } from './lyricTranslate';
-import { loadTargetLang } from '@/lib/translateLanguages';
+import { loadTargetLang, TARGET_LANGS, TRANSLATE_NODES, translateSettingsFor } from '@/lib/translateLanguages';
 
 interface Track {
   id: string;
@@ -51,7 +51,7 @@ interface TrackListProps {
   favoriteIds?: Set<string>;
   onToggleFavorite?: (track: Track) => void;
   onRescanTrack?: (track: Track) => void;
-  onEditTrack?: (track: Track, fields: { title?: string; artist?: string; album?: string; trackNumber?: number }) => void;
+  onEditTrack?: (track: Track, fields: { title?: string; artist?: string; album?: string; trackNumber?: number }) => void | Promise<void>;
   // 下载单曲
   onDownloadTrack?: (track: Track) => void;
   // 插入 MV：传入后右键菜单出现「插入 MV」项（用于本地歌曲）。
@@ -139,6 +139,11 @@ export function TrackList({
   const [editDraft, setEditDraft] = useState<{ title: string; artist: string; album: string; trackNumber: string }>({
     title: '', artist: '', album: '', trackNumber: '',
   });
+  // 从候选选中的封面：**只暂存 URL**，点「确定」随标签一起写。
+  // 此前点候选就立刻下载并内嵌封面，等于"选一下就算改盘"，反悔也退不回去。
+  const [pendingCoverUrl, setPendingCoverUrl] = useState<string | null>(null);
+  // 翻译节点选择：'' = 跟随设置页的节点/链；其它值 = 本次强制用该节点
+  const [translateNode, setTranslateNode] = useState('');
 
   // 歌词编辑器弹窗状态
   const [lyricsTrack, setLyricsTrack] = useState<Track | null>(null);
@@ -329,6 +334,7 @@ export function TrackList({
   const onEditInfo = (t: Track) => {
     setEditingTrack(t);
     setDraftCoverPath(null);
+    setPendingCoverUrl(null);
     setCandidates(null);
     setEditDraft({
       title: t.title || '',
@@ -338,16 +344,25 @@ export function TrackList({
     });
   };
 
-  const submitEdit = () => {
+  const submitEdit = async () => {
     if (!editingTrack) return;
+    const target = editingTrack;
     const tn = editDraft.trackNumber.trim() ? Number(editDraft.trackNumber) : NaN;
-    onEditTrack?.(editingTrack, {
-      title: editDraft.title.trim() || undefined,
-      artist: editDraft.artist.trim() || undefined,
-      album: editDraft.album.trim() || undefined,
-      trackNumber: Number.isNaN(tn) ? undefined : tn,
-    });
+    const cover = pendingCoverUrl;
     setEditingTrack(null);
+    // ★ 必须串行：文本标签写回与封面内嵌都是「整文件读→改→写」，
+    //   并发跑就是后完成的那个把先完成的覆盖掉（表现为"标签没写进去"）。
+    try {
+      await onEditTrack?.(target, {
+        title: editDraft.title.trim() || undefined,
+        artist: editDraft.artist.trim() || undefined,
+        album: editDraft.album.trim() || undefined,
+        trackNumber: Number.isNaN(tn) ? undefined : tn,
+      });
+      if (cover && onApplyCoverUrl) await onApplyCoverUrl(target, cover);
+    } catch (e) {
+      console.warn('[Music] 标签/封面写回失败:', e);
+    }
   };
 
   // ===== 自动获取元信息 / 封面集成（编辑弹窗内）=====
@@ -373,13 +388,13 @@ export function TrackList({
       setCandidateLoading(false);
     }
   };
-  // 选中某条候选：填充标题/歌手/专辑，并按需下载写回封面
-  const applyCandidate = async (c: TrackMetaCandidate) => {
+  // 选中某条候选：只填草稿 + 暂存封面 URL，**不碰磁盘**；点「确定」才一起写回
+  const applyCandidate = (c: TrackMetaCandidate) => {
     if (!editingTrack) return;
     setEditDraft((d) => ({ ...d, title: c.title, artist: c.artist, album: c.album }));
-    if (c.coverUrl && onApplyCoverUrl) {
-      const path = await onApplyCoverUrl(editingTrack, c.coverUrl);
-      if (path) setDraftCoverPath(path);
+    if (c.coverUrl) {
+      setPendingCoverUrl(c.coverUrl);
+      setDraftCoverPath(c.coverUrl); // 远程 URL 可直接渲染，用于「确定」前的预览
     }
     setCandidates(null);
   };
@@ -474,6 +489,8 @@ export function TrackList({
       const res = await translateLyrics(lyricsDraft, {
         invoke: hostApi?.invoke ? (cmd, args) => hostApi.invoke(cmd, args) : undefined,
         targetLang: loadTargetLang(),
+        // 与设置页共用同一份配置（节点/凭证/链/术语表），这里只允许临时改本次节点
+        settings: translateSettingsFor(translateNode || undefined),
       });
       setLyricsDraft(res.text);
       setLyricsTranslateNotice(res.meta || null);
@@ -1207,10 +1224,10 @@ export function TrackList({
               <button
                 onClick={runAiTranslate}
                 disabled={lyricsTranslating || lyricsLoading}
-                title={T('music.lyrics.aiTranslateHint') || 'AI 翻译当前歌词到你在设置页「翻译节点」里选的目标语言，结果进「修改后」，可回退'}
+                title={T('music.lyrics.translateHint') || '翻译当前歌词到目标语言，结果进「修改后」，可回退'}
                 className="px-3 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors disabled:opacity-50"
               >
-                {lyricsTranslating ? (T('music.lyrics.aiTranslating') || '翻译中…') : (T('music.lyrics.aiTranslate') || 'AI 翻译')}
+                {lyricsTranslating ? (T('music.lyrics.translating') || '翻译中…') : (T('music.lyrics.translate') || '翻译')}
               </button>
               {(reviewBefore !== null || lyricCandidates !== null) && (
                 <button
@@ -1221,6 +1238,23 @@ export function TrackList({
                   {T('music.lyrics.revertToOriginal') || '取消（回退为原文）'}
                 </button>
               )}
+              <select
+                value={translateNode}
+                onChange={(e) => setTranslateNode(e.target.value)}
+                title={T('music.lyrics.translateNodeHint') || '本次用哪个翻译节点；默认跟随设置页「翻译节点」'}
+                className="ml-auto px-2 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 border-0"
+              >
+                <option value="">{T('music.lyrics.translateNodeFollow') || '节点：跟随设置'}</option>
+                {TRANSLATE_NODES.filter((n) => n.id !== 'auto').map((n) => (
+                  <option key={n.id} value={n.id}>{n.label}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* 目标语言显式回显：不写出来，「点了没反应」就只能是猜 */}
+            <div className="px-5 pb-1 text-[11px] text-neutral-500 dark:text-stone-400">
+              {T('music.lyrics.translateTargetTo') || '译为'}：
+              {(TARGET_LANGS.find((l) => l.code === loadTargetLang()) || { label: loadTargetLang() }).label}
             </div>
 
             {/* 翻译过程如实回显：实际节点 / 源语言 / 分段 / 全部 notices，不截断不改写 */}
