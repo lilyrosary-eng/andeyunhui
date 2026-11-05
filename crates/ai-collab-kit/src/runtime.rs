@@ -145,6 +145,7 @@ pub fn create_assignment_core(
         brief: brief.to_string(),
         status: AssignmentStatus::Queued,
         result: None,
+        claimed_by: None,
         created_at: now,
         updated_at: now,
     };
@@ -197,6 +198,90 @@ pub fn set_assignment_status_core(
         None,
     )?;
     Ok(updated)
+}
+
+/// 外部 harness 认领任务：queued/waiting → running，并记录认领者。
+/// 与 `set_assignment_status_core` 分开，是因为认领需要额外写 `claimed_by` 审计字段。
+pub fn claim_assignment_core(
+    base: &Path,
+    room_id: &str,
+    assignment_id: &str,
+    claimed_by: Option<&str>,
+    text: String,
+) -> Result<Assignment, String> {
+    let _guard = board_lock().lock().map_err(|_| "任务表锁已损坏".to_string())?;
+    let updated = store::with_write_lock(base, || -> Result<Assignment, String> {
+        let mut map = store::read_assignments(base);
+        let list = map
+            .get_mut(room_id)
+            .ok_or_else(|| "房间任务表不存在".to_string())?;
+        let assignment = list
+            .iter_mut()
+            .find(|a| a.id == assignment_id)
+            .ok_or_else(|| format!("任务不存在: {assignment_id}"))?;
+        if !matches!(
+            assignment.status,
+            AssignmentStatus::Queued | AssignmentStatus::Waiting
+        ) {
+            return Err(format!(
+                "任务当前状态为 {}，无法认领",
+                assignment.status.as_str()
+            ));
+        }
+        assignment.status = AssignmentStatus::Running;
+        assignment.claimed_by = claimed_by.map(|value| value.to_string());
+        assignment.updated_at = now_ms();
+        let snapshot = assignment.clone();
+        store::write_assignments(base, &map)?;
+        Ok(snapshot)
+    })?;
+    append_event_core(
+        base,
+        room_id,
+        "assignment.running",
+        Some(updated.assignee_id.clone()),
+        Some(updated.id.clone()),
+        Some(text),
+        Some(updated.clone()),
+        Some(json!({ "claimedBy": updated.claimed_by })),
+    )?;
+    Ok(updated)
+}
+
+/// 删除任务（只能删未在执行的）：从任务表移除，并在时间线留一条系统消息。
+pub fn delete_assignment_core(
+    base: &Path,
+    room_id: &str,
+    assignment_id: &str,
+) -> Result<Assignment, String> {
+    let _guard = board_lock().lock().map_err(|_| "任务表锁已损坏".to_string())?;
+    let removed = store::with_write_lock(base, || -> Result<Assignment, String> {
+        let mut map = store::read_assignments(base);
+        let list = map
+            .get_mut(room_id)
+            .ok_or_else(|| "房间任务表不存在".to_string())?;
+        let index = list
+            .iter()
+            .position(|a| a.id == assignment_id)
+            .ok_or_else(|| format!("任务不存在: {assignment_id}"))?;
+        if list[index].status == AssignmentStatus::Running {
+            return Err("任务正在执行，不能删除；请先取消".to_string());
+        }
+        let removed = list.remove(index);
+        store::write_assignments(base, &map)?;
+        Ok(removed)
+    })?;
+    append_event_core(
+        base,
+        room_id,
+        "message",
+        None,
+        Some(removed.id.clone()),
+        Some(format!("已删除任务：{}", removed.brief)),
+        None,
+        Some(json!({ "role": "system", "deletedTaskId": removed.id })),
+    )?;
+    Ok(removed)
 }
 
 /// 外部 harness 在房间里的发言。
@@ -1245,6 +1330,59 @@ mod tests {
                 .count(),
             2
         );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 认领要写认领者（审计），删除只允许删未执行的任务。
+    #[test]
+    fn claim_records_claimer_and_delete_guards_running() {
+        let base = temp_base("claim");
+        let room = test_room("room_claim");
+
+        let created =
+            create_assignment_core(&base, &room, None, "worker", "待认领").unwrap().assignment;
+        let claimed =
+            claim_assignment_core(&base, &room.id, &created.id, Some("trae"), "已认领".to_string())
+                .unwrap();
+        assert_eq!(claimed.status, AssignmentStatus::Running);
+        assert_eq!(claimed.claimed_by.as_deref(), Some("trae"));
+
+        let events = store::read_events(&base, &room.id, None).unwrap();
+        let running_event = events
+            .iter()
+            .find(|event| event.kind == "assignment.running")
+            .unwrap();
+        assert_eq!(
+            running_event
+                .data
+                .as_ref()
+                .and_then(|data| data.get("claimedBy"))
+                .and_then(|value| value.as_str()),
+            Some("trae")
+        );
+
+        // 执行中不允许删除，必须先取消。
+        assert!(delete_assignment_core(&base, &room.id, &created.id).is_err());
+        set_assignment_status_core(
+            &base,
+            &room.id,
+            &created.id,
+            AssignmentStatus::Cancelled,
+            Some("外部取消".to_string()),
+            "assignment.cancelled",
+            Some("外部取消".to_string()),
+        )
+        .unwrap();
+        let removed = delete_assignment_core(&base, &room.id, &created.id).unwrap();
+        assert_eq!(removed.id, created.id);
+        assert!(store::read_assignments(&base)
+            .get(&room.id)
+            .map(|list| list.is_empty())
+            .unwrap_or(true));
+        let events = store::read_events(&base, &room.id, None).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.text.as_deref().unwrap_or("").contains("已删除任务")));
         let _ = std::fs::remove_dir_all(base);
     }
 }

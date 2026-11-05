@@ -569,6 +569,7 @@ mod tests {
                 brief: "演示".to_string(),
                 status: AssignmentStatus::Queued,
                 result: None,
+                claimed_by: None,
                 created_at: 0,
                 updated_at: 0,
             }],

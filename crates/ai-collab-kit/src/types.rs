@@ -101,6 +101,10 @@ pub struct Assignment {
     pub brief: String,
     pub status: AssignmentStatus,
     pub result: Option<String>,
+    /// 谁认领了这个任务（MCP 的 `from`）。用于审计「外部 harness 接了哪单」。
+    /// serde default 保证旧任务表仍能读。
+    #[serde(default)]
+    pub claimed_by: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }

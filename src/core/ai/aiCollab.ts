@@ -74,6 +74,8 @@ export interface CollabAssignment {
   brief: string;
   status: CollabAssignmentStatus;
   result?: string | null;
+  /** 外部 harness 认领者标识（MCP 的 from） */
+  claimedBy?: string | null;
   createdAt: number;
   updatedAt: number;
 }

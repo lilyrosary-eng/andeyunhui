@@ -156,7 +156,8 @@ fn tool_defs() -> Value {
                 "properties": {
                     "roomId": { "type": "string" },
                     "afterSeq": { "type": "integer", "description": "只返回 seq 大于该值的事件；默认 0 表示从头读" },
-                    "limit": { "type": "integer", "description": "单次最多返回多少条（按 seq 顺序取，超量时可继续用 lastSeq 翻页），默认 100，上限 500" }
+                    "limit": { "type": "integer", "description": "单次最多返回多少条（按 seq 顺序取，超量时可继续用 lastSeq 翻页），默认 100，上限 500" },
+                    "kind": { "type": "string", "description": "只保留某类事件：message / assignment（匹配 assignment.*）/ room.updated 等" }
                 },
                 "required": ["roomId"],
                 "additionalProperties": false
@@ -202,12 +203,13 @@ fn tool_defs() -> Value {
         },
         {
             "name": "collab_claim_task",
-            "description": "认领任务：queued → running。认领后由调用方执行并回报结果。",
+            "description": "认领任务：queued → running，并记录认领者（from）。认领后由调用方执行并回报结果。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "roomId": { "type": "string" },
-                    "taskId": { "type": "string" }
+                    "taskId": { "type": "string" },
+                    "from": { "type": "string", "description": "认领者标识，例如 trae；默认 mcp" }
                 },
                 "required": ["roomId", "taskId"],
                 "additionalProperties": false
@@ -238,6 +240,33 @@ fn tool_defs() -> Value {
                     "error": { "type": "string" }
                 },
                 "required": ["roomId", "taskId", "error"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "collab_cancel_task",
+            "description": "取消任务（queued / running / waiting → cancelled），用于外部 harness 放弃或中止。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "roomId": { "type": "string" },
+                    "taskId": { "type": "string" },
+                    "reason": { "type": "string", "description": "取消原因，默认「外部 harness 取消任务」" }
+                },
+                "required": ["roomId", "taskId"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "collab_delete_task",
+            "description": "从任务表删除任务（执行中的任务需先取消）。删除会在时间线留一条系统消息。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "roomId": { "type": "string" },
+                    "taskId": { "type": "string" }
+                },
+                "required": ["roomId", "taskId"],
                 "additionalProperties": false
             }
         }
@@ -275,7 +304,13 @@ fn call_tool(base: &Path, params: &Value) -> Result<Value, String> {
             find_room(base, &room_id)?;
             let after_seq = optional_u64(&args, "afterSeq").unwrap_or(0);
             let limit = optional_u64(&args, "limit").unwrap_or(100).min(500) as usize;
+            let kind_filter = optional_str(&args, "kind");
             let mut events = store::read_events(base, &room_id, Some(after_seq))?;
+            if let Some(filter) = kind_filter.as_deref() {
+                // "assignment" 匹配 assignment.*，"message" 只匹配 message 本身。
+                let prefix = format!("{filter}.");
+                events.retain(|event| event.kind == filter || event.kind.starts_with(&prefix));
+            }
             let truncated = events.len() > limit;
             if truncated {
                 // 从最早的一批开始返回；调用方用 lastSeq 继续翻页，不会跳过中间事件。
@@ -329,27 +364,19 @@ fn call_tool(base: &Path, params: &Value) -> Result<Value, String> {
             let room = find_room(base, &room_id)?;
             let task_id = require_str(&args, "taskId")?;
             let task = find_task(base, &room_id, &task_id)?;
-            if matches!(
-                task.status,
-                AssignmentStatus::Running
-                    | AssignmentStatus::Completed
-                    | AssignmentStatus::Failed
-                    | AssignmentStatus::Cancelled
-            ) {
-                return Err(format!(
-                    "任务当前状态为 {}，无法认领",
-                    task.status.as_str()
-                ));
-            }
-            let text = format!("{} 已认领任务", runtime::agent_name(&room, &task.assignee_id));
-            let updated = runtime::set_assignment_status_core(
+            let from = optional_str(&args, "from").unwrap_or_else(|| "mcp".to_string());
+            let text = format!(
+                "{} 已认领任务（{}）",
+                runtime::agent_name(&room, &task.assignee_id),
+                from
+            );
+            // 状态校验与 claimed_by 写入都在 core 内完成，避免两处规则漂移。
+            let updated = runtime::claim_assignment_core(
                 base,
                 &room_id,
                 &task_id,
-                AssignmentStatus::Running,
-                task.result.clone(),
-                "assignment.running",
-                Some(text),
+                Some(&from),
+                text,
             )?;
             Ok(json!({ "task": updated }))
         }
@@ -421,6 +448,43 @@ fn call_tool(base: &Path, params: &Value) -> Result<Value, String> {
                 Some(detail),
             )?;
             Ok(json!({ "task": updated }))
+        }
+        "collab_cancel_task" => {
+            let room_id = require_str(&args, "roomId")?;
+            find_room(base, &room_id)?;
+            let task_id = require_str(&args, "taskId")?;
+            let task = find_task(base, &room_id, &task_id)?;
+            if matches!(
+                task.status,
+                AssignmentStatus::Completed
+                    | AssignmentStatus::Failed
+                    | AssignmentStatus::Cancelled
+            ) {
+                return Err(format!(
+                    "任务当前状态为 {}，无需取消",
+                    task.status.as_str()
+                ));
+            }
+            let reason =
+                optional_str(&args, "reason").unwrap_or_else(|| "外部 harness 取消任务".to_string());
+            let detail = runtime::clip_text(reason.trim(), 800);
+            let updated = runtime::set_assignment_status_core(
+                base,
+                &room_id,
+                &task_id,
+                AssignmentStatus::Cancelled,
+                Some(detail.clone()),
+                "assignment.cancelled",
+                Some(detail),
+            )?;
+            Ok(json!({ "task": updated }))
+        }
+        "collab_delete_task" => {
+            let room_id = require_str(&args, "roomId")?;
+            find_room(base, &room_id)?;
+            let task_id = require_str(&args, "taskId")?;
+            let removed = runtime::delete_assignment_core(base, &room_id, &task_id)?;
+            Ok(json!({ "deleted": removed }))
         }
         other => Err(format!("未知工具: {other}")),
     }

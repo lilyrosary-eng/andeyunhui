@@ -174,6 +174,7 @@ function Board({
                 <span className={`font-medium ${meta.cls}`}>{meta.label}</span>
                 <span className="ml-auto text-[10px] text-neutral-400 dark:text-stone-500">
                   {agentName(room, assignment.assigneeId)}
+                  {assignment.claimedBy ? ` · ${assignment.claimedBy}` : ''}
                 </span>
               </div>
               <div className="mt-1.5 line-clamp-2 text-neutral-700 dark:text-stone-300">{assignment.brief}</div>
