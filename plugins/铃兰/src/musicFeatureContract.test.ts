@@ -248,6 +248,32 @@ describe('术语表「整句回写」：关掉表时翻译要能学，且只学�
   });
 });
 
+describe('批量「自动匹配并写入」：门槛与命令接线', () => {
+  it('门槛与筛选在纯函数里；取候选处必须带 score 缺失即不写的 fail-closed', () => {
+    mustContain('batchAutoTag.ts', ['MIN_AUTO_WRITE_SCORE', 'buildBatchArgs', 'buildBatchReport']);
+    const src = read('index.tsx');
+    expect(src).toContain('planBatchAutoTag');
+    expect(src).toContain('music_batch_edit_tracks');
+    expect(src).toContain('score: top.score ?? 0');
+  });
+
+  it('入口是「先看计划再落盘」两段，且写完给撤销入口（整批一个批次号）', () => {
+    mustContain('TrackList.tsx', [
+      'onPlanBatchAutoTag',
+      'onCommitBatchAutoTag',
+      'runBatchPlan',
+      'commitBatchPlan',
+      'rollbackBatchReport',
+      'batchPlan.plan.skipped',
+    ]);
+    const src = read('TrackList.tsx');
+    // 确认面板必须在「还没写盘」时就显示跳过原因 —— 静默少改是最难排查的坏结果
+    expect(src).toContain('sk.reason');
+    // 撤销用的是报告里的批次号，不是另起一个
+    expect(src).toContain('onRollbackBatch(batchReport.batchId)');
+  });
+});
+
 describe('插件权限声明不能被顺手删', () => {
   it('歌词与标签写回相关命令仍在 manifest 内', () => {
     const m = readManifest();
@@ -262,6 +288,7 @@ describe('插件权限声明不能被顺手删', () => {
       'translate_text',
       'music_tag_field_support',
       'music_rollback_tag_edit',
+      'music_batch_edit_tracks',
       'music_rank_tag_candidates',
     ]) {
       expect(m, `manifest 缺少命令声明：${cmd}`).toContain(`"${cmd}"`);

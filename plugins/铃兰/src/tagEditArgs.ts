@@ -18,14 +18,17 @@ export interface EditOutcome {
 type DraftLike = Record<string, string | undefined>;
 
 /**
- * 把改动过的字段拼成 invoke 参数。
+ * 把改动过的字段拼成后端 draft（不含 filePath）。
+ *
+ * 单条编辑与批量写回共用这一层 —— 两处各写一份映射，迟早会漏字段，
+ * 而漏掉的字段是**静默不生效**的那种错。
  *
  * - `undefined` 的键直接不传（= 后端保持原值不动）
  * - 文本项原样下发，空串会让后端清除该字段
  * - 数字项：空串/非数字**跳过不传**（后端没有"清空数字帧"的语义，不能假装清掉了）
  */
-export function buildEditArgs(filePath: string, fields: DraftLike): Record<string, unknown> {
-  const args: Record<string, unknown> = { filePath };
+export function buildDraftPayload(fields: DraftLike): Record<string, unknown> {
+  const args: Record<string, unknown> = {};
   for (const [key, raw] of Object.entries(fields)) {
     if (raw === undefined) continue;
     if ((NUMERIC_TAG_FIELDS as readonly string[]).includes(key)) {
@@ -39,4 +42,9 @@ export function buildEditArgs(filePath: string, fields: DraftLike): Record<strin
     args[key] = raw;
   }
   return args;
+}
+
+/** 单条 `music_edit_track` 的参数 = 文件路径 + draft */
+export function buildEditArgs(filePath: string, fields: DraftLike): Record<string, unknown> {
+  return { filePath, ...buildDraftPayload(fields) };
 }

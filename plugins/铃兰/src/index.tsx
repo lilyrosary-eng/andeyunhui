@@ -29,6 +29,14 @@ import { searchSongs as kugouSearchSongs, getLyric as kugouGetLyric, getFavorite
 import { qqSearchSongs } from './qqMusicApi';
 import { fetchExistingTranslation } from './lyricPlatformTranslation';
 import { buildEditArgs, type EditOutcome } from './tagEditArgs';
+import {
+  planBatchAutoTag,
+  buildBatchArgs,
+  buildBatchReport,
+  newClientBatchId,
+  type BatchAutoTagReport,
+  type BatchPlan,
+} from './batchAutoTag';
 import type { EditDraft } from './TrackList';
 import { readKugouAuth } from './kugouAuth';
 import type { LyricLine } from './lyricsSync';
@@ -2115,7 +2123,14 @@ useEffect(() => {
           candidates: out.map((c) => ({ name: c.title, artist: c.artist, album: c.album })),
         }), 4000, 'rank');
         if (Array.isArray(ranked) && ranked.length > 0) {
-          const sorted = ranked.map((r: { index: number }) => out[r.index]).filter(Boolean);
+          // 分数跟着候选一起带出去：弹窗不用它，但批量「自动匹配并写入」要拿它当门槛
+          const sorted = ranked
+            .map((r: { index: number; score?: number }): TrackMetaCandidate | null => {
+              const c = out[r.index];
+              if (!c) return null;
+              return typeof r.score === 'number' ? { ...c, score: r.score } : c;
+            })
+            .filter((c): c is TrackMetaCandidate => c !== null);
           const final = sorted.length > 0 ? sorted : out;
           logStage(`ranked → n=${final.length}`);
           return final;
@@ -2331,6 +2346,64 @@ useEffect(() => {
   const handleRollbackBatch = useCallback(async (batchId: string) => {
     await hostApi.invoke('music_rollback_tag_edit', { batchId });
   }, []);
+
+  // 批量「自动匹配并写入」的取候选阶段：逐首走**弹窗同一条**链（网易云 → 酷狗 → QQ ＋ 宿主打分引擎），
+  // 只算不改。门槛、跳过原因、字段筛选都在纯函数 planBatchAutoTag 里（有单测），这里只管取数。
+  // 批量「自动匹配并写入」的**计划**阶段：只算不改 —— 用户要在弹窗外也先看一眼要改什么。
+  const handlePlanBatchAutoTag = useCallback(
+    async (tracks: Track[]): Promise<{ plan: BatchPlan; batchId: string }> => {
+      const joinArr = (v: unknown) => (Array.isArray(v) ? v.join(' / ') : String(v ?? ''));
+      const byPath = new Map<string, Track>();
+      const inputs = tracks.map((t) => {
+        const fp = t.filePath || t.id;
+        byPath.set(fp, t);
+        return {
+          filePath: fp,
+          title: joinArr(t.title),
+          artist: joinArr(t.artist),
+          album: joinArr((t as { album?: unknown }).album),
+        };
+      });
+      const plan = await planBatchAutoTag(inputs, async (inp) => {
+        const t = byPath.get(inp.filePath);
+        if (!t) return null;
+        const list = await handleFetchMetaCandidates(t);
+        const top = list[0];
+        // 打分器没跑成（超时/报错）时 score 是 undefined → 按 0 处理 = 不写。
+        // 确认面板上人也只看得到分数与三项文本，看不出「同名不同人」，所以宁可不改。
+        return top
+          ? { title: top.title, artist: top.artist, album: top.album, score: top.score ?? 0, source: top.source }
+          : null;
+      });
+      return { plan, batchId: newClientBatchId() };
+    },
+    [handleFetchMetaCandidates],
+  );
+
+  // 点「确定写入」之后才落盘：一次 invoke 写完整批（整批共用那个批次号，故可一次撤销），
+  // 再逐首重扫，让内存里的标题/歌手/专辑是文件真值（与「重扫」按钮同源）。
+  const handleCommitBatchAutoTag = useCallback(
+    async (plan: BatchPlan, batchId: string): Promise<BatchAutoTagReport> => {
+      if (!plan.items.length) {
+        return {
+          batchId: '',
+          written: 0,
+          failed: 0,
+          skipped: plan.skipped,
+          droppedFields: [],
+          summary: `没有够格自动写入的曲目（跳过 ${plan.skipped.length} 首）`,
+        };
+      }
+      const raw = await hostApi.invoke('music_batch_edit_tracks', buildBatchArgs(plan, batchId));
+      const report = buildBatchReport(plan, batchId, Array.isArray(raw) ? raw : []);
+      for (const item of plan.items) {
+        // handleRescanTrack 只用到 filePath / id 两个键，不必回查整条 Track
+        await handleRescanTrack({ filePath: item.filePath, id: item.filePath } as Track);
+      }
+      return report;
+    },
+    [handleRescanTrack],
+  );
 
   // #4 添加歌曲：选择音频文件后真正加入当前歌单（自定义歌单持久化，目录歌单仅内存）
   const handleAddSong = useCallback(async () => {
@@ -3039,6 +3112,8 @@ useEffect(() => {
               onFetchExistingTranslation={handleFetchExistingTranslation}
               onFetchFieldSupport={handleFetchFieldSupport}
               onRollbackBatch={handleRollbackBatch}
+              onPlanBatchAutoTag={handlePlanBatchAutoTag}
+              onCommitBatchAutoTag={handleCommitBatchAutoTag}
               onFetchLyric={handleFetchLyric}
             />
           ) : (

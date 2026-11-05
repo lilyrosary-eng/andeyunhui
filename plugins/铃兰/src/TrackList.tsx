@@ -9,6 +9,10 @@ import { formatTime } from '../../_shared/utils';
 import { PlusIcon, CheckIcon, MoreIcon, MusicIcon, HeartIcon, VideoIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 import { translateLyrics } from './lyricTranslate';
+import { BATCH_WRITABLE_FIELDS, type BatchPlan, type BatchAutoTagReport } from './batchAutoTag';
+
+/** 批量确认面板上的字段展示名（值来自后端 draft，键与 BATCH_WRITABLE_FIELDS 一致） */
+const BATCH_FIELD_LABEL: Record<string, string> = { title: '标题', artist: '歌手', album: '专辑' };
 import { loadTargetLang, TARGET_LANGS, TRANSLATE_NODES, translateSettingsFor, loadTranslateSettings } from '@/lib/translateLanguages';
 import { isGlossaryOff, learnGlossaryPairs } from '@/lib/translateGlossary';
 
@@ -101,6 +105,8 @@ export interface TrackMetaCandidate {
   durationSecs?: number;
   coverUrl?: string;
   source: 'netease' | 'kugou' | 'qq';
+  /** 宿主打分引擎的分（三维各 0..2，可能为负）。弹窗不显示它，批量写入拿它当门槛。 */
+  score?: number;
 }
 
 interface TrackListProps {
@@ -131,6 +137,9 @@ interface TrackListProps {
   // 写回后拿到的批次回报（含撤销用的 batchId）；以及「撤销这次」走的命令
   onEditTrack?: (track: Track, fields: Partial<EditDraft>) => void | Promise<EditOutcome | null>;
   onRollbackBatch?: (batchId: string) => Promise<void>;
+  // 批量「自动匹配并写入」：先取候选出计划给人看，点确定才落盘（两段是分开的命令）
+  onPlanBatchAutoTag?: (tracks: Track[]) => Promise<{ plan: BatchPlan; batchId: string }>;
+  onCommitBatchAutoTag?: (plan: BatchPlan, batchId: string) => Promise<BatchAutoTagReport>;
   onPickAndEmbedCover?: (track: Track) => Promise<string | null>;
   onApplyCoverUrl?: (track: Track, coverUrl: string) => Promise<string | null>;
   onResetCoverEmbed?: (track: Track) => Promise<void>;
@@ -223,6 +232,8 @@ export function TrackList({
   onFetchMetaCandidates,
   onFetchFieldSupport,
   onRollbackBatch,
+  onPlanBatchAutoTag,
+  onCommitBatchAutoTag,
   onPickAndEmbedCover,
   onApplyCoverUrl,
   onResetCoverEmbed,
@@ -240,6 +251,11 @@ export function TrackList({
   const [activeSubmenu, setActiveSubmenu] = useState<'move' | 'copy' | null>(null);
   // 选择模式下的「批量移动 / 批量复制」目标歌单选择浮层（move=批量移动，copy=批量复制，null=未展开）
   const [batchMenu, setBatchMenu] = useState<'move' | 'copy' | null>(null);
+  // 批量「自动匹配并写入」的三段状态：计划（还没写盘）→ 写入中 → 结果（含撤销用的批次号）
+  const [batchPlan, setBatchPlan] = useState<{ plan: BatchPlan; batchId: string } | null>(null);
+  const [batchPlanning, setBatchPlanning] = useState(false);
+  const [batchCommitting, setBatchCommitting] = useState(false);
+  const [batchReport, setBatchReport] = useState<BatchAutoTagReport | null>(null);
   // 菜单位置（position: fixed 定位，直接渲染在 overflow-y-auto 容器外部）
   const [menuPos, setMenuPos] = useState<{ top: number; right?: number; left?: number } | null>(null);
   // 保存每个「...」按钮的 ref，用于定位
@@ -439,6 +455,57 @@ export function TrackList({
     setSelectedIndices(new Set());
     setBatchMenu(null);
   }, [onCopyTrack, selectedIndices, tracks]);
+
+  // 批量「自动匹配并写入」第一步：只取候选出计划。检索一首要几秒，选中十几首
+  // 就是几十秒，所以必须让「在跑」这件事看得见，也别让人以为按钮坏了。
+  const runBatchPlan = useCallback(async () => {
+    if (!onPlanBatchAutoTag || batchPlanning) return;
+    const picked = tracks.filter((_, i) => selectedIndices.has(i));
+    if (!picked.length) return;
+    setBatchReport(null);
+    setBatchPlanning(true);
+    setBatchPlan(null);
+    try {
+      setBatchPlan(await onPlanBatchAutoTag(picked));
+    } catch (e) {
+      // 失败不假装成功，也不留半个面板在屏幕上
+      setBatchReport(null);
+      setBatchPlan(null);
+      console.warn('[Music] 批量取候选失败:', e);
+      alert(String((e as Error)?.message ?? e));
+    } finally {
+      setBatchPlanning(false);
+    }
+  }, [onPlanBatchAutoTag, batchPlanning, selectedIndices, tracks]);
+
+  // 第二步：人看过确认面板才落盘。写完保留报告条，撤销入口就在上面。
+  const commitBatchPlan = useCallback(async () => {
+    if (!batchPlan || !onCommitBatchAutoTag || batchCommitting) return;
+    setBatchCommitting(true);
+    try {
+      const r = await onCommitBatchAutoTag(batchPlan.plan, batchPlan.batchId);
+      setBatchReport(r);
+      setBatchPlan(null);
+      setSelectedIndices(new Set());
+    } catch (e) {
+      console.warn('[Music] 批量写回失败:', e);
+      alert(String((e as Error)?.message ?? e));
+    } finally {
+      setBatchCommitting(false);
+    }
+  }, [batchPlan, onCommitBatchAutoTag, batchCommitting]);
+
+  // 撤销整批：写回前每首都落了快照，所以这一批能整体退回
+  const rollbackBatchReport = useCallback(async () => {
+    if (!batchReport?.batchId || !onRollbackBatch) return;
+    try {
+      await onRollbackBatch(batchReport.batchId);
+      setBatchReport(null);
+    } catch (e) {
+      console.warn('[Music] 批量撤销失败:', e);
+      alert(String((e as Error)?.message ?? e));
+    }
+  }, [batchReport, onRollbackBatch]);
 
   const handleRemove = useCallback((track: Track) => {
     onRemoveTrack?.(track);
@@ -1001,6 +1068,91 @@ export function TrackList({
             className="btn-press text-xs px-2.5 py-1 rounded-lg text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
           >
             {T('music.track.batchRemove')}
+          </button>
+          {/* 批量「自动匹配并写入」：先出计划再看，确认才落盘（整批一个批次号，可一次撤销） */}
+          {onPlanBatchAutoTag && (
+            <button
+              onClick={runBatchPlan}
+              disabled={selectedIndices.size === 0 || batchPlanning || batchCommitting}
+              className="btn-press text-xs px-2.5 py-1 rounded-lg text-[var(--element-bg)] hover:bg-[var(--element-muted)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {batchPlanning
+                ? T('music.track.batchPlanning') || '取候选中…（逐首检索，会慢）'
+                : T('music.track.batchAutoTag') || '自动匹配并写入'}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* 批量写入的确认面板：还没落盘，只是把「准备改成什么」摊开给人看 */}
+      {batchPlan && (
+        <div className="px-4 py-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0 bg-[var(--element-muted)]/40">
+          <div className="text-xs text-neutral-600 dark:text-stone-300 mb-1">
+            {(T('music.track.batchWillWrite') || '将写入 {n} 首，跳过 {s} 首 —— 确认前一个文件都没动').replace('{n}', String(batchPlan.plan.items.length)).replace('{s}', String(batchPlan.plan.skipped.length))}
+          </div>
+          {batchPlan.plan.items.length > 0 && (
+            <ul className="max-h-32 overflow-y-auto flex flex-col gap-0.5">
+              {batchPlan.plan.items.map((it) => (
+                <li key={it.filePath} className="text-[11px] text-neutral-600 dark:text-stone-300 truncate" title={it.filePath}>
+                  {String(it.filePath).split(/[\\/]/).pop()}
+                  <span className="text-neutral-400 dark:text-stone-500">
+                    {'  '}
+                    {BATCH_WRITABLE_FIELDS.filter((k) => it.draft[k])
+                      .map((k) => `${BATCH_FIELD_LABEL[k] || k}→${String(it.draft[k])}`)
+                      .join('  ')}
+                    {'  '}
+                    {it.source} {it.score}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {batchPlan.plan.skipped.length > 0 && (
+            <ul className="mt-1 max-h-24 overflow-y-auto flex flex-col gap-0.5">
+              {batchPlan.plan.skipped.map((sk) => (
+                <li key={sk.filePath || sk.title} className="text-[11px] text-neutral-400 dark:text-stone-500 truncate" title={sk.reason}>
+                  {sk.title}：{sk.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="flex items-center gap-2 mt-1.5">
+            <button
+              onClick={commitBatchPlan}
+              disabled={batchCommitting || batchPlan.plan.items.length === 0}
+              className="btn-press text-xs px-2.5 py-1 rounded-lg bg-[var(--element-bg)] text-white disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {batchCommitting
+                ? T('music.track.batchWriting') || '写入中…'
+                : `${T('music.track.batchConfirmWrite') || '确定写入'} ${batchPlan.plan.items.length} ${T('music.track.batchConfirmWriteUnit') || '首'}`}
+            </button>
+            <button
+              onClick={() => setBatchPlan(null)}
+              className="btn-press text-xs px-2.5 py-1 rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-[var(--element-muted)]"
+            >
+              {T('common.cancel') || '取消'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 写完的结果条：撤销走的是同一个批次号 */}
+      {batchReport && (
+        <div className="px-4 py-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0 bg-[var(--element-muted)]/40 flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-neutral-600 dark:text-stone-300">{batchReport.summary}</span>
+          {batchReport.written > 0 && onRollbackBatch && (
+            <button
+              onClick={rollbackBatchReport}
+              className="btn-press text-xs px-2 py-1 rounded-lg text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
+            >
+              {T('music.track.rollbackThisBatch') || '撤销这批'}
+            </button>
+          )}
+          <button
+            onClick={() => setBatchReport(null)}
+            className="btn-press text-xs px-2 py-1 rounded-lg text-neutral-400 dark:text-stone-500 hover:bg-[var(--element-muted)]"
+          >
+            {T('common.close') || '关闭'}
           </button>
         </div>
       )}
