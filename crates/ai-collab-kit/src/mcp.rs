@@ -276,6 +276,20 @@ fn tool_defs() -> Value {
             }
         },
         {
+            "name": "collab_park_task",
+            "description": "挂起任务等待输入：queued / running → waiting，问题写入结果与时间线。恢复用 collab_claim_task。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "roomId": { "type": "string" },
+                    "taskId": { "type": "string" },
+                    "question": { "type": "string", "description": "需要用户/外部补充的信息" }
+                },
+                "required": ["roomId", "taskId", "question"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "collab_delete_task",
             "description": "从任务表删除任务（执行中的任务需先取消）。删除会在时间线留一条系统消息。",
             "inputSchema": {
@@ -495,6 +509,14 @@ fn call_tool(base: &Path, params: &Value) -> Result<Value, String> {
                 "assignment.cancelled",
                 Some(detail),
             )?;
+            Ok(json!({ "task": updated }))
+        }
+        "collab_park_task" => {
+            let room_id = require_str(&args, "roomId")?;
+            find_room(base, &room_id)?;
+            let task_id = require_str(&args, "taskId")?;
+            let question = require_str(&args, "question")?;
+            let updated = runtime::park_assignment_core(base, &room_id, &task_id, &question)?;
             Ok(json!({ "task": updated }))
         }
         "collab_delete_task" => {

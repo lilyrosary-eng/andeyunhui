@@ -284,6 +284,8 @@ pub fn claim_assignment_core(
             ));
         }
         assignment.status = AssignmentStatus::Running;
+        // 认领表示重新开工：挂起时写在 result 里的问题不再算结果。
+        assignment.result = None;
         assignment.claimed_by = claimed_by.map(|value| value.to_string());
         assignment.updated_at = now_ms();
         let snapshot = assignment.clone();
@@ -301,6 +303,46 @@ pub fn claim_assignment_core(
         Some(json!({ "claimedBy": updated.claimed_by })),
     )?;
     Ok(updated)
+}
+
+/// 把任务停在「等待输入」：queued / running → waiting，问题写进 result。
+/// 恢复用 `claim_assignment_core`（waiting → running），外部 harness 与宿主共用同一路径。
+pub fn park_assignment_core(
+    base: &Path,
+    room_id: &str,
+    assignment_id: &str,
+    question: &str,
+) -> Result<Assignment, String> {
+    let task = store::read_assignments(base)
+        .remove(room_id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|task| task.id == assignment_id)
+        .ok_or_else(|| format!("任务不存在: {assignment_id}"))?;
+    if matches!(
+        task.status,
+        AssignmentStatus::Completed
+            | AssignmentStatus::Failed
+            | AssignmentStatus::Cancelled
+    ) {
+        return Err(format!(
+            "任务当前状态为 {}，无法挂起",
+            task.status.as_str()
+        ));
+    }
+    let text = clip_text(question.trim(), 4000);
+    if text.is_empty() {
+        return Err("等待说明不能为空".to_string());
+    }
+    set_assignment_status_core(
+        base,
+        room_id,
+        assignment_id,
+        AssignmentStatus::Waiting,
+        Some(text.clone()),
+        "assignment.waiting",
+        Some(text),
+    )
 }
 
 /// 删除任务（只能删未在执行的）：从任务表移除，并在时间线留一条系统消息。
@@ -1479,5 +1521,29 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(base);
         let _ = std::fs::remove_dir_all(base2);
+    }
+
+    /// P3：挂起写 waiting + 问题；恢复（认领）回到 running 并清掉旧问题。
+    #[test]
+    fn park_then_resume_task() {
+        let base = temp_base("park");
+        let room = test_room("room_park");
+        let created =
+            create_assignment_core(&base, &room, None, "worker", "需要补充信息").unwrap().assignment;
+
+        let parked = park_assignment_core(&base, &room.id, &created.id, "请提供 API Key").unwrap();
+        assert_eq!(parked.status, AssignmentStatus::Waiting);
+        assert_eq!(parked.result.as_deref(), Some("请提供 API Key"));
+        assert!(store::read_events(&base, &room.id, None)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "assignment.waiting"));
+
+        let resumed =
+            claim_assignment_core(&base, &room.id, &created.id, Some("trae"), "恢复执行".to_string())
+                .unwrap();
+        assert_eq!(resumed.status, AssignmentStatus::Running);
+        assert!(resumed.result.is_none());
+        let _ = std::fs::remove_dir_all(base);
     }
 }

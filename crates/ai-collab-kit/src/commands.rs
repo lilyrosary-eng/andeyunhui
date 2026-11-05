@@ -123,6 +123,7 @@ pub fn collab_mcp_info(app: AppHandle) -> Result<serde_json::Value, String> {
             "collab_claim_task",
             "collab_complete_task",
             "collab_fail_task",
+            "collab_park_task",
             "collab_cancel_task",
             "collab_delete_task"
         ]
