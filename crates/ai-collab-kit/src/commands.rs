@@ -4,6 +4,7 @@
 //! 宿主只需在 `main.rs` 的 `generate_handler!` 里注册一次。
 
 use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::json;
 use tauri::AppHandle;
@@ -34,9 +35,29 @@ fn save_room(app: &AppHandle, room: &Room) -> Result<(), String> {
     store::write_rooms(&base, &rooms)
 }
 
+/// 恢复只处理「上一进程」的遗留：插件卸载/重挂载会让前端再次调用，
+/// 进程内只允许执行一次，避免把当前正在跑的任务误判为中断。
+static RECOVERY_DONE: OnceLock<Mutex<bool>> = OnceLock::new();
+
 #[tauri::command]
 pub fn collab_harnesses(app: AppHandle) -> Vec<HarnessInfo> {
     harness::catalog(&app)
+}
+
+/// 启动恢复：把上一进程遗留的 running / queued 任务结掉。
+/// 外部 harness（MCP）拥有的任务保持原状，由对方继续执行。
+#[tauri::command]
+pub fn collab_recover(app: AppHandle) -> Result<runtime::RecoverySummary, String> {
+    let flag = RECOVERY_DONE.get_or_init(|| Mutex::new(false));
+    {
+        let mut done = flag.lock().map_err(|_| "恢复状态锁已损坏".to_string())?;
+        if *done {
+            return Ok(runtime::RecoverySummary::default());
+        }
+        *done = true;
+    }
+    let base = store::base_dir(&app)?;
+    runtime::recover_stale_assignments(&base)
 }
 
 /// MCP 接入信息：设置页展示，外部 harness 直接复制。

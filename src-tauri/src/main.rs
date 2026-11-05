@@ -2182,6 +2182,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             // ========== 全局：AI 协作组态（crates/ai-collab-kit，P0 echo harness）==========
             collab_harnesses,
             collab_mcp_info,
+            collab_recover,
             collab_room_list,
             collab_room_create,
             collab_room_delete,

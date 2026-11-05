@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
@@ -987,6 +988,66 @@ pub fn cancel_assignment(
     emit_cancelled(app, base, room, assignment)
 }
 
+/// 启动恢复的统计。前端拿它决定是否提示用户。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoverySummary {
+    pub failed_running: usize,
+    pub failed_queued: usize,
+    pub kept_external: usize,
+}
+
+/// 应用启动时清理上一进程遗留的任务。
+///
+/// 为什么必须做：任务表只落盘状态，进程一退出执行器就不存在了；
+/// 不清理的话 `running` 会永远转圈，`queued` 也没人认领。
+///
+/// 归属规则：
+/// - 本应用执行的成员（echo / dsh / 未知）→ 状态一律置 failed，写明「应用重启」；
+/// - `mcp` 成员由**外部进程**执行，应用重启不会中断它 → 保留原状态，交给对方继续处理。
+pub fn recover_stale_assignments(base: &Path) -> Result<RecoverySummary, String> {
+    let rooms = store::read_rooms(base);
+    let mut summary = RecoverySummary::default();
+    for (room_id, tasks) in store::read_assignments(base) {
+        let Some(room) = rooms.iter().find(|room| room.id == room_id) else {
+            continue;
+        };
+        for task in tasks {
+            let harness = room
+                .agents
+                .iter()
+                .find(|agent| agent.id == task.assignee_id)
+                .map(|agent| agent.harness_id.as_str())
+                .unwrap_or(crate::harness::ECHO);
+            // 只处理未结束的任务。
+            if !matches!(task.status, AssignmentStatus::Running | AssignmentStatus::Queued) {
+                continue;
+            }
+            if harness == crate::harness::MCP {
+                summary.kept_external += 1;
+                continue;
+            }
+            let reason = if task.status == AssignmentStatus::Running {
+                summary.failed_running += 1;
+                "应用重启，任务执行中断"
+            } else {
+                summary.failed_queued += 1;
+                "应用重启，任务未开始执行"
+            };
+            set_assignment_status_core(
+                base,
+                &room_id,
+                &task.id,
+                AssignmentStatus::Failed,
+                Some(reason.to_string()),
+                "assignment.failed",
+                Some(reason.to_string()),
+            )?;
+        }
+    }
+    Ok(summary)
+}
+
 pub fn snapshot(base: &Path, room: Room) -> Result<RoomSnapshot, String> {
     let assignments = store::read_assignments(base)
         .remove(&room.id)
@@ -1041,19 +1102,29 @@ mod tests {
         dir
     }
 
-    fn test_room() -> Room {
+    fn test_room(room_id: &str) -> Room {
         Room {
-            id: "room_test".to_string(),
+            id: room_id.to_string(),
             name: "MCP 测试房间".to_string(),
             lead_id: "lead".to_string(),
-            agents: vec![AgentSpec {
-                id: "worker".to_string(),
-                name: "执行".to_string(),
-                harness_id: crate::harness::ECHO.to_string(),
-                persona: String::new(),
-                model: String::new(),
-                native_session_id: None,
-            }],
+            agents: vec![
+                AgentSpec {
+                    id: "worker".to_string(),
+                    name: "执行".to_string(),
+                    harness_id: crate::harness::ECHO.to_string(),
+                    persona: String::new(),
+                    model: String::new(),
+                    native_session_id: None,
+                },
+                AgentSpec {
+                    id: "trae".to_string(),
+                    name: "外部".to_string(),
+                    harness_id: crate::harness::MCP.to_string(),
+                    persona: String::new(),
+                    model: String::new(),
+                    native_session_id: None,
+                },
+            ],
             workspace: None,
             source: None,
             created_at: 0,
@@ -1065,7 +1136,7 @@ mod tests {
     #[test]
     fn mcp_core_flow_creates_claims_and_completes() {
         let base = temp_base("mcp-core");
-        let room = test_room();
+        let room = test_room("room_test");
 
         let created = create_assignment_core(&base, &room, None, "worker", "写一段说明").unwrap();
         assert_eq!(created.assignment.status, AssignmentStatus::Queued);
@@ -1103,6 +1174,76 @@ mod tests {
         assert_eq!(
             events.iter().map(|event| event.seq).collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 重启恢复只碰本应用执行的任务；外部 harness 的 running/queued 必须原样保留，
+    /// 否则用户重启宿主会把对方正在干的活误判为失败。
+    #[test]
+    fn recovery_fails_local_stale_tasks_and_keeps_external() {
+        let base = temp_base("recovery");
+        // 恢复按 rooms.json 判定成员归属，测试里必须先把房间落盘。
+        let room = test_room("room_recovery");
+        store::write_rooms(&base, &[room.clone()]).unwrap();
+
+        let queued_local = create_assignment_core(&base, &room, None, "worker", "未开始")
+            .unwrap()
+            .assignment;
+        let running_local = create_assignment_core(&base, &room, None, "worker", "执行中")
+            .unwrap()
+            .assignment;
+        set_assignment_status_core(
+            &base,
+            &room.id,
+            &running_local.id,
+            AssignmentStatus::Running,
+            None,
+            "assignment.running",
+            None,
+        )
+        .unwrap();
+
+        let queued_mcp = create_assignment_core(&base, &room, None, "trae", "等认领")
+            .unwrap()
+            .assignment;
+        let running_mcp = create_assignment_core(&base, &room, None, "trae", "外部执行中")
+            .unwrap()
+            .assignment;
+        set_assignment_status_core(
+            &base,
+            &room.id,
+            &running_mcp.id,
+            AssignmentStatus::Running,
+            None,
+            "assignment.running",
+            None,
+        )
+        .unwrap();
+
+        let summary = recover_stale_assignments(&base).unwrap();
+        assert_eq!(summary.failed_running, 1);
+        assert_eq!(summary.failed_queued, 1);
+        assert_eq!(summary.kept_external, 2);
+
+        let tasks = store::read_assignments(&base).remove(&room.id).unwrap();
+        let find = |id: &str| tasks.iter().find(|task| task.id == id).cloned().unwrap();
+        assert_eq!(find(&queued_local.id).status, AssignmentStatus::Failed);
+        assert_eq!(find(&running_local.id).status, AssignmentStatus::Failed);
+        assert!(find(&running_local.id)
+            .result
+            .unwrap_or_default()
+            .contains("应用重启"));
+        assert_eq!(find(&queued_mcp.id).status, AssignmentStatus::Queued);
+        assert_eq!(find(&running_mcp.id).status, AssignmentStatus::Running);
+
+        let events = store::read_events(&base, &room.id, None).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "assignment.failed")
+                .count(),
+            2
         );
         let _ = std::fs::remove_dir_all(base);
     }

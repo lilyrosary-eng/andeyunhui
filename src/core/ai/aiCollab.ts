@@ -96,6 +96,13 @@ export interface CollabRoomSnapshot {
   events: CollabEvent[];
 }
 
+/** 启动恢复结果：上一进程遗留任务的处理统计。 */
+export interface CollabRecovery {
+  failedRunning: number;
+  failedQueued: number;
+  keptExternal: number;
+}
+
 /** MCP 控制面接入信息（`collab_mcp_info`）：给 Trae / WorkBuddy 等 harness 直接复制。 */
 export interface CollabMcpInfo {
   root: string;
@@ -193,6 +200,15 @@ export function useAiCollab(): UseAiCollabResult {
     let alive = true;
     void (async () => {
       try {
+        // 先恢复再读快照：否则上一进程遗留的 running 会一直显示为执行中。
+        try {
+          const recovery = await invoke<CollabRecovery>('collab_recover');
+          if (recovery.failedRunning + recovery.failedQueued > 0) {
+            console.info('[ai-collab] 已结束上次中断的任务:', recovery);
+          }
+        } catch {
+          // 恢复失败不阻断房间加载；最坏情况是旧任务仍显示执行中。
+        }
         const [catalog, list] = await Promise.all([
           invoke<CollabHarnessInfo[]>('collab_harnesses'),
           invoke<CollabRoom[]>('collab_room_list'),
