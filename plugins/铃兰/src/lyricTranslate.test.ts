@@ -36,8 +36,8 @@ describe('LRC 解析与待译内容', () => {
   });
 });
 
-describe('译文贴回时间轴', () => {
-  it('行数一致时逐行贴回原前缀并保留元信息头与空行', () => {
+describe('译文贴回时间轴（默认行内双语，不替换原文）', () => {
+  it('行数一致时逐行拼成「原文 译文」，元信息头与空行原样保留', () => {
     const lines = parseLrc(LRC);
     const got = rejoinTranslated(lines, 'Yellow flower of the story\nDrifting since the year I was born\nA repeated line');
     expect(got.aligned).toBe(true);
@@ -45,19 +45,28 @@ describe('译文贴回时间轴', () => {
       [
         '[ti:晴天]',
         '[ar:周杰伦]',
-        '[00:12.34]Yellow flower of the story',
-        '[00:16.00]Drifting since the year I was born',
+        '[00:12.34]故事的小黄花 Yellow flower of the story',
+        '[00:16.00]从出生那年就飘着 Drifting since the year I was born',
         '',
-        '[00:20.00][01:20.00]A repeated line',
+        '[00:20.00][01:20.00]重复的一行 A repeated line',
       ].join('\n'),
     );
+    // 原文一个字都没丢：这是这条规则存在的全部理由
+    expect(got.text).toContain('故事的小黄花');
+  });
+
+  it('mode=replace 才只留译文（显式要求时才用）', () => {
+    const lines = parseLrc(LRC);
+    const got = rejoinTranslated(lines, 'Yellow flower of the story\nDrifting since the year I was born\nA repeated line', 'replace');
+    expect(got.text).toContain('[00:12.34]Yellow flower of the story');
+    expect(got.text).not.toContain('故事的小黄花');
   });
 
   it('译文里多出的空行被忽略，不算作不对齐', () => {
     const lines = parseLrc('[00:01.00]A\n[00:02.00]B');
     const got = rejoinTranslated(lines, 'x\n\n\ny');
     expect(got.aligned).toBe(true);
-    expect(got.text).toBe('[00:01.00]x\n[00:02.00]y');
+    expect(got.text).toBe('[00:01.00]A x\n[00:02.00]B y');
   });
 
   it('★ 行数对不上时不硬凑时间轴：退化为纯译文并如实标记', () => {
@@ -73,7 +82,7 @@ describe('译文贴回时间轴', () => {
     const lines = parseLrc('第一行\n第二行');
     const got = rejoinTranslated(lines, 'one\ntwo');
     expect(got.aligned).toBe(true);
-    expect(got.text).toBe('one\ntwo');
+    expect(got.text).toBe('第一行 one\n第二行 two');
   });
 });
 
@@ -88,7 +97,7 @@ describe('translateLyrics 调用与如实回报', () => {
     }));
     const r = await translateLyrics('[00:01.00]A\n[00:02.00]B\n[00:03.00]C', { invoke, targetLang: '英语' });
     expect(r.aligned).toBe(true);
-    expect(r.text).toBe('[00:01.00]one\n[00:02.00]two\n[00:03.00]three');
+    expect(r.text).toBe('[00:01.00]A one\n[00:02.00]B two\n[00:03.00]C three');
     expect(r.meta).toContain('节点 bing');
     expect(r.meta).toContain('源语言 zh');
   });
@@ -137,8 +146,23 @@ describe('translateLyrics 调用与如实回报', () => {
   it('兼容只返回裸字符串的老接口形态', async () => {
     const invoke = vi.fn(async () => 'plain translation');
     const r = await translateLyrics('原文一行', { invoke });
-    expect(r.text).toBe('plain translation');
+    expect(r.text).toBe('原文一行 plain translation');
     expect(r.aligned).toBe(true);
+  });
+
+  it('中文原文→外语译文：如实说明播放链拆不出副行（原文仍在，不是丢了）', async () => {
+    const invoke = vi.fn(async () => ({ text: 'Bonjour\nAu revoir', node: 'bing' }));
+    const r = await translateLyrics('[00:01.00]你好\n[00:02.00]再见', { invoke, targetLang: '法语' });
+    expect(r.aligned).toBe(true);
+    expect(r.text).toBe('[00:01.00]你好 Bonjour\n[00:02.00]再见 Au revoir');
+    expect(r.meta).toContain('中文→外语');
+  });
+
+  it('外语原文→中文译文：正是播放链认的格式，不该出现方向提示', async () => {
+    const invoke = vi.fn(async () => ({ text: '你好\n再见', node: 'bing' }));
+    const r = await translateLyrics('[00:01.00]Hello\n[00:02.00]Bye', { invoke, targetLang: '中文' });
+    expect(r.text).toBe('[00:01.00]Hello 你好\n[00:02.00]Bye 再见');
+    expect(r.meta).not.toContain('中文→外语');
   });
 
   it('请求参数名是 camelCase 的 targetLang', async () => {

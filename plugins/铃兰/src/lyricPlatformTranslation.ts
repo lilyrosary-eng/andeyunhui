@@ -40,22 +40,28 @@ interface TimedLike {
 }
 
 /**
- * 把「带译文的原行」拼成译文 LRC。
+ * 把「带译文的原行」拼成**行内双语** LRC：`[时间戳]原文 译文`。
  *
- * 只输出有 translation 的行，并沿用原行的时间戳 —— 时间戳来自原文，不重新计算，
- * 所以不会出现"译文贴错轴"。
+ * 时间戳沿用原行，不重新计算，所以不会出现「译文贴错轴」。
+ * 没译文的行保持原样输出 —— 半首歌有译文时，另半首仍然是原文，
+ * 而不是像以前那样把整首换成只剩译文、原文丢了。
+ * 这个格式正是播放链一直在拆的那种（`lyricsSync.splitInlineTranslation`）。
  */
 export function buildTranslatedLrc(
   lines: TimedLike[],
 ): { text: string; hit: number; total: number } {
   const usable = lines.filter((l) => (l.text || '').trim() !== '' || (l.translation || '').trim() !== '');
   const parts: string[] = [];
+  let hit = 0;
   for (const l of usable) {
+    const o = (l.text || '').trim();
     const t = (l.translation || '').trim();
-    if (!t) continue;
-    parts.push(`${stampOf(l.time_ms ?? 0)}${t}`);
+    if (!o && !t) continue;
+    const body = o && t ? `${o} ${t}` : o || t;
+    if (o && t) hit += 1;
+    parts.push(`${stampOf(l.time_ms ?? 0)}${body}`);
   }
-  return { text: parts.join(String.fromCharCode(10)), hit: parts.length, total: usable.length };
+  return { text: parts.join(String.fromCharCode(10)), hit, total: usable.length };
 }
 
 /** 解析 LRC 文本成 {time_ms, text}（只取时间戳行，忽略元信息头） */

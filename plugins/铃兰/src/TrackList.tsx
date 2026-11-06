@@ -15,7 +15,7 @@ import { baseName, formatMillis } from './tagHistoryView';
 
 /** 字段中文展示名（批量确认面板与「分项自动获取」的来源提示共用） */
 const FIELD_LABEL_CN: Record<string, string> = { title: '标题', artist: '歌手', album: '专辑' };
-import { loadTargetLang, TARGET_LANGS, TRANSLATE_NODES, translateSettingsFor, loadTranslateSettings } from '@/lib/translateLanguages';
+import { loadLyricsTargetLang, saveLyricsTargetLang, TARGET_LANGS, TRANSLATE_NODES, translateSettingsFor, loadTranslateSettings } from '@/lib/translateLanguages';
 import { isGlossaryOff, learnGlossaryPairs } from '@/lib/translateGlossary';
 
 interface Track {
@@ -307,6 +307,8 @@ export function TrackList({
   const [pendingCoverUrl, setPendingCoverUrl] = useState<string | null>(null);
   // 翻译节点选择：'' = 跟随设置页的节点/链；其它值 = 本次强制用该节点
   const [translateNode, setTranslateNode] = useState('');
+  // 歌词的目标语言：独立于中转站翻译页那颗（共用引擎不等于共用预设，见 translateLanguages 注释）
+  const [lyricsTargetLang, setLyricsTargetLang] = useState<string>(() => loadLyricsTargetLang());
 
   // 歌词编辑器弹窗状态
   const [lyricsTrack, setLyricsTrack] = useState<Track | null>(null);
@@ -823,7 +825,7 @@ export function TrackList({
       const storedSettings = loadTranslateSettings();
       const res = await translateLyrics(lyricsDraft, {
         invoke: hostApi?.invoke ? (cmd, args) => hostApi.invoke(cmd, args) : undefined,
-        targetLang: loadTargetLang(),
+        targetLang: lyricsTargetLang,
         // 与设置页共用同一份配置（节点/凭证/链/术语表），这里只允许临时改本次节点
         settings: translateSettingsFor(translateNode || undefined),
       });
@@ -1510,10 +1512,13 @@ export function TrackList({
       {/* 自定义元信息编辑弹窗（替代 window.prompt） */}
       {editingTrack && (
         <div
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/30 dark:bg-black/50 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-[9999] flex items-center justify-center p-4"
           onClick={() => setEditingTrack(null)}
         >
-          <div className="flex items-start gap-4">
+          {/* 模糊单独放一层，不能挂在弹窗的父级上：backdrop-filter 会把整棵子树并进
+              一个合成层，滚动时每一帧都要重算全屏模糊 —— 这就是"滚动发粘"的来源 */}
+          <div className="absolute inset-0 bg-black/30 dark:bg-black/50 backdrop-blur-sm" aria-hidden />
+          <div className="relative flex items-start gap-4">
           <div
             className="w-full max-w-md max-h-[86vh] flex flex-col overflow-hidden rounded-xl bg-white dark:bg-stone-800 shadow-2xl p-6"
             onClick={(e) => e.stopPropagation()}
@@ -1612,7 +1617,7 @@ export function TrackList({
                 以前这里既没 max-height 也没 overflow-y-auto，结果上下两头都被裁掉
                 —— 标题看不见、确定/取消也点不到。flex-1 + min-h-0 是让 flex 子项
                 真的能滚起来的最小配方（少了 min-h-0，flex 会把高度撑回内容高）。 */}
-            <div className="flex-1 min-h-0 overflow-y-auto space-y-4 pr-1">
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain space-y-4 pr-1">
               <GroupTitle text={T('music.track.groupBasic') || '基本信息'} />
               <div>
                 <div className="flex items-center justify-between mb-1.5">
@@ -1839,10 +1844,12 @@ export function TrackList({
       )}
       {lyricsTrack && (
         <div
-          className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/40 dark:bg-black/60 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-[10000] flex items-center justify-center p-4"
           onClick={closeLyricsEditor}
         >
-          <div className="flex items-start gap-4">
+          {/* 同编辑弹窗：模糊单独一层，别让它把滚动子树卷进同一个合成层 */}
+          <div className="absolute inset-0 bg-black/40 dark:bg-black/60 backdrop-blur-sm" aria-hidden />
+          <div className="relative flex items-start gap-4">
             {lyricCandidates !== null && (
               <div
                 className="w-72 rounded-xl bg-white dark:bg-stone-800 shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
@@ -1945,10 +1952,23 @@ export function TrackList({
               </select>
             </div>
 
-            {/* 目标语言显式回显：不写出来，「点了没反应」就只能是猜 */}
-            <div className="px-5 pb-1 text-[11px] text-neutral-500 dark:text-stone-400">
-              {T('music.lyrics.translateTargetTo') || '译为'}：
-              {(TARGET_LANGS.find((l) => l.code === loadTargetLang()) || { label: loadTargetLang() }).label}
+            {/* 目标语言：可改且**只影响歌词**（引擎/节点/术语表仍与设置页共用）。
+                以前这里只是回显翻译页的预设，预设法语歌词就被翻成法语。 */}
+            <div className="px-5 pb-1 flex items-center gap-2 text-[11px] text-neutral-500 dark:text-stone-400">
+              <span>{T('music.lyrics.translateTargetTo') || '译为'}：</span>
+              <select
+                value={lyricsTargetLang}
+                onChange={(e) => {
+                  setLyricsTargetLang(e.target.value);
+                  saveLyricsTargetLang(e.target.value);
+                }}
+                title={T('music.lyrics.translateTargetHint') || '只作用于歌词翻译，与中转站翻译页的语言互不影响'}
+                className="px-2 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 border-0"
+              >
+                {TARGET_LANGS.map((l) => (
+                  <option key={l.code} value={l.code}>{l.label}</option>
+                ))}
+              </select>
             </div>
 
             {/* 翻译过程如实回显：实际节点 / 源语言 / 分段 / 全部 notices，不截断不改写 */}

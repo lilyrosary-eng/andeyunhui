@@ -14,8 +14,7 @@
  *   也不要贴着错位的时间戳 —— 错轴译文会让跟唱逐行错开，比没有轴更坏。
  */
 
-/** 一行 LRC 的解析结果 */
-export interface LrcLine {
+/** 一行 LRC 的解析结果 */export interface LrcLine {
   /** 原行的时间戳前缀串（可能多个连写），无则 null */
   stamps: string | null;
   /** 元信息头（如 [ti:晴天]），原样保留，null 表示普通行 */
@@ -25,6 +24,12 @@ export interface LrcLine {
 }
 
 const STAMP_RE = /^\s*(\[\d{1,2}:\d{2}(?:\.\d{1,3})?\])+/,metaRe = /^\s*\[[A-Za-z#][A-Za-z0-9_]*:.*\]\s*$/;
+
+/** 含中日韩汉字（用来判断「原文是中文歌」）。用转义写死码位，别用字面字符凑范围 ——
+ *  上一版写成字面区间，实际只覆盖到 U+4E00，「你」这种常用字全都不匹配。 */
+const isCjk = (s: string): boolean => /[㐀-䶿一-鿿豈-﫿]/.test(s);
+/** 含拉丁字母或数字（用来判断「译文是外语文」） */
+const hasLatin = (s: string): boolean => /[A-Za-z0-9]/.test(s);
 
 /** 拆分时间戳前缀与正文 */
 export function parseLrcLine(line: string): LrcLine {
@@ -55,13 +60,26 @@ export interface RejoinResult {
   aligned: boolean;
 }
 
+/** 贴法：双语行保留原文（应用本来的格式），替换只在用户明确要「只要译文」时用 */
+export type RejoinMode = 'bilingual' | 'replace';
+
 /**
  * 把译文贴回原时间轴。
  *
  * 行数一致才贴；否则退化为纯文本，并把原因交给调用方展示。
  * 译文里多出来的空行会被忽略（部分节点会在段间补空行），避免因此误判不对齐。
+ *
+ * `bilingual`（默认）产出 `原文 译文` 一行 —— 这是本项目歌词一直在用的行内双语格式
+ * （见 `lyricsSync.splitInlineTranslation`：外语在前、中文在后才拆），
+ * 桌面歌词与沉浸页的「译/音」三态全靠它。
+ * 以前这里默认把原文整行替换掉，用户拿到的是一份**丢了原文**的译文，
+ * 播放链也再也拆不出副行 —— 替换不该是默认行为。
  */
-export function rejoinTranslated(lines: LrcLine[], translated: string): RejoinResult {
+export function rejoinTranslated(
+  lines: LrcLine[],
+  translated: string,
+  mode: RejoinMode = 'bilingual',
+): RejoinResult {
   const want = lines.filter((l) => l.meta === null && l.text !== '').length;
   const got = translated
     .split(/\r?\n/)
@@ -75,7 +93,8 @@ export function rejoinTranslated(lines: LrcLine[], translated: string): RejoinRe
     if (l.meta !== null) return l.meta;
     if (l.text === '') return '';
     const piece = got[i++];
-    return l.stamps ? `${l.stamps}${piece}` : piece;
+    const body = mode === 'bilingual' ? `${l.text} ${piece}` : piece;
+    return l.stamps ? `${l.stamps}${body}` : body;
   });
   return { text: out.join('\n'), aligned: true };
 }
@@ -123,6 +142,8 @@ export interface TranslateLyricsDeps {
   /** 随请求下发的翻译设置（节点 + 凭证 + 链）；由调用方用宿主 translateSettingsFor 构造，
    *  这样"选哪个节点"和设置页共用同一份配置，不在插件里另立一套。 */
   settings?: unknown;
+  /** 贴法，默认 bilingual（保留原文）。 */
+  mode?: RejoinMode;
 }
 
 /**
@@ -160,13 +181,19 @@ export async function translateLyrics(
 
   // 兼容：老签名直接返回裸字符串
   const outcome: TranslateOutcomeLike = typeof res === 'string' ? { text: res } : res || {};
-  const joined = rejoinTranslated(lines, outcome.text || '');
+  const mode: RejoinMode = deps.mode || 'bilingual';
+  const joined = rejoinTranslated(lines, outcome.text || '', mode);
   const notices = Array.isArray(outcome.notices) ? outcome.notices : [];
   // 译文与原文一样时，用户看到的就是「点了没反应」——必须把它说破
   const unchanged = (outcome.text || '').trim() !== '' && (outcome.text || '').trim() === payload.trim();
   const metaBits = [describeOutcome(outcome, joined.aligned), ...notices].filter(Boolean);
   if (unchanged) {
     metaBits.push('译文与原文一致：多半原文已是目标语言，或该节点未实际翻译');
+  }
+  // 行内双语只有「外语在前、中文在后」才会被播放链拆成副行（见 lyricsSync 的拆分规则）。
+  // 中文歌翻成外语时它拆不出来，会连成一行显示 —— 与其让用户以为坏了，不如当场说清。
+  if (joined.aligned && mode === 'bilingual' && isCjk(payload) && hasLatin(outcome.text || '')) {
+    metaBits.push('方向是中文→外语：播放链的行内双语只认「外语+中文」，这一版会连成一行显示，原文没有丢');
   }
   return {
     text: joined.text,

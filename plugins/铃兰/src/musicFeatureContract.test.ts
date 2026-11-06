@@ -105,10 +105,23 @@ describe('歌词编辑器（与标签编辑同居 TrackList.tsx，最易被误�
       'onClick={runAiTranslate}',
       'translateLyrics',
       'translate_text',
-      'loadTargetLang',
+      'loadLyricsTargetLang',
+      'saveLyricsTargetLang',
       'lyricsTranslateNotice',
       'setTranslateNode',
     ]);
+    // 目标语言必须走歌词自己那份：共用引擎不等于共用预设。
+    // 以前读的是中转站翻译页的 ts_translate_target，用户预设法语 → 歌词被翻成法语。
+    const src = read('TrackList.tsx');
+    expect(src, '歌词不许再借用翻译页的目标语言预设').not.toContain('targetLang: loadTargetLang()');
+  });
+
+  it('译文默认行内双语（原文保留），两条路径都是', () => {
+    const tr = read('lyricTranslate.ts');
+    expect(tr).toContain("mode: RejoinMode = 'bilingual'");
+    expect(tr).toContain('${l.text} ${piece}');
+    const pf = read('lyricPlatformTranslation.ts');
+    expect(pf).toContain('${o} ${t}');
   });
 });
 
@@ -140,6 +153,18 @@ describe('编辑弹窗字段面（13 项）与提交语义', () => {
   it('写回后给出「撤销这次」入口，并显示被格式丢掉的字段', () => {
     mustContain('TrackList.tsx', ['onRollbackBatch', 'rollbackThis', 'lastSave', 'droppedHint']);
     mustContain('index.tsx', ['music_rollback_tag_edit', 'music_tag_field_support', 'buildEditArgs']);
+  });
+
+  it('弹窗必须「有界高度 + 内部滚动」，且模糊不挂在弹窗父层上', () => {
+    const src = read('TrackList.tsx');
+    // 13 个字段早就高过视口；没有 max-height/滚动容器时上下两头一起溢出，
+    // 表现是「标题看不见、确定/取消点不到、滚轮无反应」（2026-11-05 实机抓到）
+    expect(src).toContain('max-h-[86vh]');
+    expect(src).toContain('flex-1 min-h-0 overflow-y-auto overscroll-contain');
+    expect(src).toContain('mt-4 shrink-0 flex justify-end gap-2');
+    // backdrop-filter 在父级会把整棵子树并进一个合成层，滚动时每帧重算模糊 → 手感发粘
+    expect(src).toContain('absolute inset-0 bg-black/30 dark:bg-black/50 backdrop-blur-sm');
+    expect(src).not.toContain('justify-center bg-black/30 dark:bg-black/50 backdrop-blur-sm');
   });
 });
 

@@ -31,13 +31,19 @@ describe('时间戳与覆盖率', () => {
 });
 
 describe('拼译文 LRC', () => {
-  it('只输出有译文的行，并沿用原时间戳', () => {
+  it('拼成行内双语：没译文的行也留着（原文不许被丢掉）', () => {
     const got = buildTranslatedLrc([
       { time_ms: 1000, text: '原文一', translation: 'one' },
       { time_ms: 2000, text: '原文二', translation: '  ' },
       { time_ms: 3000, text: '原文三', translation: 'three' },
     ]);
-    expect(got.text).toBe('[00:01.00]one' + String.fromCharCode(10) + '[00:03.00]three');
+    expect(got.text).toBe(
+      '[00:01.00]原文一 one' +
+        String.fromCharCode(10) +
+        '[00:02.00]原文二' +
+        String.fromCharCode(10) +
+        '[00:03.00]原文三 three',
+    );
     expect(got).toMatchObject({ hit: 2, total: 3 });
   });
 

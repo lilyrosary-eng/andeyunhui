@@ -76,6 +76,35 @@ export function saveTargetLang(v: string): void {
   }
 }
 
+/**
+ * 歌词翻译的目标语言 —— 和上面那颗「翻译页目标语言」是**两个键**。
+ *
+ * 共用引擎是对的（同一套多节点链、同一份术语表、同一份凭证），
+ * 共用目标语言是错的：中转站页上次翻成法语，跟歌词要翻成什么毫无关系。
+ * 2026-11-05 用户实测到的正是这个串味（预设法语 → 歌词被翻成法语）。
+ * 默认中文：播放链的行内双语只认「外语在前、中文在后」。
+ */
+const KEY_LYRICS_TARGET = 'music_lyrics_target';
+export const DEFAULT_LYRICS_TARGET = '中文';
+
+export function loadLyricsTargetLang(): string {
+  try {
+    const v = localStorage.getItem(KEY_LYRICS_TARGET);
+    if (v && TARGET_LANGS.some((l) => l.code === v)) return v;
+  } catch {
+    /* localStorage 不可用时回默认 */
+  }
+  return DEFAULT_LYRICS_TARGET;
+}
+
+export function saveLyricsTargetLang(v: string): void {
+  try {
+    localStorage.setItem(KEY_LYRICS_TARGET, v);
+  } catch {
+    /* 忽略持久化失败 */
+  }
+}
+
 // ==================== 多节点翻译（2026-11-04）====================
 //
 // 节点可用性是**本机真实请求实测**的，不是看文档猜的。Rust 侧 translate_service.rs
