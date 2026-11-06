@@ -422,8 +422,8 @@ describe('歌词翻译的 AI 模型选择器（用户实机指出：选了 AI �
     expect(p).toContain("invoke('ai_get_config')");
     // 只拦真 import（注释里提到包名不算），否则以后谁写句解释就把这条断言踩红
     expect(p, '插件直接引 tauri api 会绕过权限闸门').not.toMatch(/from\s+['"]@tauri-apps/);
-    // 分组渲染与宿主共用一份（厂商分组 + 粘性标题），不在插件里另画一套
-    expect(p).toContain("from '@/components/ModelPicker'");
+    // 分组渲染与宿主共用全站同一个 InlineSelect（厂商分组 + 粘性标题），不另画一套
+    expect(p).toContain("from '@/components/ui/inline-select'");
     expect(p).toContain("from '@/lib/aiModelTree'");
   });
 

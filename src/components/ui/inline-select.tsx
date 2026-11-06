@@ -246,7 +246,9 @@ export function InlineSelect({
             {filtered.map((g) => (
               <div key={g.label}>
                 {g.label && (
-                  <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-neutral-400 dark:text-stone-500">
+                  /* 分组标题钉在滚动区顶部：滚过一家厂商的模型之前一直看得见它，
+                     滚完才换成下一家。底色必须是实的（与面板同色），否则模型行会从底下透出来。 */
+                  <div className="sticky top-0 z-10 bg-white dark:bg-stone-900 px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-neutral-400 dark:text-stone-500">
                     {g.label}
                   </div>
                 )}

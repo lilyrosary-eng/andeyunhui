@@ -4,13 +4,13 @@
 // 而这个字段以前**没有任何界面能填** —— 后端 `resolve_target(config, profile_id)`
 // 只能退回「AI 设置里当前选中的那个模型」。用户配了七八个模型，翻译却只能跟着对话模型走。
 //
-// 为什么是树而不是平铺：模型数量多，一条长下拉根本选不动。按预设厂商分组、
-// 厂商标题滚动时钉在面板顶部（见 ModelPicker），才是「看完这家再看那家」。
-//
-// 三处共用而不是各写一份：用户已经反复指出过「多个输入点对应一个功能」的问题。
+// 为什么是「厂商分组 + 粘性标题」：模型数量多（一个中转站上百条），平铺一条长下拉选不动。
+// 表现层复用全站已有的 `InlineSelect`（它已经有搜索、fixed 定位、键盘、分组），
+// 分组标题在滚动时钉在面板顶部 —— 看完这家才换下一家。这样全站只有一套下拉实现，
+// 不再为翻译单独维护一份。
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { ModelPicker } from '@/components/ModelPicker';
+import { InlineSelect } from '@/components/ui/inline-select';
 import {
   buildModelTree,
   findModelLabel,
@@ -21,7 +21,7 @@ import {
 interface Props {
   /** 只有这次会走到 AI 才显示；不显示时也不去白读一次配置 */
   visible: boolean;
-  /** 当前选中的模型 id；undefined = 跟随 AI 设置里选中的模型 */
+  /** 当前选中的模型 id；空串/undefined = 跟随 AI 设置里选中的模型 */
   value?: string;
   onChange: (profileId?: string) => void;
   label: string;
@@ -63,14 +63,27 @@ export function TranslateModelPicker(props: Props) {
       <span className="text-neutral-500 dark:text-stone-400 shrink-0">{label}</span>
       {!tree ? (
         <span className="text-neutral-400 dark:text-stone-500">{loadingLabel}</span>
+      ) : list.length === 0 ? (
+        <span className="text-neutral-400 dark:text-stone-500">
+          {note ? `${emptyLabel}（${note}）` : emptyLabel}
+        </span>
       ) : (
-        <ModelPicker
-          tree={list}
-          value={value}
-          onChange={onChange}
-          summary={summary || undefined}
-          note={note}
-          labels={{ pick: pickLabel, follow: followLabel, empty: emptyLabel }}
+        <InlineSelect
+          value={value ?? ''}
+          onChange={(v) => onChange(v || undefined)}
+          placeholder={pickLabel}
+          groups={[
+            { label: '', options: [{ value: '', label: followLabel }] },
+            ...list.map((g) => ({
+              label: g.name,
+              options: g.models.map((m) => ({
+                value: m.id,
+                label: m.label,
+                // 触发按钮上要能看出「哪家的哪个模型」
+                shortLabel: `${g.name} · ${m.label}`,
+              })),
+            })),
+          ]}
         />
       )}
       {stale && <span className="text-amber-600 dark:text-amber-400">{staleLabel}</span>}
