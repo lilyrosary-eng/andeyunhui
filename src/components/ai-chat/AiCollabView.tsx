@@ -32,6 +32,8 @@ interface AiCollabViewProps {
   /** 新建 .Talk 信箱房间（需绑定工作目录后任务才会投递） */
   onCreateMailboxRoom?: () => void;
   mailboxAvailable?: boolean;
+  /** 同一 harness 内多模型房间：models 按成员顺序传入，空串表示用默认模型 */
+  onCreateMultiModelRoom?: (models: string[]) => void;
   deepseekAvailable?: boolean;
   dshSessions: DshSessionSummary[];
   dshSessionsLoading: boolean;
@@ -378,6 +380,7 @@ export const AiCollabView = memo(function AiCollabView({
   streamJsonAvailable,
   onCreateMailboxRoom,
   mailboxAvailable,
+  onCreateMultiModelRoom,
   deepseekAvailable,
   dshSessions,
   dshSessionsLoading,
@@ -393,6 +396,9 @@ export const AiCollabView = memo(function AiCollabView({
   const [draft, setDraft] = useState('');
   const [importOpen, setImportOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
+  const [multiOpen, setMultiOpen] = useState(false);
+  const [leadModel, setLeadModel] = useState('');
+  const [workerModel, setWorkerModel] = useState('');
 
   const importDialog = importOpen ? (
     <DshSessionImportDialog
@@ -431,6 +437,15 @@ export const AiCollabView = memo(function AiCollabView({
                 className="btn-press rounded-full border border-emerald-500/40 bg-emerald-500/10 px-5 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300"
               >
                 DeepSeek 本地房间
+              </button>
+            )}
+            {deepseekAvailable && onCreateMultiModelRoom && (
+              <button
+                onClick={() => setMultiOpen(true)}
+                title="同一个 DeepSeek harness 里，成员用不同模型"
+                className="btn-press rounded-full border border-emerald-500/40 bg-emerald-500/10 px-5 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300"
+              >
+                多模型房间
               </button>
             )}
             {onCreateMcpRoom && (
@@ -487,6 +502,67 @@ export const AiCollabView = memo(function AiCollabView({
         </div>
         {importDialog}
         {mcpOpen && <McpDialog onClose={() => setMcpOpen(false)} />}
+        {multiOpen && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            onClick={() => setMultiOpen(false)}
+          >
+            <div
+              className="w-[480px] max-w-full rounded-2xl border border-neutral-200 bg-white shadow-2xl dark:border-stone-700 dark:bg-stone-900"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <header className="flex items-center gap-2 border-b border-neutral-200 px-5 py-3 dark:border-stone-700">
+                <Users size={18} className="text-emerald-600 dark:text-emerald-400" />
+                <div>
+                  <div className="text-sm font-semibold text-neutral-800 dark:text-stone-100">多模型协作房间</div>
+                  <div className="mt-0.5 text-[11px] text-neutral-400 dark:text-stone-500">
+                    同一个 DeepSeek harness，两个成员各自独立会话与模型。
+                  </div>
+                </div>
+              </header>
+              <div className="space-y-3 p-5 text-xs">
+                <label className="block">
+                  <span className="font-medium text-neutral-700 dark:text-stone-200">主导模型</span>
+                  <input
+                    value={leadModel}
+                    onChange={(e) => setLeadModel(e.target.value)}
+                    placeholder="留空用默认；支持 provider/model 或纯模型名"
+                    className="mt-1 w-full rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-emerald-400 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-100"
+                  />
+                </label>
+                <label className="block">
+                  <span className="font-medium text-neutral-700 dark:text-stone-200">执行模型</span>
+                  <input
+                    value={workerModel}
+                    onChange={(e) => setWorkerModel(e.target.value)}
+                    placeholder="例如 lmstudio/qwen3-4b 或 deepseek-v4-pro-qwen3.5-4b-i1"
+                    className="mt-1 w-full rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-emerald-400 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-100"
+                  />
+                </label>
+                <div className="text-[11px] leading-relaxed text-neutral-400 dark:text-stone-500">
+                  计划、派单与结果仍走同一条事件流；如果两个模型都留空，就等价于普通 DeepSeek 房间。
+                </div>
+                <div className="flex justify-end gap-2 pt-1">
+                  <button
+                    onClick={() => setMultiOpen(false)}
+                    className="btn-press rounded-lg border border-neutral-300 px-3 py-1.5 text-xs text-neutral-600 hover:bg-neutral-100 dark:border-stone-600 dark:text-stone-300 dark:hover:bg-stone-800"
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={() => {
+                      onCreateMultiModelRoom?.([leadModel, workerModel]);
+                      setMultiOpen(false);
+                    }}
+                    className="btn-press rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
+                  >
+                    创建房间
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }

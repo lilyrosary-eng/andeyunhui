@@ -544,6 +544,7 @@ const Root = memo(function Root() {
         mailboxAvailable={collab.harnesses.find((harness) => harness.id === 'mailbox')?.available ?? false}
         permission={collab.permission}
         onReplyPermission={(optionId) => void collab.replyPermission(optionId)}
+        onCreateMultiModelRoom={(models) => void collab.createRoom(undefined, 'dsh', models)}
         deepseekAvailable={collab.harnesses.find((h) => h.id === 'dsh')?.available ?? false}
         dshSessions={collab.dshSessions}
         dshSessionsLoading={collab.dshSessionsLoading}

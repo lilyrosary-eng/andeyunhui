@@ -169,7 +169,8 @@ export interface UseAiCollabResult {
   importDshSession: (sessionId: string, name?: string) => Promise<void>;
   /** 绑定 / 解绑当前房间的工作目录（绑定后事件流镜像到项目 .adyh/collab） */
   setWorkspace: (workspace: string | null) => Promise<void>;
-  createRoom: (name?: string, harnessId?: string) => Promise<void>;
+  /** models：按成员顺序指定模型（可空）；同一 harness 内可用不同模型 */
+  createRoom: (name?: string, harnessId?: string, models?: string[]) => Promise<void>;
   deleteRoom: (roomId: string) => Promise<void>;
   selectRoom: (roomId: string) => Promise<void>;
   send: (text: string) => Promise<void>;
@@ -438,23 +439,24 @@ export function useAiCollab(): UseAiCollabResult {
     }
   }, []);
 
-  const createRoom = useCallback(async (name?: string, harnessId = 'echo') => {
+  const createRoom = useCallback(async (name?: string, harnessId = 'echo', models?: string[]) => {
     setError(null);
     // 前端显式带成员，确保房间使用用户选中的 harness；后端仍保留默认 echo 兜底。
+    // models 与成员顺序对应：空字符串表示该成员跟随 harness 的默认模型。
     const agents: CollabAgent[] = [
       {
         id: 'lead',
         name: '主导',
         harnessId,
         persona: '负责拆解任务、分派成员、汇总结果',
-        model: '',
+        model: models?.[0]?.trim() ?? '',
       },
       {
         id: 'worker',
         name: '执行',
         harnessId,
         persona: '负责执行被分派的子任务',
-        model: '',
+        model: models?.[1]?.trim() ?? '',
       },
     ];
     try {

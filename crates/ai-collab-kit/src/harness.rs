@@ -139,6 +139,50 @@ pub fn acp_patch_path(base: &Path) -> PathBuf {
     base.join(ACP_PATCH_FILE)
 }
 
+/// 解析成员模型：`provider/model` 或纯模型名；空则用 dsh.json 的 provider / model。
+pub fn split_model(config: &DshConfig, raw: &str) -> (String, String) {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return (
+            config.provider.trim().to_string(),
+            config.model.trim().to_string(),
+        );
+    }
+    match raw.split_once('/') {
+        Some((provider, model))
+            if !provider.trim().is_empty() && !model.trim().is_empty() =>
+        {
+            (provider.trim().to_string(), model.trim().to_string())
+        }
+        _ => (config.provider.trim().to_string(), raw.to_string()),
+    }
+}
+
+/// 模型与默认模型一致时沿用固定文件名（兼容旧行为）；否则按模型名生成独立 patch。
+/// 同一房间多个成员用不同模型时，各自读写自己的 patch，不会相互覆盖。
+fn model_patch_path(base: &Path, config: &DshConfig, model: &str, acp: bool) -> PathBuf {
+    if model == config.model.trim() {
+        return if acp {
+            acp_patch_path(base)
+        } else {
+            patch_path(base)
+        };
+    }
+    let tag: String = model
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(48)
+        .collect();
+    let prefix = if acp { "dsh-acp-local" } else { "dsh-local" };
+    base.join(format!("{prefix}-{tag}.patch.yml"))
+}
+
 fn write_atomic(path: &Path, body: &str) -> Result<(), String> {
     let tmp = path.with_file_name(format!(
         ".{}.{}.tmp",
@@ -156,9 +200,9 @@ fn write_atomic(path: &Path, body: &str) -> Result<(), String> {
 /// 每次 resolve 都重写，保证 `dsh.json` 改动立即生效；用户若想自定义可改这里的生成规则。
 /// dsh 的 CLI profile 可能没有挂载 settings 服务，导致 llm-pi-ai 拿不到全局 provider 配置；
 /// 这里把本地 provider 显式写进 patch，保证 ACP/headless 两条路径都能解析到本地模型。
-fn provider_patch(config: &DshConfig) -> String {
-    let provider = config.provider.trim();
-    let model = config.model.trim();
+fn provider_patch(config: &DshConfig, provider: &str, model: &str) -> String {
+    let provider = provider.trim();
+    let model = model.trim();
     let base_url = config.base_url.trim();
     let api = config.api.trim();
     let api_key = if provider.eq_ignore_ascii_case("lmstudio") {
@@ -185,16 +229,29 @@ r#"- id: llm-pi-ai
 }
 
 pub fn ensure_patch(base: &Path, config: &DshConfig) -> Result<PathBuf, String> {
-    let patch = patch_path(base);
+    ensure_patch_for(base, config, None)
+}
+
+/// 按成员模型生成 headless patch：同一 harness 里不同成员可以用不同模型。
+/// 与 `config.model` 相同的模型沿用默认文件名，其它模型按模型名生成独立 patch，互不覆盖。
+pub fn ensure_patch_for(
+    base: &Path,
+    config: &DshConfig,
+    model: Option<&str>,
+) -> Result<PathBuf, String> {
+    // raw 支持 `provider/model` 或纯模型名；空则回退 dsh.json 的默认值。
+    let (provider, model) = split_model(config, model.unwrap_or(""));
+    if model.is_empty() {
+        return Err("未指定模型：dsh.json 的 model 为空".to_string());
+    }
+    let patch = model_patch_path(base, config, &model, false);
     let mut body = String::from(
         "# 由 ai-collab-kit 生成：只作用于本适配器，固定本地模型并禁用云端 DeepSeek 路由。\n",
     );
     body.push_str(&format!(
-        "- id: agent-default-model\n  config:\n    provider: {}\n    model: {}\n\n",
-        config.provider.trim(),
-        config.model.trim()
+        "- id: agent-default-model\n  config:\n    provider: {provider}\n    model: {model}\n\n",
     ));
-    body.push_str(&provider_patch(config));
+    body.push_str(&provider_patch(config, &provider, &model));
     body.push_str(
         "- id: permission\n  config:\n    defaultPreset: workspace-write\n\n\
          - id: llm-deepseek\n  disabled: true\n\n\
@@ -208,19 +265,28 @@ pub fn ensure_patch(base: &Path, config: &DshConfig) -> Result<PathBuf, String> 
 /// ACP profile 需要同时覆盖 `acp` 与 `agent-default-model` 两处路由；
 /// 否则 resume 会沿用旧会话里的云端 provider，违背「只用本地模型」的前提。
 pub fn ensure_acp_patch(base: &Path, config: &DshConfig) -> Result<PathBuf, String> {
-    let patch = acp_patch_path(base);
+    ensure_acp_patch_for(base, config, None)
+}
+
+/// 按成员模型生成 ACP patch（acp 与 agent-default-model 两处都必须指向同一个模型）。
+pub fn ensure_acp_patch_for(
+    base: &Path,
+    config: &DshConfig,
+    model: Option<&str>,
+) -> Result<PathBuf, String> {
+    let (provider, model) = split_model(config, model.unwrap_or(""));
+    if model.is_empty() {
+        return Err("未指定模型：dsh.json 的 model 为空".to_string());
+    }
+    let patch = model_patch_path(base, config, &model, true);
     let mut body = String::from(
         "# 由 ai-collab-kit 生成：ACP 只走本地模型，并禁用云端 DeepSeek 路由。\n",
     );
     body.push_str(&format!(
-        "- id: acp\n  config:\n    provider: {}\n    model: {}\n\n\
-         - id: agent-default-model\n  config:\n    provider: {}\n    model: {}\n\n",
-        config.provider.trim(),
-        config.model.trim(),
-        config.provider.trim(),
-        config.model.trim()
+        "- id: acp\n  config:\n    provider: {provider}\n    model: {model}\n\n\
+         - id: agent-default-model\n  config:\n    provider: {provider}\n    model: {model}\n\n"
     ));
-    body.push_str(&provider_patch(config));
+    body.push_str(&provider_patch(config, &provider, &model));
     body.push_str(
         "- id: permission\n  config:\n    defaultPreset: workspace-write\n\n\
          - id: llm-deepseek\n  disabled: true\n\n\
@@ -772,6 +838,58 @@ mod tests {
         .expect("dsh headless run failed");
         println!("stdout={:?}\nstderr={:?}", outcome.stdout, outcome.stderr);
         assert!(!outcome.stdout.trim().is_empty(), "empty stdout from dsh");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// 同一 harness 里不同成员用不同模型：patch 必须各自一份，不能互相覆盖。
+    #[test]
+    fn per_model_patches_are_isolated() {
+        let dir = std::env::temp_dir().join(format!(
+            "ai-collab-multi-model-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let config = DshConfig {
+            bin: String::new(),
+            provider: "lmstudio".to_string(),
+            model: "model-a".to_string(),
+            timeout_secs: 10,
+            ..Default::default()
+        };
+
+        // 默认模型沿用旧文件名（兼容历史 patch）。
+        let default_patch = ensure_patch_for(&dir, &config, Some("model-a")).unwrap();
+        assert_eq!(default_patch, patch_path(&dir));
+
+        let other = ensure_patch_for(&dir, &config, Some("model-b")).unwrap();
+        assert_eq!(
+            other.file_name().unwrap().to_string_lossy(),
+            "dsh-local-model-b.patch.yml"
+        );
+        let body = fs::read_to_string(&other).unwrap();
+        assert!(body.contains("model: model-b"));
+        assert!(!body.contains("model-a"));
+
+        let acp = ensure_acp_patch_for(&dir, &config, Some("model-b")).unwrap();
+        assert_eq!(
+            acp.file_name().unwrap().to_string_lossy(),
+            "dsh-acp-local-model-b.patch.yml"
+        );
+        let acp_body = fs::read_to_string(&acp).unwrap();
+        assert!(acp_body.contains("model: model-b"));
+        assert!(!acp_body.contains("model-a"));
+
+        // provider/model 写法：provider 也要跟着成员走，不能残留 dsh.json 的默认 provider。
+        let with_provider = ensure_patch_for(&dir, &config, Some("openai/gpt-4o")).unwrap();
+        assert_eq!(
+            with_provider.file_name().unwrap().to_string_lossy(),
+            "dsh-local-gpt-4o.patch.yml"
+        );
+        let body = fs::read_to_string(&with_provider).unwrap();
+        assert!(body.contains("provider: openai"));
+        assert!(body.contains("model: gpt-4o"));
         let _ = fs::remove_dir_all(dir);
     }
 

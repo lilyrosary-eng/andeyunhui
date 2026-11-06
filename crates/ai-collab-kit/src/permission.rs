@@ -103,7 +103,8 @@ mod tests {
 
     fn prompt() -> PermissionPrompt {
         PermissionPrompt {
-            permission_id: "perm_test".to_string(),
+            // 注册表是进程级全局，测试并行跑时必须用唯一 id，否则两个用例会互相覆盖 sender。
+            permission_id: crate::runtime::new_id("perm"),
             room_id: "room_perm".to_string(),
             assignment_id: "task_perm".to_string(),
             title: "运行 npm test".to_string(),

@@ -51,6 +51,18 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}_{}", now_ms(), n)
 }
 
+/// 单个成员用哪个模型：`provider/model` 或纯模型名；为空则跟随 dsh.json 的全局默认。
+/// 这是「同一 harness 多模型协作」的入口：模型挂在成员上，而不是挂在 harness 上。
+pub fn resolve_agent_model(
+    config: &crate::harness::DshConfig,
+    agent: Option<&AgentSpec>,
+) -> (String, String) {
+    crate::harness::split_model(
+        config,
+        agent.map(|agent| agent.model.as_str()).unwrap_or(""),
+    )
+}
+
 pub fn agent_name(room: &Room, agent_id: &str) -> String {
     room.agents
         .iter()
@@ -1028,6 +1040,18 @@ async fn run_dsh_assignment(
         return;
     }
     let name = agent_name(&room, &assignment.assignee_id);
+    // 模型挂在成员上：同一 dsh harness 里 lead / worker 可以用不同模型。
+    let (provider, model, raw_model) = {
+        let agent = room
+            .agents
+            .iter()
+            .find(|agent| agent.id == assignment.assignee_id);
+        let raw = agent
+            .map(|agent| agent.model.trim().to_string())
+            .unwrap_or_default();
+        let (provider, model) = resolve_agent_model(&config, agent);
+        (provider, model, raw)
+    };
     let _ = emit_status(
         &app,
         &base,
@@ -1035,7 +1059,7 @@ async fn run_dsh_assignment(
         &assignment,
         AssignmentStatus::Running,
         "assignment.running",
-        Some(format!("{name} 正在调用 DeepSeek Harness（{}）", config.model)),
+        Some(format!("{name} 正在调用 DeepSeek Harness（{model}）")),
     );
     let _ = emit_event(
         &app,
@@ -1144,16 +1168,24 @@ async fn run_dsh_assignment(
             );
         };
 
+        // 每个模型一份 ACP patch：resume 后仍指向该成员自己的模型。
+        let acp_patch = match crate::harness::ensure_acp_patch_for(&base, &config, Some(&raw_model)) {
+            Ok(path) => path,
+            Err(error) => {
+                fail_assignment(&app, &base, &room, &assignment, &error);
+                return;
+            }
+        };
         match crate::acp_client::run_turn(
             &config,
-            &crate::harness::acp_patch_path(&base),
+            &acp_patch,
             &workspace,
             &prompt_task,
             &assignment.id,
             &room.id,
             resume_session.as_deref(),
-            &config.provider,
-            &config.model,
+            &provider,
+            &model,
             on_update,
             on_permission,
         )
@@ -1234,7 +1266,13 @@ async fn run_dsh_assignment(
         }
     }
 
-    let patch = crate::harness::patch_path(&base);
+    let patch = match crate::harness::ensure_patch_for(&base, &config, Some(&raw_model)) {
+        Ok(path) => path,
+        Err(error) => {
+            fail_assignment(&app, &base, &room, &assignment, &error);
+            return;
+        }
+    };
     let outcome = crate::harness::dsh_run_turn(
         &config,
         &patch,
@@ -1765,6 +1803,41 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(base);
         let _ = std::fs::remove_dir_all(base2);
+    }
+
+    /// 成员级模型：空 → 全局默认；纯模型名 → 默认 provider；provider/model → 两者都覆盖。
+    #[test]
+    fn resolves_agent_models_for_multi_model_rooms() {
+        let config = crate::harness::DshConfig::default();
+        let base_agent = AgentSpec {
+            id: "worker".to_string(),
+            name: "执行".to_string(),
+            harness_id: crate::harness::DSH.to_string(),
+            persona: String::new(),
+            model: String::new(),
+            native_session_id: None,
+        };
+        let defaults = (config.provider.clone(), config.model.clone());
+        assert_eq!(resolve_agent_model(&config, None), defaults.clone());
+        assert_eq!(resolve_agent_model(&config, Some(&base_agent)), defaults);
+
+        let model_only = AgentSpec {
+            model: "qwen3-4b".to_string(),
+            ..base_agent.clone()
+        };
+        assert_eq!(
+            resolve_agent_model(&config, Some(&model_only)),
+            (config.provider.clone(), "qwen3-4b".to_string())
+        );
+
+        let provider_model = AgentSpec {
+            model: "openai/gpt-4o".to_string(),
+            ..base_agent
+        };
+        assert_eq!(
+            resolve_agent_model(&config, Some(&provider_model)),
+            ("openai".to_string(), "gpt-4o".to_string())
+        );
     }
 
     /// `.Talk` 信箱成员：建任务即投递到工作目录，结果回传时走 complete_assignment_core。
