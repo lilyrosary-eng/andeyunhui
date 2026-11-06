@@ -763,7 +763,7 @@ html.is-linux *::after {
    段落允许跨栏断开（break-inside: auto），保证长段落（如 txt 整章）能跨页流动。 */
 .reader-columns {
   font-size: var(--reader-font-size, 17px);
-  line-height: 1.85;
+  line-height: var(--reader-line-height, 1.85);
   color: #1c1917;
   text-align: justify;
   word-break: break-word;
@@ -812,7 +812,7 @@ html.is-linux *::after {
    导致"内容一大块"不分列的问题。 */
 .reader-columns-book {
   font-size: var(--reader-font-size, 16px);
-  line-height: 1.85;
+  line-height: var(--reader-line-height, 1.85);
   color: #1c1917;
   text-align: justify;
   word-break: break-word;
@@ -853,6 +853,16 @@ html.is-linux *::after {
   margin-top: 0;
 }
 /* 竖版章节标题：加大加粗 + 章节间分隔（竖版无分栏，无需 break-after）*/
+/* ============ 竖版：单章滚动 ============
+   竖版此前没有字号/行距规则，内联的 --reader-font-size 实际从未生效（字号跟着默认 16px 走）。
+   这里补上，让阅读设置面板对三种布局都生效。 */
+.reader-vertical {
+  font-size: var(--reader-font-size, 17px);
+  line-height: var(--reader-line-height, 1.85);
+  text-align: justify;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
 .reader-vertical .chapter-title-display {
   font-size: 1.6em;
   font-weight: 700;
@@ -1011,37 +1021,39 @@ html.is-linux *::after {
   pointer-events: none;
   z-index: 1;
 }
-/* ===== 主窗圆角（2026-11-02） =====
-   窗口在 tauri.conf.json 里 transparent: true，且 index.html 把主窗的
-   html/body 背景置为透明 —— 这样 #root 的圆角才真的"挖掉"四个角露出桌面，
-   而不是在圆角外留一圈不透明的直角。
-   浮窗不走这条规则（它们各自已有自己的圆角/透明处理）。 */
-/* ===== 主窗圆角（2026-11-02 · 按浮岛的结构重做） =====
-   之前一直把圆角加在 #root 上，而 #root 自己铺着不透明背景 ⇒ 圆角外露的就是它自己，
-   怎么调都是方的。浮岛能透出桌面，是因为它「根容器透明、各块自己画背景」。
-   这里改成同样的结构：
-     窗口(transparent) → html/body(transparent) → #root(transparent)
-       → App 根容器（main-panel-bg，真正有背景的那层）← 圆角加在这
-   于是圆角外一路透明到窗口，露出桌面。 */
-html[data-window="main"] #root {
+/* ===== 主窗圆角：按平台分流（2026-11-04） =====
+   Windows：DWM 已经把窗口表面本身裁成圆角（实测主窗是带 WS_THICKFRAME 的常规窗口，
+   DWMWA_WINDOW_CORNER_PREFERENCE 读出 0，即系统默认圆角）。内容层再裁一次圆角，
+   只会让圆角外面多出一圈自己的底色，所以 Windows 一律不裁，交给系统。
+   Linux：没有系统级圆角，仍需「透明窗口 + 内容层裁圆」这条路，原样保留。
+   浮窗不走这些规则（它们各自已有圆角/透明处理）。 */
+html[data-window="main"] #root,
+html[data-window="main"] #root > div {
   height: 100vh;
+}
+
+/* Linux 专属：三层透明 + 圆角加在真正有背景的那层 */
+html.is-linux[data-window="main"] #root {
   background: transparent;
 }
 
-/* App 根容器：真正承载背景与圆角的那一层。
-   背景用半透明，和浮岛（rgba(208,232,214,0.5)）同一个思路 ——
-   下面一路透明到桌面，这层半透明色才会"轻"，而不是一块实心板。
-   color-mix 让深浅主题都自动跟随 --background。 */
-html[data-window="main"] #root > div {
-  height: 100vh;
+html.is-linux[data-window="main"] #root > div {
   border-radius: 16px;
   overflow: hidden;
+  /* 半透明底与浮岛同思路：下面一路透明到桌面，这层才"轻" */
   background: color-mix(in srgb, var(--background) 96%, transparent) !important;
   box-shadow:
     0 2px 8px rgba(0, 0, 0, 0.10),
     0 12px 40px rgba(0, 0, 0, 0.18);
 }
 
-html[data-window="main"].window-maximized #root > div {
+html.is-linux[data-window="main"].window-maximized #root > div {
   border-radius: 0;
+}
+
+/* 非 Linux：把裁圆显式关掉，防止上面几条将来被误扩到全平台 */
+html[data-window="main"]:not(.is-linux) #root > div {
+  border-radius: 0;
+  overflow: visible;
+  box-shadow: none;
 }

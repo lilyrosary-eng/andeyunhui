@@ -8,6 +8,9 @@ export interface EstimateMessage {
   images?: unknown[];
   attachments?: unknown[];
   agentSteps?: unknown[];
+  plan?: { todos?: unknown[] };
+  /** 计划确认闸门状态：pending 时面板底部多一行按钮 */
+  planApproval?: { state?: string };
 }
 
 export function estimateMessageHeight(m: EstimateMessage | undefined): number {
@@ -20,5 +23,12 @@ export function estimateMessageHeight(m: EstimateMessage | undefined): number {
   if (m.images?.length) h += Math.min(420, 170 * m.images.length);
   if (m.attachments?.length) h += 30;
   if (m.agentSteps?.length) h += 36;
+  // 计划面板：头部约 30px，每条待办约 20px（只用于未测量项，实测会覆盖）
+  const todoCount = m.plan?.todos?.length ?? 0;
+  if (todoCount > 0) h += 34 + todoCount * 20;
+  // 空计划 + 待确认时面板只剩「标题 + 确认按钮」两行
+  if (todoCount === 0 && m.planApproval?.state === 'pending') h += 34;
+  // 确认闸门的按钮/结果行
+  if (m.planApproval?.state === 'pending') h += 56;
   return Math.max(isUser ? 48 : 96, Math.min(2400, h));
 }

@@ -3,15 +3,28 @@
 //
 // 文案渲染统一走共享 markdown 工具（src/lib/markdown）：支持 `**加粗**` / `行内代码` / `[链接](url)` / 列表，
 // 与聊天消息保持一致的 markdown 体验。
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useCompanionStore } from '@/core/stores/companionStore';
-import { getEmbedConfig, setEmbedConfig, syncCompanionToSemantic, type EmbedConfig } from '@/core/stores/semanticMemory';
+import { InlineSelect, type InlineSelectGroup } from '@/components/ui/inline-select';
+import {
+  describeEffectiveEmbed,
+  syncCompanionToSemantic,
+  pendingTurnCount,
+} from '@/core/stores/semanticMemory';
+import type { AiProfile } from '@/mobile/types/chat';
+import { backfillChatMemory } from '@/core/stores/memoryBackfill';
+import { requestSettingsTab } from '@/core/settings/settingsNav';
 import { getAiChatMemoryEnabled, setAiChatMemoryEnabled } from '@/core/ai/useAiChat';
 import { renderMarkdown, injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
-import { normalizeEmbeddingEndpoint } from '@/core/settings/embedUrl';
 import { Section } from '@/components/bricks/Section';
-import { inputCls } from '@/components/bricks/formui';
+
+/** 生效来源的中文说法（与 describeEffectiveEmbed 的三种 src 一一对应）。 */
+const SRC_LABEL: Record<'routing' | 'explicit' | 'auto', string> = {
+  routing: '路由页选定',
+  explicit: '手动端点（高级）',
+  auto: '自动猜测（可能挑到别的供应商）',
+};
 
 const TOTAL = (c: { memories: unknown[]; core_memory?: unknown[] }) =>
   (c.memories?.length ?? 0) + (c.core_memory?.length ?? 0);
@@ -27,13 +40,19 @@ function LongDesc({ md }: { md: string }) {
 
 export function AiChatMemorySettings() {
   const companion = useCompanionStore((s) => s.companion);
-  const [cfg, setCfg] = useState<EmbedConfig>(() => getEmbedConfig() ?? { endpoint: '', apiKey: '', model: 'text-embedding-3-small' });
   const [synced, setSynced] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [memoryOn, setMemoryOn] = useState(() => getAiChatMemoryEnabled());
   const update = useCompanionStore((s) => s.update);
-  const [profiles, setProfiles] = useState<Array<{ id: string; name: string; model?: string }>>([]);
+  /**
+   * 算力档案（providers × models 展平）+ active + 路由页选的嵌入模型名 ——
+   * 这三样就是运行时 `describeEffectiveEmbed` 的全部输入，所以这里的显示
+   * 与实际会打的端点不可能不一致。
+   */
+  const [profiles, setProfiles] = useState<AiProfile[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [routingName, setRoutingName] = useState('');
 
   // 共享 markdown 样式 + 代码块复制按钮（幂等挂一次）
   useEffect(() => {
@@ -41,34 +60,90 @@ export function AiChatMemorySettings() {
     return attachMarkdownCopyHandler();
   }, []);
 
-  // 拉取 AI 模型档案列表（用于「当前伴侣绑定哪个模型」下拉）
+  // 拉取 AI 模型档案列表（用于「当前伴侣绑定哪个模型」下拉 + 嵌入端点生效来源显示）
   useEffect(() => {
-    void invoke<{ profiles: Array<{ id: string; name: string; model?: string }> }>('ai_get_profiles')
-      .then((d) => setProfiles(Array.isArray(d?.profiles) ? d.profiles : []))
+    void Promise.all([
+      invoke<{ profiles?: AiProfile[]; active?: string | null }>('ai_get_profiles'),
+      invoke<{ media_models?: { embedding?: string | null } }>('ai_get_config').catch(() => null),
+    ])
+      .then(([d, c]) => {
+        setProfiles(Array.isArray(d?.profiles) ? d.profiles : []);
+        setActiveId(d?.active ?? null);
+        setRoutingName((c?.media_models?.embedding ?? '').trim());
+      })
       .catch(() => setProfiles([]));
   }, []);
 
-  const saveEmbed = () => {
-    setEmbedConfig(cfg);
-    setSynced(false);
+  // ===== 历史对话回填 + 待重试队列可见性 =====
+  const [backfilling, setBackfilling] = useState(false);
+  const [backfillMsg, setBackfillMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [pending, setPending] = useState(() => pendingTurnCount());
+
+  const runBackfill = async () => {
+    setBackfilling(true);
+    setBackfillMsg({ ok: true, text: '回填中…' });
+    try {
+      const r = await backfillChatMemory((done, total) =>
+        setBackfillMsg({ ok: true, text: `回填中 ${done}/${total}…` }),
+      );
+      setBackfillMsg({
+        ok: r.failed === 0 && r.queued === 0,
+        text: `扫到 ${r.sessions} 个会话 / ${r.turns} 轮：新写入 ${r.written}，已存在跳过 ${r.skippedExisting}，待重试 ${r.queued}，失败 ${r.failed}`,
+      });
+      setPending(pendingTurnCount());
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('[backfill] 回填失败:', msg);
+      setBackfillMsg({ ok: false, text: `回填失败：${msg}` });
+    } finally {
+      setBackfilling(false);
+    }
   };
 
-  /** 验证嵌入端点可用性：直接复用 rag_embed_api 发短句 "hi"，拿回 dim + 时延。
+  /**
+   * 当前真正会用的嵌入端点（与运行时同一个函数算出来的，界面上不再自己排优先级）。
+   */
+  const embed = useMemo(() => describeEffectiveEmbed(profiles, activeId, routingName), [profiles, activeId, routingName]);
+
+  /** 模型档案按厂商分组（全站统一的下拉要 groups；原生 optgroup 的标题不跟滚） */
+  const profileGroups = useMemo<InlineSelectGroup[]>(() => {
+    const byProvider = new Map<string, AiProfile[]>();
+    for (const p of profiles) {
+      const key = p.name || '未命名供应商';
+      byProvider.set(key, [...(byProvider.get(key) ?? []), p]);
+    }
+    return [
+      { label: '', options: [{ value: '', label: '（全局默认）' }] },
+      ...[...byProvider.entries()].map(([label, list]) => ({
+        label,
+        options: list.map((p) => ({
+          value: p.id,
+          label: p.model || p.id,
+          shortLabel: `${label} · ${p.model || p.id}`,
+        })),
+      })),
+    ];
+  }, [profiles]);
+
+  /** 验证嵌入端点可用性：复用 `rag_embed_api` 发一句短文本，拿回 dim + 时延。
    *  与全局设置里 ai_test_connection 不一样——那个验证 chat 端点；
-   *  这里验证的是「能否做 RAG」：只要端点支持 /embeddings 接口（Ollama / OpenAI 兼容）并能返回非空向量即可。
+   *  这里验证的是「能否做 RAG」。测的是**当前生效那一条**，不是某个输入框。
    */
   const testEmbed = async () => {
     if (testing) return;
+    if (!embed) {
+      setTestMsg({ ok: false, text: '没有可用的嵌入端点（未配置）——先到 设置 → 模型 → 嵌入模型 选一个' });
+      return;
+    }
     setTesting(true);
     setTestMsg(null);
     const t0 = performance.now();
     try {
       const res = await invoke<{ embeddings: number[][]; dim?: number }>('rag_embed_api', {
         texts: ['hi'],
-        // 与真实请求同一条归一化规则（只填 .../v1 也能测通）
-        endpoint: cfg.endpoint?.trim() ? normalizeEmbeddingEndpoint(cfg.endpoint) : null,
-        apiKey: cfg.apiKey || null,
-        model: cfg.model?.trim() || null,
+        endpoint: embed.endpoint,
+        apiKey: embed.apiKey || null,
+        model: embed.model || null,
       });
       const dim = res.dim ?? res.embeddings?.[0]?.length ?? 0;
       const ms = Math.round(performance.now() - t0);
@@ -140,67 +215,47 @@ export function AiChatMemorySettings() {
       </Section>
 
       <Section title="L3 / L4 语义嵌入">
-        {/* 一处配置原则（2026-10-28 用户定调）：嵌入模型的端点/凭证属于"供应商"，
-            应该在 AI 路由页统一配；这里只保留"选哪个嵌入模型"的钩子 + 自定义兜底。 */}
+        {/* 2026-11-05：这一栏原来的三个手填输入框删掉了。同一份嵌入配置此前长在
+            这张面板、RAG 插件卡片、移动端设置三处，且优先级与运行时相反 ——
+            "多个入口配同一件事"正是用户指出的问题。
+            唯一入口现在是 设置 → 模型 → 「嵌入模型（RAG 记忆 / 知识库）」。
+            这里只负责显示"当前真正会用哪一条" + 检测 + 跳转。 */}
         <div className="mb-3 rounded-lg border border-emerald-200/60 bg-emerald-50/60 px-3 py-2 text-[12px] leading-relaxed text-emerald-800 dark:border-emerald-800/40 dark:bg-emerald-950/30 dark:text-emerald-300">
-          推荐在 <b>设置 → 模型 → 媒体模型 → 嵌入</b> 里选一个嵌入模型：端点与凭证会跟随该模型所属的供应商，
-          <b>下面这组字段只在没配路由时才作为自定义覆盖</b>。
+          嵌入端点只在 <b>设置 → 模型 → 嵌入模型</b> 一处配置。
+          优先级：<b>路由页选定 &gt; 手动端点（高级）&gt; 自动猜测</b>。
+        </div>
+        <div className="mb-3 rounded-lg border border-neutral-200/60 bg-white/60 px-3 py-2 text-[12px] dark:border-stone-700 dark:bg-stone-800/50">
+          <div className="text-neutral-500 dark:text-stone-400">
+            当前生效：
+            <b className="ml-1 text-neutral-700 dark:text-stone-200">
+              {embed ? SRC_LABEL[embed.src] : '未配置（记忆沉淀与摄取都不会执行）'}
+            </b>
+            {embed?.note ? <span className="ml-1 text-neutral-400">（{embed.note}）</span> : null}
+          </div>
+          <div className="mt-0.5 break-all font-mono text-[11px] text-neutral-500 dark:text-stone-400">
+            {embed ? embed.endpoint + ' · ' + embed.model : '—'}
+          </div>
+          {embed?.src === 'auto' && (
+            <div className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+              这是自动猜出来的端点，未必是你想要的那一个 —— 建议到上面那处显式选定。
+            </div>
+          )}
         </div>
         <LongDesc
           md={[
-            '**Windows 与手机的关键差异**：桌面端嵌入走 Rust 代理 `rag_embed_api`，**本地 Ollama 完全免费、离线可用**，不像手机受沙箱限制只能走云端。',
+            'RAG 需要**专门的嵌入模型**（如 `text-embedding-qwen3-embedding-0.6b` / `nomic-embed-text` / `bge-*`），不是聊天模型 —— 聊天模型没有 `/embeddings` 接口，也不输出可直接比对的语义向量。',
             '',
-            'RAG 需要**专门的嵌入模型**（如 `nomic-embed-text` / `text-embedding-3-small` / `bge-*`），而不是聊天模型——聊天模型是 next-token 自回归，没有 `/embeddings` 接口，也不输出可直接比对的语义向量。',
-            '嵌入模型和聊天模型可以共用同一个 Ollama / 同一个 `base_url`，只要它同时跑着两类模型即可，**所以单个 Ollama 实例就够用**（聊天走 `/api/chat`，RAG 走 `/api/embeddings`）。',
-            '',
-            '- **默认（推荐）**：`http://localhost:11434/api/embeddings` + 模型 `nomic-embed-text`（需先启动 Ollama 并 `ollama pull nomic-embed-text`）。',
-            '- **云端**：填入 OpenAI 兼容的 `/v1/embeddings` 与 key（也可下方留空 → 自动复用当前算力来源）。',
-            '- **都没有也能用**——对话注入会回退到关键词匹配，只是跨话题召回弱一些。',
+            '嵌入模型可以和聊天模型共用同一个 `base_url`（LM Studio / Ollama 同时挂着两类模型就行），**不用单独再起一个服务**。',
+            '换过嵌入模型之后，旧向量的维度与新模型不一致就会**检索不到**（数据没丢）：到知识库「管理」点「重建」，或在这里点「回填历史对话」。',
           ].join('\n')}
         />
-        <label className="block">
-          <div className="mb-1 text-xs text-neutral-500 dark:text-stone-400">
-            Endpoint
-            <span className="ml-1.5 text-[11px] text-neutral-400 dark:text-stone-500">
-              只填到 <code>/v1</code> 也行，失焦会自动补 <code>/embeddings</code>
-            </span>
-          </div>
-          <input
-            className={inputCls}
-            placeholder="https://api.openai.com/v1"
-            value={cfg.endpoint}
-            onChange={(e) => setCfg({ ...cfg, endpoint: e.target.value })}
-            onBlur={(e) => {
-              const fixed = normalizeEmbeddingEndpoint(e.target.value);
-              if (fixed !== e.target.value) setCfg({ ...cfg, endpoint: fixed });
-            }}
-          />
-        </label>
-        <label className="block">
-          <div className="mb-1 text-xs text-neutral-500 dark:text-stone-400">API Key</div>
-          <input
-            className={inputCls}
-            type="password"
-            placeholder="sk-..."
-            value={cfg.apiKey}
-            onChange={(e) => setCfg({ ...cfg, apiKey: e.target.value })}
-          />
-        </label>
-        <label className="block">
-          <div className="mb-1 text-xs text-neutral-500 dark:text-stone-400">Embedding 模型</div>
-          <input
-            className={inputCls}
-            value={cfg.model}
-            onChange={(e) => setCfg({ ...cfg, model: e.target.value })}
-          />
-        </label>
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             className="btn-press rounded-lg bg-sky-500 px-3 py-1.5 text-sm text-white"
-            onClick={saveEmbed}
+            onClick={() => requestSettingsTab('model')}
           >
-            保存嵌入端点
+            打开 设置 → 模型
           </button>
           <button
             type="button"
@@ -208,7 +263,7 @@ export function AiChatMemorySettings() {
             onClick={() => void testEmbed()}
             className="btn-press inline-flex items-center gap-1.5 rounded-lg border border-sky-300 px-3 py-1.5 text-sm text-sky-600 hover:bg-sky-50 disabled:opacity-60 dark:border-sky-500/50 dark:text-sky-300 dark:hover:bg-sky-500/10"
           >
-            {testing ? '测试中…' : '测试嵌入连接'}
+            {testing ? '测试中…' : '测试当前端点'}
           </button>
           {testMsg && (
             <span
@@ -225,6 +280,7 @@ export function AiChatMemorySettings() {
         </div>
       </Section>
 
+
       {companion && (
         <Section title="AI 聊天模型">
           <div className="text-xs text-neutral-500 dark:text-stone-400">
@@ -232,21 +288,15 @@ export function AiChatMemorySettings() {
           </div>
           <label className="block">
             <div className="mb-1 text-xs text-neutral-500 dark:text-stone-400">模型档案</div>
-            <select
-              className={inputCls}
+            {/* 全站统一的模型选择器：厂商分组 + 粘性标题（原生 select 的 optgroup 标题不跟滚） */}
+            <InlineSelect
               value={companion.profile_id ?? ''}
-              onChange={(e) => {
-                const profile_id = e.target.value || null;
-                void update({ ...companion, profile_id });
-              }}
-            >
-              <option value="">（全局默认）</option>
-              {profiles.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name || p.id}{p.model ? ` · ${p.model}` : ''}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => void update({ ...companion, profile_id: v || null })}
+              placeholder="（全局默认）"
+              title="模型档案"
+              className="w-full justify-between"
+              groups={profileGroups}
+            />
           </label>
         </Section>
       )}
@@ -262,6 +312,31 @@ export function AiChatMemorySettings() {
         >
           {synced ? '已同步 ✓' : '立即同步'}
         </button>
+      </Section>
+
+      <Section title="历史对话回填">
+        <div className="text-xs text-neutral-500 dark:text-stone-400">
+          把磁盘上已有的会话重新配对成「用户 + 助手」轮次，补写进向量库（L3）。
+          幂等：同一段正文不会重复入库，重复点不会堆重复记录。
+        </div>
+        {pending > 0 && (
+          <div className="text-xs text-amber-600 dark:text-amber-400">
+            有 {pending} 轮在待重试队列里（当时嵌入端点不可用）。端点恢复或下次启动会自动补写，也可点下面按钮立刻重试。
+          </div>
+        )}
+        <button
+          type="button"
+          disabled={backfilling}
+          className="btn-press rounded-lg border border-black/10 px-3 py-1.5 text-sm text-neutral-600 disabled:opacity-50 dark:border-white/10 dark:text-stone-300"
+          onClick={() => void runBackfill()}
+        >
+          {backfilling ? '回填中…' : '回填历史对话'}
+        </button>
+        {backfillMsg && (
+          <div className={`text-xs ${backfillMsg.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}>
+            {backfillMsg.text}
+          </div>
+        )}
       </Section>
     </div>
   );

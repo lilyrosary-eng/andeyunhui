@@ -10,6 +10,7 @@ import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 import { InlineSelect } from '@/components/ui/inline-select';
 import type { Conversation, SendAttachment, AttachmentKind, ChatMsg } from '@/components/capsule/types';
 import { AgentTracePanel } from './AgentTracePanel';
+import { PlanPanel } from './PlanPanel';
 import { AiChatCompanionAvatar } from './AiChatCompanionCard';
 import { useCompanionStore } from '@/core/stores/companionStore';
 import { useUserAvatar } from '@/core/avatar/userAvatar';
@@ -313,6 +314,11 @@ export interface AiChatConversationProps {
   /** 切换重新生成留下的多个版本（1/2 · 2/2）。 */
   onSwitchVersion?: (msgId: string, dir: -1 | 1) => void;
   onRate?: (msgId: string, value: 'up' | 'down') => void;
+  /**
+   * 决定待确认的计划（确认并执行 / 让 AI 重新规划）。
+   * 不传则计划面板退化为只读（不认识确认闸门的入口不会被卡住）。
+   */
+  onPlanDecision?: (msgId: string, approved: boolean) => void | Promise<void>;
 }
 
 export const AiChatConversation = memo(function AiChatConversation({
@@ -343,6 +349,7 @@ export const AiChatConversation = memo(function AiChatConversation({
   onRegenerate,
   onSwitchVersion,
   onRate,
+  onPlanDecision,
 }: AiChatConversationProps) {
   const [input, setInput] = useState('');
   // 待发送附件（图片 / 文本 / 其它文件），仅在点击发送前暂存，发送后清空。
@@ -934,6 +941,16 @@ async function fileToChatDataUrl(f: File): Promise<string> {
                         {(m.agentSteps?.length ?? 0) > 0 ? ` · ${m.agentSteps!.length} 步` : ''}
                       </span>
                     </button>
+                  )}
+                  {/* Agent 计划/待办：plan 工具回传的快照；带确认闸门时底部有「确认并执行 / 重新规划」。
+                      所有 AI 对话界面复用同一组件（浮岛传 capsule 变体）。 */}
+                  {m.role === 'assistant' && m.plan && (
+                    <PlanPanel
+                      plan={m.plan}
+                      variant={capsuleMode ? 'capsule' : 'default'}
+                      approval={m.planApproval}
+                      onDecision={onPlanDecision ? (approved) => onPlanDecision(m.id, approved) : undefined}
+                    />
                   )}
                   {m.reasoning && (() => {
                     // 流式输出（content 为空且忙碌）时强制展开，否则按用户折叠状态

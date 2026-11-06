@@ -1,4 +1,5 @@
 // 黄金棋盘浮岛共享类型（从 Capsule.tsx 抽出，供壳与子面板复用）
+import type { PlanSnapshot, PlanApproval } from '@/core/ai/planTypes';
 
 export interface PlayInfo {
   title: string;
@@ -106,6 +107,13 @@ export interface ChatMsg {
   traceId?: string;
   /** Agent 执行步骤（ai-agent-step 事件实时累积；轨迹面板在落盘前也能展示）。 */
   agentSteps?: AgentStep[];
+  /** 当前 agent 计划快照（plan 工具回传，只读展示；所有 AI 对话界面可复用 PlanPanel 渲染）。 */
+  plan?: PlanSnapshot;
+  /**
+   * 计划确认闸门状态。存在且 state='pending' 时，PlanPanel 渲染「确认并执行 / 重新规划」。
+   * 决议后由前端置为 approved / rejected（后端超时也会推一条 rejected 终态事件）。
+   */
+  planApproval?: PlanApproval;
 }
 
 /** 一条 agent 工具步骤（后端 ai-agent-step 事件载荷）。 */
@@ -119,6 +127,8 @@ export interface AgentStep {
    *  注意：落盘日志里 image 已被后端替换为占位标记（避免多 MB base64 膨胀），
    *  实时事件（内存）里才是完整 data URL。 */
   meta?: Record<string, unknown>;
+  /** plan 工具执行后携带的计划快照（步骤级留存，供轨迹面板回看当时的计划状态）。 */
+  plan?: PlanSnapshot;
 }
 
 // ==== AIWork / AIWorkflow 共用任务蓝图类型 ====

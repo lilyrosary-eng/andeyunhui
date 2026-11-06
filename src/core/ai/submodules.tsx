@@ -1,10 +1,10 @@
 // AI 对话模块下的子模块注册表（桌面版）。
-// 三个子模块分层：chat(基础对话) → work(AI 办公·成果物层) → workflow(AI 工作流·蓝图编排)。
+// 四个子模块分层：chat(基础对话) → work(AI 办公·成果物层) → workflow(AI 工作流·蓝图编排) → collab(AI 协作·多 harness)。
 // 定义统一供「切换抽屉」与各子模块占位/主区复用，胶囊浮岛不接入，保持现状 ai 对话。
 import type { ReactNode } from 'react';
-import { MessageSquare, Briefcase, Workflow } from 'lucide-react';
+import { MessageSquare, Briefcase, Network, Workflow } from 'lucide-react';
 
-export type AISubmoduleId = 'chat' | 'work' | 'workflow';
+export type AISubmoduleId = 'chat' | 'work' | 'workflow' | 'collab';
 
 /** 抽屉中每个子模块项的配色（对齐音乐模块 ModuleDrawer 的 accent 结构） */
 export interface AISubmoduleAccent {
@@ -65,6 +65,19 @@ export const AI_SUBMODULES: AISubmoduleDef[] = [
       bgActive: 'bg-violet-50', bgActiveDark: 'dark:bg-violet-900/30',
       borderActive: 'border-violet-500/50', borderActiveDark: 'dark:border-violet-500/40',
       check: 'bg-violet-500',
+    },
+  },
+  {
+    id: 'collab',
+    name: 'AI 协作',
+    desc: '多 harness agent 房间：任务分派、结果回传、统一管理',
+    icon: <Network size={20} />,
+    accent: {
+      text: 'text-indigo-600', textDark: 'dark:text-indigo-400',
+      bgSoft: 'bg-indigo-500/10', bgSoftDark: 'dark:bg-indigo-500/10',
+      bgActive: 'bg-indigo-50', bgActiveDark: 'dark:bg-indigo-900/30',
+      borderActive: 'border-indigo-500/50', borderActiveDark: 'dark:border-indigo-500/40',
+      check: 'bg-indigo-500',
     },
   },
 ];

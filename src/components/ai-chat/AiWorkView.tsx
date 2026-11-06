@@ -37,6 +37,8 @@ export interface AiWorkViewProps {
   onRegenerate?: (id: string) => void;
   onSwitchVersion?: (id: string, dir: -1 | 1) => void;
   onRate?: (id: string, v: 'up' | 'down') => void;
+  /** 计划确认闸门（与 AiChatConversation 同名 prop 一一对应，纯透传）。 */
+  onPlanDecision?: (msgId: string, approved: boolean) => void | Promise<void>;
   conversations: Conversation[];
   onSelectConv: (id: string) => void;
   onNewConv: () => void;
@@ -59,6 +61,7 @@ export const AiWorkView = memo(function AiWorkView({
   onRegenerate,
   onSwitchVersion,
   onRate,
+  onPlanDecision,
   conversations,
   onSelectConv,
   onNewConv,
@@ -118,6 +121,7 @@ export const AiWorkView = memo(function AiWorkView({
           onRegenerate={onRegenerate}
           onSwitchVersion={onSwitchVersion}
           onRate={onRate}
+          onPlanDecision={onPlanDecision}
           conversations={conversations}
           onSelectConv={onSelectConv}
           onNewConv={onNewConv}

@@ -47,6 +47,7 @@ import {
   type NavigatorHandler,
 } from '@/core/navigation/navigation';
 import { buildDeepLink } from '@/core/navigation/deepLink';
+import { registerContextMenuProvider } from '@/core/contextMenu/registry';
 
 // ========== 命令调用策略（能力制） ==========
 // 实际放行由 SandboxPolicy 决定：能力规则 ∩ 已授权能力 ∩（旧式 commands 收紧）。
@@ -220,6 +221,39 @@ function createSafeApi(pluginId: string, policy: SandboxPolicy) {
     // 深链生成：格式由宿主独占，插件只描述目标。笔记回链这类「要写进正文、明天还要能点」
     // 的场景不能用 navigate（那是一次性事件），必须拿到一条 URL 字符串。
     buildDeepLink: (target: NavigationTarget) => buildDeepLink(target),
+    // 右键菜单 provider：模块贡献自己的条目，宿主决定什么时候弹、怎么排。
+    // 默认只在本模块激活时生效（与 registerCommandProvider 同一口径）。
+    registerContextMenuProvider: (provider: {
+      id: string;
+      moduleId?: string;
+      priority?: number;
+      build: (target: unknown) => unknown;
+    }) => {
+      if (!provider || typeof provider.id !== 'string' || !provider.id || typeof provider.build !== 'function') {
+        throw new Error('registerContextMenuProvider: 需要 { id, build }');
+      }
+      return registerContextMenuProvider({
+        id: `${pluginId}:${provider.id}`,
+        moduleId: provider.moduleId ?? pluginId,
+        priority: provider.priority,
+        build: async (info) => {
+          const raw = await provider.build(info);
+          if (!Array.isArray(raw)) return [];
+          // 插件给的条目逐条整形：文案必须是字符串、动作必须是函数，其它一律丢掉
+          return raw
+            .filter((item) => item && typeof item.label === 'string')
+            .map((item, i) => ({
+              id: `${pluginId}:${provider.id}:${i}`,
+              label: String(item.label),
+              hint: typeof item.hint === 'string' ? item.hint : undefined,
+              variant: item.variant === 'destructive' ? ('destructive' as const) : ('default' as const),
+              disabled: item.disabled === true,
+              separatorBefore: item.separatorBefore === true,
+              run: typeof item.run === 'function' ? () => item.run() : undefined,
+            }));
+        },
+      });
+    },
     // 帧缓冲工具：高频数据推送批处理，避免渲染风暴
     createFrameBuffer: createFrameBuffer,
     // 全站唯一的模糊打分：面板与各模块 provider 共用同一套排序手感，

@@ -19,6 +19,7 @@ import {
 import { getEmbedConfig, setEmbedConfig } from '@/core/stores/semanticMemory';
 import { getAgentSilent, setAgentSilent } from '../stores/agentStore';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { getVersion } from '@tauri-apps/api/app';
 import {
   Globe,
   Palette,
@@ -470,7 +471,11 @@ export function AppearanceSettingsScreen() {
 
 /** 关于屏 */
 export function AboutScreen() {
-  const appVersion = '0.1.0'; // TODO: 从 tauri.conf.json 读取真实版本
+  // 版本号唯一真源是 tauri.conf.json；这里读运行时版本，避免手工维护第二份常量（旧值停在 0.1.0）
+  const [appVersion, setAppVersion] = useState('');
+  useEffect(() => {
+    void getVersion().then((v) => setAppVersion(v || '')).catch(() => setAppVersion(''));
+  }, []);
 
   return (
     <div className="px-4 py-5 flex flex-col gap-4">
@@ -485,7 +490,7 @@ export function AboutScreen() {
           安得云荟
         </h2>
         <p className="text-[var(--muted-foreground)]" style={{ fontSize: 'var(--m-text-caption)' }}>
-          版本 {appVersion} · Android v1
+          版本 {appVersion || '—'} · Android v1
         </p>
         <p className="text-[var(--muted-foreground)]" style={{ fontSize: 'var(--m-text-caption)' }}>
           Tauri v2 + React + Rust

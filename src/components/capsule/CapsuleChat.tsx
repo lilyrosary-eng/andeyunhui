@@ -32,6 +32,7 @@ function CapsuleChat({ coverUrl }: { coverUrl: string | null }) {
     regenerate,
     switchVersion,
     rateMessage,
+    decidePlan,
   } = useAiChat({ persistKey: CAPSULE_CONV_KEY });
 
   return (
@@ -52,6 +53,7 @@ function CapsuleChat({ coverUrl }: { coverUrl: string | null }) {
       onRegenerate={(id) => void regenerate(id)}
       onSwitchVersion={switchVersion}
       onRate={rateMessage}
+      onPlanDecision={(id, ok) => decidePlan(id, ok)}
       coverUrl={coverUrl}
       showKeepButton
       keepPinned={keepOpen}

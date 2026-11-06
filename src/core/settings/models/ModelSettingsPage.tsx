@@ -11,6 +11,7 @@ import { AGENT_ROUNDS_DEFAULT, AGENT_ROUNDS_MAX } from '@/core/ai/useAiChat';
 import { resolveMediaConfig } from '@/core/ai/media/resolve';
 import { ComfyuiPanel } from './ComfyuiPanel';
 import { MediaBackendsPanel } from './MediaBackendsPanel';
+import { EmbeddingPanel } from './EmbeddingPanel';
 import { InjectionPromptPanel } from './InjectionPromptPanel';
 import { TranslatePanel } from './TranslatePanel';
 import { inferProviderName, mergeModels, newModelKey, refillCapacity, refillCaps, sameBaseUrl } from './providerMatch';
@@ -532,6 +533,16 @@ export function ModelSettingsPage() {
         mediaModels={cfg.media_models}
         providers={cfg.providers}
         onChangeMediaModel={setMediaModel}
+      />
+
+      {/* 嵌入模型：**RAG 记忆与知识库的唯一嵌入入口**。刻意不并进上面的媒体能力链 ——
+          那条链的语义是「留空=走模型原生，选一个=兜底」，而嵌入没有"原生"一说，
+          留空就等于"没配置，沉淀与摄取都不做"。（2026-11-05 用户要求把它拿出来单列） */}
+      <EmbeddingPanel
+        t={t}
+        value={cfg.media_models.embedding ?? ''}
+        providers={cfg.providers}
+        onChange={(v) => setMediaModel('embedding', v)}
       />
 
       {/* 注入层提示词：AI 编程使用的系统规则。空白 = 只用内置；冲突时用户填写优先。 */}

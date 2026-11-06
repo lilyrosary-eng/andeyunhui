@@ -19,6 +19,7 @@ import { resolveMediaConfig } from '@/core/ai/media/resolve';
 import { retrieveChatContext, ingestChatTurn, autoSyncCompanion } from '@/core/stores/semanticMemory';
 import { maybeSummarizeConversation } from '@/core/ai/l4SummaryLoop';
 import { useCompanionStore, buildPersonaContext } from '@/core/stores/companionStore';
+import type { PlanApproval } from '@/core/ai/planTypes';
 
 /**
  * agent 单次请求的**最大工具轮数**上限/默认值。
@@ -35,6 +36,28 @@ export function agentMaxRounds(): number {
   const raw = Number(storage.getString(KEYS.ai.agentMaxRounds.key, String(AGENT_ROUNDS_DEFAULT)));
   if (!Number.isFinite(raw)) return AGENT_ROUNDS_DEFAULT;
   return Math.min(AGENT_ROUNDS_MAX, Math.max(1, Math.trunc(raw)));
+}
+
+// ── 计划确认闸门的等待超时 ──────────────────────────────────────────────
+// 与 Rust `ai_agent::PLAN_GATE_TIMEOUT_*` 是**同一组界**，改一处要改两处。
+// 太短会在用户还没读完计划时就判成「否决」，太长又会让 agent 白白挂着。
+export const PLAN_GATE_TIMEOUT_DEFAULT = 300;
+export const PLAN_GATE_TIMEOUT_MIN = 30;
+export const PLAN_GATE_TIMEOUT_MAX = 1800;
+const PLAN_GATE_TIMEOUT_KEY = 'andeyunhui.ai.planGateTimeoutSecs';
+
+/** 读计划确认超时（秒）。默认 300，越界夹到 [30, 1800]。 */
+export function planGateTimeoutSecs(): number {
+  const raw = Number(storage.getString(PLAN_GATE_TIMEOUT_KEY, String(PLAN_GATE_TIMEOUT_DEFAULT)));
+  if (!Number.isFinite(raw)) return PLAN_GATE_TIMEOUT_DEFAULT;
+  return Math.min(PLAN_GATE_TIMEOUT_MAX, Math.max(PLAN_GATE_TIMEOUT_MIN, Math.trunc(raw)));
+}
+
+/** 写计划确认超时（秒），越界自动收敛。 */
+export function setPlanGateTimeoutSecs(v: number) {
+  if (!Number.isFinite(v)) return;
+  const n = Math.min(PLAN_GATE_TIMEOUT_MAX, Math.max(PLAN_GATE_TIMEOUT_MIN, Math.trunc(v)));
+  storage.setString(PLAN_GATE_TIMEOUT_KEY, String(n));
 }
 
 export const DEFAULT_PERSIST_KEY = AI_CHAT_CONVERSATIONS_KEY;
@@ -149,6 +172,11 @@ export interface UseAiChatResult {
   /** 点赞/点踩（同值再点一次 = 取消）。 */
   rateMessage: (msgId: string, value: 'up' | 'down') => void;
   /**
+   * 决定一条待确认的计划：true = 确认并执行，false = 让 AI 重新规划。
+   * 对应后端 `ai_agent_approve`（与文件操作审批共用同一张审批表）。
+   */
+  decidePlan: (msgId: string, approved: boolean) => Promise<void>;
+  /**
    * 停止本轮生成。agent 模式走 `ai_agent_cancel`，纯对话走 `ai_chat_cancel`。
    * 已收到的部分文本会保留，并补一句「（已停止）」。
    */
@@ -230,7 +258,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     setBusy(v);
   }, []);
   useAiStream(
-    { prefix: EVENTS.chatStream.prefix, deltaMode: 'append', hasReasoning: true, hasAgentStep: true },
+    { prefix: EVENTS.chatStream.prefix, deltaMode: 'append', hasReasoning: true, hasAgentStep: true, hasPlanApproval: true },
     { reqRef, asstRef, streamConvIdRef, updateMessages, setBusy: setBusyStable },
   );
 
@@ -263,8 +291,13 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     if (aid) {
       updateMessages(cid, (prev) => prev.map((m) => {
         if (m.id !== aid) return m;
-        if (m.content.includes('（已停止）')) return m;
-        return { ...m, content: (m.content ? m.content + '\n\n' : '') + '（已停止）' };
+        // 闸门正等着确认时被停止：计划不会再被执行，按钮必须收掉 ——
+        // 否则再点「确认并执行」只会撞上一个已经过期的 approvalId。
+        const planApproval = m.planApproval?.state === 'pending'
+          ? { ...m.planApproval, state: 'rejected' as const }
+          : m.planApproval;
+        if (m.content.includes('（已停止）')) return { ...m, planApproval };
+        return { ...m, planApproval, content: (m.content ? m.content + '\n\n' : '') + '（已停止）' };
       }));
     }
     // 3) 本地复位（后端强杀时事件不会来，这一步保证 UI 不卡）
@@ -272,6 +305,36 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     // 4) 通知后端真正停下（省掉剩余 token 与网络等待）；找不到就说明本轮已自然结束，忽略
     void invoke(agentRef.current ? 'ai_agent_cancel' : 'ai_chat_cancel', { requestId: rid }).catch(() => {});
   }, [setBusyStable, updateMessages]);
+
+  /**
+   * 决定一条待确认的计划。
+   *
+   * 后端在 `create_plan` 之后暂停整个工具循环等这个决定（`ai_agent_approve` 唤醒）：
+   * true ⇒ 继续执行；false ⇒ 本轮不执行，让模型重新规划。
+   *
+   * 先等命令返回再改状态：后端可能已经超时/被停止（approvalId 过期），
+   * 那时必须按「否决」显示，不能在 UI 上谎报「已确认」。
+   */
+  const decidePlan = useCallback(async (msgId: string, approved: boolean) => {
+    const cid = activeIdRef.current;
+    if (!cid) return;
+    const msg = stateRef.current.conversations.find((c) => c.id === cid)?.messages.find((m) => m.id === msgId);
+    const ap = msg?.planApproval;
+    if (!ap || ap.state !== 'pending') return;
+    const settle = (state: PlanApproval['state']) => {
+      updateMessages(cid, (prev) => prev.map((m) => (
+        m.id === msgId ? { ...m, planApproval: { approvalId: ap.approvalId, state } } : m
+      )));
+    };
+    try {
+      await invoke('ai_agent_approve', { approvalId: ap.approvalId, approved });
+      settle(approved ? 'approved' : 'rejected');
+    } catch (e) {
+      // 过期/已被其它路径处理：计划不会执行，按否决显示才符合事实
+      console.warn('[ai-chat] 计划确认未被后端接受（可能已超时或本轮已停止）:', e);
+      settle('rejected');
+    }
+  }, [updateMessages]);
 
   // 取当前激活 AI 档案 id（沙箱内 zustand store 隔离，故走 invoke）
   const loadProfile = useCallback(async () => {
@@ -625,6 +688,13 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
           ...(conv?.effort?.trim() ? { effort: conv.effort.trim() } : {}),
           // 联网开关：只决定 web_search 是否随 tools 下发（后端 tool_schemas_for_api_without）
           webSearch: webSearchRef.current,
+          // 计划确认闸门：create_plan 之后暂停，等用户在计划面板上「确认并执行 / 重新规划」。
+          // 只有认识 ai-plan-approval 事件的入口能开这个闸（不认识就白等一次超时）。
+          planGate: true,
+          // 等待时长可配（设置面板里那一项）；后端会再夹一次界。
+          planGateTimeoutSecs: planGateTimeoutSecs(),
+          // 计划作用域：按会话分槽，多对话并行时计划不会互相覆盖
+          planScope: cid,
         });
       } else {
         await invoke('ai_chat', payload);
@@ -1023,6 +1093,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     switchVersion,
     /** 给某条回复点赞/点踩（同值再点 = 取消）。 */
     rateMessage,
+    /** 决定待确认的计划（确认并执行 / 让 AI 重新规划）。 */
+    decidePlan,
     /** 停止本轮生成（点「停止」时调用）。已收到部分保留，并补「（已停止）」标记。 */
     abort,
     groupSend,

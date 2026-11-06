@@ -45,6 +45,10 @@ function ensureInit(): Promise<boolean> {
             if (n > 0) console.info(`[rag-prune] 已清理 ${n} 条旧对话记录（保留最近 200 条）`);
           })
           .catch((e) => console.warn('[rag-prune] 清理失败（不影响对话）:', e));
+        // 补写上次因端点不可用而积压的轮次（排在自愈之后，避免和它抢同一个端点）
+        setTimeout(() => {
+          void drainPendingTurns().catch((e) => console.warn('[RAG] 待重试队列排空异常:', e));
+        }, 3000);
       }, 5000);
       return true;
     } catch (e) {
@@ -117,62 +121,136 @@ export function setEmbedConfig(c: EmbedConfig) {
   embedBackoffUntil = 0; // 用户改配置后立即重试（清退避）
 }
 
-/** 解析嵌入配置：显式配置优先；否则自动复用当前算力来源（降门槛）。 */
+/**
+ * 清掉「显式覆盖」。它只剩一个用途：端点不在任何供应商档案里的人（自建服务）。
+ * 优先级是 **路由页选定 > 显式覆盖 > 自动猜测**，所以只要路由页选了嵌入模型，
+ * 这里写过的一切都不再生效 —— 设置面板必须把当前生效来源显示出来，否则用户只会
+ * 觉得"我明明填过端点，怎么没用"。
+ */
+export function clearEmbedConfig() {
+  storage.setJSON(EMBED_KEY, { endpoint: '', apiKey: '', model: '' });
+  embedBackoffUntil = 0;
+}
+
+/**
+ * 自动回退挑嵌入档案的**唯一**规则（设置面板要显示"现在会用哪个"，必须共用这一份，
+ * 否则界面显示的是一套、运行时跑的是另一套 —— 那比没有显示更糟）。
+ *
+ * 必须**先在同供应商里**找，再考虑全局第一个匹配项。原先是 `list.find(isEmbed)`，
+ * 而 v1 兼容视图是 providers × models 一条一档（本机实测 188 条），于是模型列表长的
+ * 供应商会插队：用户当前用的是本机 LM Studio，却自动挑中了
+ * `nvidia/embed-qa-4 @ integrate.api.nvidia.com`（远端），每一轮沉淀都打到远端，
+ * 失败后又被供应商静默吞掉 —— 表现就是「聊了很多轮，知识库里一条都没多」。
+ */
+export function pickAutoEmbedTarget(
+  profiles: AiProfile[],
+  activeId?: string | null,
+): { endpoint: string; apiKey: string; model: string; providerName: string; embedFound: boolean } | null {
+  // 注意：这里**不能再要求 api_key 非空** —— 本地 LM Studio 的 key 可为空/任意，
+  // 过滤掉它会导致「本地嵌入明明可用却被判定为未配置」。
+  const list = (profiles ?? []).filter((p) => p && p.id && p.base_url);
+  const EMBED_RE = /embed|embedding|bge|gte|m3e|nomic/i;
+  const isEmbed = (p?: AiProfile) => !!p && (EMBED_RE.test(p.model ?? '') || EMBED_RE.test(p.name ?? ''));
+  const current = list.find((p) => p.id === activeId) ?? list[0];
+  const embedInCurrent = list.find((p) => isEmbed(p) && p.base_url === current?.base_url);
+  const picked = embedInCurrent ?? (isEmbed(current) ? current : list.find(isEmbed));
+  const used = picked ?? current;
+  if (!used?.base_url) return null;
+  return {
+    // 兼容 base_url 是否已含 /v1：/v1/embeddings 或 /embeddings 都正确拼接
+    endpoint: normalizeEmbeddingEndpoint(used.base_url),
+    apiKey: used.api_key ?? '',
+    // 找到真嵌入模型就用它；否则才退回常见默认（可能不被该端点支持 → embedFound=false）
+    model: picked ? (picked.model || picked.name || '') : 'text-embedding-3-small',
+    providerName: picked?.name || used.name || used.id || '',
+    embedFound: !!picked,
+  };
+}
+
+/** 按模型名找到它所属供应商，推出端点（与运行时 ① 同一条规则）。 */
+function pickRoutingEmbed(profiles: AiProfile[], name: string) {
+  const want = name.trim();
+  if (!want) return null;
+  const hit = (profiles ?? []).find(
+    (p) => p && (p.model ?? '').trim() === want && (p.base_url ?? '').trim(),
+  );
+  if (!hit?.base_url) return null;
+  return {
+    endpoint: normalizeEmbeddingEndpoint(hit.base_url),
+    apiKey: hit.api_key ?? '',
+    model: want,
+    note: hit.name || hit.id || '',
+  };
+}
+
+/**
+ * 「当前真正会用哪一条嵌入配置」的**唯一**算式，供设置界面显示。
+ *
+ * 为什么必须共享：运行时按 ①路由页选定 ②手动端点 ③自动猜测 的顺序取，
+ * 而界面上曾有三个地方各自填同一份配置、显示的来源 yet 各算各的 ——
+ * 那比不显示更糟（用户照着界面判断，判断错）。2026-11-05 把入口收敛成一个，
+ * 并把这段判定抽成函数，界面与运行时不可能再各说各话。
+ */
+export function describeEffectiveEmbed(
+  profiles: AiProfile[],
+  activeId: string | null | undefined,
+  routingName: string | null | undefined,
+): { src: 'routing' | 'explicit' | 'auto'; endpoint: string; model: string; apiKey: string; note: string } | null {
+  const routing = pickRoutingEmbed(profiles, routingName ?? '');
+  if (routing) return { src: 'routing', ...routing };
+  const explicit = getEmbedConfig();
+  if (explicit?.endpoint) {
+    return {
+      src: 'explicit',
+      endpoint: normalizeEmbeddingEndpoint(explicit.endpoint),
+      model: explicit.model || '',
+      apiKey: explicit.apiKey || '',
+      note: '',
+    };
+  }
+  const auto = pickAutoEmbedTarget(profiles, activeId);
+  if (auto) return { src: 'auto', endpoint: auto.endpoint, model: auto.model, apiKey: auto.apiKey, note: auto.providerName };
+  return null;
+}
+
+/**
+ * 运行时解析嵌入配置。
+ *
+ * ★ 直接委托 `describeEffectiveEmbed` —— 设置界面显示的就是这一个算式，
+ *   以前两边各写一份时出现过"界面说用 A、实际打 B"的隐患（三个界面填同一份配置、
+ *   优先级还和运行时相反）。现在不可能再各说各话。
+ */
 async function resolveEmbedConfig(): Promise<{ endpoint: string; apiKey: string; model: string } | null> {
-  // ① 首选：AI 路由页「媒体模型 → 嵌入」选的那个模型名（2026-10-28 用户定调：
-  //   配置只放一处，RAG 这边只留"选哪个 embedding 模型"的钩子）。
-  //   端点与凭证从该模型所属的供应商档案推，不再单独维护 base_url/key。
+  let routingName = '';
   try {
+    // ① 首选：路由页「嵌入模型」选的那个模型名（配置只放一处，这里只留"选哪个"的钩子）
     const cfg = await invoke<{ media_models?: { embedding?: string | null } }>('ai_get_config');
-    const want = (cfg?.media_models?.embedding ?? '').trim();
-    if (want) {
-      const raw = await invoke<{ profiles?: AiProfile[] }>('ai_get_profiles');
-      const hit = (raw?.profiles ?? []).find(
-        (p) => p && (p.model ?? '').trim() === want && (p.base_url ?? '').trim(),
-      );
-      if (hit?.base_url) {
-        return {
-          endpoint: normalizeEmbeddingEndpoint(hit.base_url),
-          apiKey: hit.api_key ?? '',
-          model: want,
-        };
-      }
-      console.warn('[RAG] 路由里配的嵌入模型找不到对应供应商档案，回退其它来源:', want);
-    }
+    routingName = (cfg?.media_models?.embedding ?? '').trim();
   } catch {
     /* 读配置失败：继续走下面的回退链 */
   }
-
-  const explicit = getEmbedConfig();
-  // 用户可能只填了 `.../v1`（甚至只填域名）——这里统一补后缀。
-  // 不补的话 rag_embed_api 会 POST 到不存在的路径（404），而 404 只会表现成
-  // 「RAG 静默走关键词兜底」，用户根本看不出是配置问题（2026-10-28 用户提的）。
-  if (explicit?.endpoint) {
-    return { ...explicit, endpoint: normalizeEmbeddingEndpoint(explicit.endpoint) };
-  }
-  // 自动复用：当前算力来源的 base_url + api_key（OpenAI 兼容 /v1/embeddings）
+  let profiles: AiProfile[] = [];
+  let active: string | null = null;
   try {
     const raw = await invoke<{ profiles?: AiProfile[]; active?: string | null }>('ai_get_profiles');
-    // 注意：这里**不能再要求 api_key 非空** —— 本地 LM Studio 的 key 可为空/任意，
-    // 过滤掉它会导致「本地嵌入明明可用却被判定为未配置」。
-    const list = (raw?.profiles ?? []).filter((p) => p && p.id && p.base_url);
-    // 优先挑「名字像嵌入模型」的档案：用户当前选中的往往是对话模型，
-    // 拿去打 /v1/embeddings 会 404（或在 LM Studio 上被静默替换成已加载的嵌入模型）。
-    const EMBED_RE = /embed|embedding|bge|gte|m3e|nomic/i;
-    const embedLike = list.find((p) => EMBED_RE.test(p.model ?? '') || EMBED_RE.test(p.name ?? ''));
-    const active = embedLike ?? list.find((p) => p.id === raw?.active) ?? list[0];
-    if (active && active.base_url) {
-      // 兼容 base_url 是否已含 /v1：/v1/embeddings 或 /embeddings 都正确拼接
-      const endpoint = normalizeEmbeddingEndpoint(active.base_url);
-      return {
-        endpoint,
-        apiKey: active.api_key ?? '',
-        // 找到真嵌入模型就用它；否则才退回常见默认（可能不被该端点支持）
-        model: embedLike ? (active.model || active.name || '') : 'text-embedding-3-small',
-      };
-    }
-  } catch { /* 忽略 */ }
-  return null;
+    profiles = raw?.profiles ?? [];
+    active = raw?.active ?? null;
+  } catch {
+    /* 忽略 */
+  }
+
+  const eff = describeEffectiveEmbed(profiles, active, routingName);
+  if (!eff) return null;
+  if (routingName && eff.src !== 'routing') {
+    console.warn(`[RAG] 路由页选的嵌入模型「${routingName}」找不到对应供应商档案，已回退到「${eff.src}」来源`);
+  }
+  // 显式呈现选择结果：这条线失败时原本完全静默，用户只能猜"接线是不是有问题"
+  console.info(
+    `[RAG] 嵌入端点（${eff.src === 'routing' ? '路由页选定' : eff.src === 'explicit' ? '手动端点' : '自动猜测'}）：` +
+      `${eff.endpoint} · 模型 ${eff.model}` +
+      (eff.src === 'auto' ? ' · 自动猜测可能挑到别的供应商，建议在 设置 → 模型 → 嵌入模型 里显式选定' : ''),
+  );
+  return { endpoint: eff.endpoint, apiKey: eff.apiKey, model: eff.model };
 }
 
 /** 嵌入一批文本（显式配置或自动复用算力来源；都无时静默降级） */
@@ -189,11 +267,23 @@ async function embed(texts: string[]): Promise<number[][] | null> {
       model: cfg.model || null,
     });
     if (res && Array.isArray(res.embeddings)) {
+      // 端点通了就顺手补写积压的轮次（drainPendingTurns 内部有 draining 锁，不会递归）
+      if (!draining && loadPending().length) void drainPendingTurns();
       return res.embeddings as number[][];
     }
+    console.warn(
+      `[RAG] 嵌入端点返回的不是 embeddings（端点 ${cfg.endpoint} · 模型 ${cfg.model}）→ 记忆沉淀停用 10 分钟。` +
+        `返回体：${JSON.stringify(res).slice(0, 200)}`,
+    );
     embedBackoffUntil = Date.now() + EMBED_BACKOFF_MS;
     return null;
-  } catch {
+  } catch (e) {
+    // 原来这里是个裸 catch：端点 400/404 会被 10 分钟退避彻底吞掉，
+    // 用户看到的是「聊了很多轮但库里一条没多」，且无从判断是接线还是配置。
+    console.warn(
+      `[RAG] 嵌入请求失败（端点 ${cfg.endpoint} · 模型 ${cfg.model}）→ 记忆沉淀停用 10 分钟：`,
+      e,
+    );
     embedBackoffUntil = Date.now() + EMBED_BACKOFF_MS;
     return null;
   }
@@ -420,44 +510,166 @@ export async function buildSemanticContext(queryText: string): Promise<string> {
 // ───────────────────────────────────────────────────────────────────────────
 
 /** 把一轮对话（用户 + 助手）摄取进向量库，形成「永久对话记忆」沉淀。 */
+/** 一轮待沉淀的对话。`uri` 是幂等键：同 uri 重复写只覆盖，不会堆重复记录。 */
+export interface ChatTurnRecord {
+  uri: string;
+  title: string;
+  text: string;
+  ts: number;
+  namespace: string;
+}
+
+/** 拼出沉淀用的正文。回填那边必须用同一个函数，否则去重判据对不上。 */
+export function buildTurnText(userText: string, assistantText: string): string {
+  return sanitizeMemoryText(
+    `用户：${userText.trim()}\n助手：${assistantText.trim()}`,
+    'ingestChatTurn',
+  );
+}
+
+/** 嵌入不可用时暂存的待重试队列。有界：最多 60 条 / 20 万字符，从最旧的开始丢。 */
+const PENDING_KEY = 'andeyunhui.rag.pendingTurns.v1';
+const PENDING_MAX = 60;
+const PENDING_MAX_CHARS = 200_000;
+const DRAIN_BATCH = 32;
+let draining = false;
+
+function trimPending(list: ChatTurnRecord[]): ChatTurnRecord[] {
+  let total = list.reduce((a, r) => a + (r.text?.length ?? 0), 0);
+  let out = list;
+  while (out.length && (out.length > PENDING_MAX || total > PENDING_MAX_CHARS)) {
+    total -= out[0].text?.length ?? 0;
+    out = out.slice(1);
+  }
+  return out;
+}
+
+function loadPending(): ChatTurnRecord[] {
+  try {
+    const arr = JSON.parse(storage.getString(PENDING_KEY, '[]'));
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePending(list: ChatTurnRecord[]): void {
+  try {
+    storage.setString(PENDING_KEY, JSON.stringify(list));
+  } catch (e) {
+    console.warn('[RAG] 待重试队列写入失败（不影响对话）:', e);
+  }
+}
+
+/** 写一条对话来源（`replace: true` → 同 uri 覆盖）。 */
+async function writeTurn(rec: ChatTurnRecord, vec: number[]): Promise<void> {
+  await invoke('rag_ingest', {
+    source: {
+      title: rec.title,
+      uri: rec.uri,
+      type: 'chat',
+      namespace: rec.namespace,
+      replace: true,
+    },
+    chunks: [{
+      idx: 0,
+      text: rec.text,
+      char_start: 0,
+      char_end: rec.text.length,
+      vec,
+      meta: { kind: 'chat', ts: rec.ts },
+    }],
+  });
+}
+
+/**
+ * 沉淀一轮对话。返回 'written' | 'queued' | 'skipped'。
+ *
+ * 为什么要返回状态、还要入队：原先嵌入端点一不可用就直接 `return`，那一轮对话的
+ * 记忆**永久丢失**，而且完全静默（实测 10-29/10-30 五次会议式对话一条都没进库）。
+ * 现在失败转入有界队列，端点恢复或下次启动时批量补写。
+ *
+ * `uri` 可传确定性值（回填用 `chat://backfill/<会话id>/<序号>`），默认按时间戳。
+ */
 export async function ingestChatTurn(
   userText: string,
   assistantText: string,
   namespace = 'ai-chat',
-): Promise<void> {
-  if (isBrowserPreview()) return;
-  if (!userText.trim() && !assistantText.trim()) return;
-  // 同一套净化：用户可能把截图/文件 content 直接塞进消息，助手也可能复述大段粘贴
-  const combined = sanitizeMemoryText(
-    `用户：${userText.trim()}\n助手：${assistantText.trim()}`,
-    'ingestChatTurn',
-  );
-  if (!combined.trim()) return;
-  if (!(await ensureInit())) return;
+  uri?: string,
+  /** 这轮对话真实发生的时间。回填必须传，否则标题全是"今天"，检索不到按时间回忆的内容。 */
+  at?: number,
+): Promise<'written' | 'queued' | 'skipped'> {
+  if (isBrowserPreview()) return 'skipped';
+  if (!userText.trim() && !assistantText.trim()) return 'skipped';
+  const combined = buildTurnText(userText, assistantText);
+  if (!combined.trim()) return 'skipped';
+  const ts = at && Number.isFinite(at) ? at : Date.now();
+  const rec: ChatTurnRecord = {
+    uri: uri ?? `chat://${ts}`,
+    title: `对话记录·${new Date(ts).toLocaleString('zh-CN')}`,
+    text: combined,
+    ts,
+    namespace,
+  };
+  if (!(await ensureInit())) return 'skipped';
   const vecs = await embed([combined]);
-  if (!vecs || !vecs[0]) return; // 无嵌入端点 → 静默跳过沉淀（不阻塞对话）
+  if (!vecs || !vecs[0]) {
+    const p = loadPending();
+    if (p.some((x) => x.uri === rec.uri)) return 'queued';
+    p.push(rec);
+    savePending(trimPending(p));
+    console.info(`[RAG] 嵌入不可用，本轮沉淀转入待重试队列（现有 ${loadPending().length} 条）`);
+    return 'queued';
+  }
   try {
-    const now = Date.now();
-    await invoke('rag_ingest', {
-      source: {
-        title: `对话记录·${new Date(now).toLocaleString('zh-CN')}`,
-        uri: `chat://${now}`,
-        type: 'chat',
-        namespace,
-      },
-      chunks: [{
-        idx: 0,
-        text: combined,
-        char_start: 0,
-        char_end: combined.length,
-        vec: vecs[0],
-        meta: { kind: 'chat', ts: now },
-      }],
-    });
+    await writeTurn(rec, vecs[0]);
+    return 'written';
   } catch (e) {
     // 显式打印：静默吞错会让"沉淀失败"永久不可见（库会悄悄漏掉记忆）
     console.warn('[semanticMemory] ingestChatTurn 沉淀失败（不影响对话）:', e);
+    return 'skipped';
   }
+}
+
+/**
+ * 排空待重试队列：一次最多 32 条，**批量嵌一次**（比逐条省几十次往返）。
+ * 端点仍不可用时整批原样放回，保持顺序。
+ */
+export async function drainPendingTurns(): Promise<number> {
+  if (draining || isBrowserPreview()) return 0;
+  const queue = loadPending();
+  if (!queue.length) return 0;
+  draining = true;
+  let done = 0;
+  try {
+    const batch = queue.slice(0, DRAIN_BATCH);
+    const rest = queue.slice(DRAIN_BATCH);
+    savePending(rest);
+    const vecs = await embed(batch.map((r) => r.text));
+    if (!vecs) {
+      savePending(trimPending([...batch, ...rest]));
+      return 0;
+    }
+    for (let i = 0; i < batch.length; i++) {
+      const v = vecs[i];
+      if (!v) continue;
+      try {
+        await writeTurn(batch[i], v);
+        done++;
+      } catch (e) {
+        console.warn('[RAG] 待重试沉淀写入失败:', e);
+      }
+    }
+    if (done) console.info(`[RAG] 待重试队列补写 ${done} 条，剩余 ${loadPending().length} 条`);
+  } finally {
+    draining = false;
+  }
+  return done;
+}
+
+/** 待重试队列长度（设置面板显示用）。 */
+export function pendingTurnCount(): number {
+  return loadPending().length;
 }
 
 /** 检索对话记忆，返回可直接注入 system 的上下文文本（命中为空时返回 ''）。 */

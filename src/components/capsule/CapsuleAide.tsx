@@ -27,6 +27,8 @@ import type { Conversation, ChatMsg } from './types';
 import { EVENTS } from '@/core/events/schema';
 import { attachMarkdownCopyHandler, injectMarkdownStyles, renderMarkdown } from '@/lib/markdown';
 import { mergeConversations } from '@/core/ai/util';
+import { PlanPanel } from '@/components/ai-chat/PlanPanel';
+import { planGateTimeoutSecs } from '@/core/ai/useAiChat';
 
 const AIDE_STORE_KEY = 'andeyunhui.capsule.aide.conversations.v2'; // 升版本清空历史浮岛 AI 编程对话（与 IDE 对齐）
 const AIDE_ACTIVE_KEY = 'andeyunhui.capsule.aide.activeConv'; // 上次选中的会话 id（收起/展开后恢复）
@@ -70,6 +72,9 @@ const AideBubble = memo(function AideBubble({
   busy,
   onToggleReasoning,
   imageBase,
+  plan,
+  planApproval,
+  onDecidePlan,
 }: {
   messageId: string;
   role: string;
@@ -81,6 +86,11 @@ const AideBubble = memo(function AideBubble({
   reasoningOpen: boolean;
   busy: boolean;
   onToggleReasoning: (id: string) => void;
+  /** Agent 计划快照（plan 工具回传）；与主窗口复用同一个 PlanPanel */
+  plan?: ChatMsg['plan'];
+  planApproval?: ChatMsg['planApproval'];
+  /** 计划确认闸门的决议回调（确认并执行 / 重新规划） */
+  onDecidePlan?: (msgId: string, approvalId: string, approved: boolean) => void;
 }) {
   const isUser = role === 'user';
   const isAssistant = role === 'assistant';
@@ -98,6 +108,18 @@ const AideBubble = memo(function AideBubble({
         wordBreak: 'break-word',
       }}
     >
+      {isAssistant && plan ? (
+        <PlanPanel
+          plan={plan}
+          variant="capsule"
+          approval={planApproval}
+          onDecision={
+            planApproval?.state === 'pending' && onDecidePlan
+              ? (approved) => onDecidePlan(messageId, planApproval.approvalId, approved)
+              : undefined
+          }
+        />
+      ) : null}
       {isAssistant && reasoning ? (
         <div style={{ marginBottom: 6 }}>
           <button
@@ -184,6 +206,27 @@ function CapsuleAide() {
   }, []);
   const aideActiveConv = aideConversations.find((c) => c.id === aideActiveConvId);
   const aideMessages = aideActiveConv?.messages ?? [];
+
+  /**
+   * 计划确认闸门的决议：唤醒后端等待中的工具循环（同一个 `ai_agent_approve` 命令）。
+   * 先等命令返回再改状态 —— 超时/已停止时 approvalId 已过期，不能谎报「已确认」。
+   */
+  const decideAidePlan = useCallback(async (msgId: string, approvalId: string, approved: boolean) => {
+    const convId = aideActiveConvId;
+    const settle = (state: 'approved' | 'rejected') => {
+      updateAideStreamMessages(convId, (prev) => prev.map((m) => (
+        m.id === msgId ? { ...m, planApproval: { approvalId, state } } : m
+      )));
+    };
+    try {
+      await invoke('ai_agent_approve', { approvalId, approved });
+      settle(approved ? 'approved' : 'rejected');
+    } catch (e) {
+      // 过期或本轮已停止：计划不会执行，按否决显示才符合事实
+      console.warn('[capsule-aide] 计划确认未被后端接受（可能已超时或已停止）:', e);
+      settle('rejected');
+    }
+  }, [aideActiveConvId, updateAideStreamMessages]);
 
   const [aideInput, setAideInput] = useState('');
   const [aideBusy, setAideBusy] = useState(false);
@@ -517,6 +560,8 @@ function CapsuleAide() {
       deltaMode: 'replace',
       hasReasoning: true,
       hasAgentStep: true,
+      // 计划确认闸门：create_plan 后后端暂停，这里要把待确认计划摆出来
+      hasPlanApproval: true,
     },
     { reqRef: aideReqRef, asstRef: aideAsstRef, streamConvIdRef: aideStreamConvIdRef, updateMessages: updateAideStreamMessages, setBusy: setAideBusy },
   );
@@ -585,6 +630,9 @@ function CapsuleAide() {
         projectRoot: aideProjectRoot || null,
         // 浮岛没有独立的联网开关，默认允许（与「工具常开」策略一致）
         webSearch: true,
+        // 计划确认闸门：create_plan 后暂停，等浮岛里点「确认并执行 / 重新规划」
+        planGate: true,
+        planGateTimeoutSecs: planGateTimeoutSecs(),
       });
     } catch (e) {
       fail(String(e));
@@ -659,8 +707,12 @@ function CapsuleAide() {
     if (aid) {
       updateAideStreamMessages(convId, (prev) => prev.map((m) => {
         if (m.id !== aid) return m;
-        if (m.content.includes('（已停止）')) return m;
-        return { ...m, content: (m.content ? m.content + '\n\n' : '') + '（已停止）' };
+        // 闸门正等确认时被停止：计划不会再执行，按钮收掉（否则点了只会撞过期 approvalId）
+        const planApproval = m.planApproval?.state === 'pending'
+          ? { ...m.planApproval, state: 'rejected' as const }
+          : m.planApproval;
+        if (m.content.includes('（已停止）')) return { ...m, planApproval };
+        return { ...m, planApproval, content: (m.content ? m.content + '\n\n' : '') + '（已停止）' };
       }));
     }
     setAideBusy(false);
@@ -797,6 +849,9 @@ function CapsuleAide() {
                     busy={aideBusy}
                     onToggleReasoning={toggleAideReasoning}
                     imageBase={aideProjectRoot ?? undefined}
+                    plan={m.plan}
+                    planApproval={m.planApproval}
+                    onDecidePlan={decideAidePlan}
                   />
                 </div>
               );

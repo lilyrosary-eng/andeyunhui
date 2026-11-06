@@ -127,7 +127,7 @@ export const AISubmoduleDrawer = memo(function AISubmoduleDrawer({
             />
           ))}
           <p className="text-xs text-neutral-400 dark:text-stone-500 leading-relaxed pt-1">
-            AI 对话为基础；AI 办公负责把成果物落地到笔记；AI 工作流以对话驱动蓝图节点，专业可控。
+            AI 对话为基础；AI 办公负责把成果物落地到笔记；AI 工作流以对话驱动蓝图节点；AI 协作把多个 harness agent 放进房间分派任务。
           </p>
         </div>
       </div>

@@ -1,12 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Switch } from "@/components/ui/switch"
 import { Slider } from "@/components/ui/slider"
-import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, ExternalLink, Database, Archive, FileText, File, Undo2, Trash2, ChevronDown, ChevronUp, RotateCcw, Search, Ban, Eye, FolderOpen, Cpu, Languages } from 'lucide-react'
+import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, ExternalLink, Database, Archive, FileText, File, Undo2, Trash2, ChevronDown, ChevronUp, RotateCcw, Search, Ban, Eye, FolderOpen, Cpu, Languages, UserRound } from 'lucide-react'
 import { ExtensionManagerPanel } from '@/core/settings/ExtensionManagerPanel'
 import { BackgroundImageEditor } from '@/core/settings/BackgroundImageEditor'
 import { BlacklistManager } from '@/core/settings/BlacklistManager'
 import { ModelSettingsPage as ModelSettings } from './models/ModelSettingsPage'
 import { DevConsole } from '@/core/settings/DevConsole'
+import { UserAvatarSettings } from '@/components/bricks/UserAvatarSettings'
+import { setDisplayName, useDisplayName } from '@/core/profile/userProfile'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -30,6 +32,7 @@ const NIAOLUO_MODULES: Array<{ id: string; name: string }> = [
   { id: 'huihua', name: '绘画' },
   { id: 'ide', name: 'IDE' },
   { id: 'rag', name: 'RAG 知识库' },
+  { id: 'vault', name: '密码托管' },
   { id: 'wps', name: 'WPS' },
 ];
 import { SlidingTabs } from '@/components/motion/SlidingTabs';
@@ -112,6 +115,59 @@ function formatArchiveTime(modified: string): string {
   const m = modified.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/);
   if (!m) return modified;
   return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+}
+
+// 本地账号：显示名 + 头像（复用 userAvatar 积木）。只存本机，不接任何云服务。
+function LocalAccountCard() {
+  const name = useDisplayName();
+  const [draft, setDraft] = useState(name);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setDraft(name);
+  }, [name]);
+
+  const save = () => {
+    setDisplayName(draft);
+    setSaved(true);
+    window.setTimeout(() => setSaved(false), 1500);
+  };
+
+  return (
+    <>
+      <section className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 p-4">
+        <div className="flex items-center gap-2">
+          <UserRound size={16} className="text-neutral-400 dark:text-stone-500 shrink-0" />
+          <div className="min-w-0">
+            <span className="text-sm text-neutral-600 dark:text-stone-300 block">本地账号</span>
+            <p className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5">
+              仅保存在本机，不接入云；用于界面署名与密码库的本机标识。
+            </p>
+          </div>
+        </div>
+        <div className="mt-3 flex items-center gap-2">
+          <input
+            value={draft}
+            maxLength={32}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') save();
+            }}
+            placeholder="显示名"
+            className="flex-1 min-w-0 px-3 py-2 rounded-lg text-sm bg-white/80 dark:bg-stone-800/70 border border-neutral-200/80 dark:border-stone-700/70 outline-none focus:border-neutral-400"
+          />
+          <button
+            onClick={save}
+            className="px-3 py-1.5 rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-600 dark:text-stone-300 text-sm hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors shrink-0"
+          >
+            保存
+          </button>
+          {saved && <span className="text-xs text-emerald-600 dark:text-emerald-400 shrink-0">已保存</span>}
+        </div>
+      </section>
+      <UserAvatarSettings />
+    </>
+  );
 }
 
 export function GlobalSettingsPanel() {
@@ -1212,6 +1268,8 @@ export function GlobalSettingsPanel() {
                   </button>
                 </div>
               </section>
+
+              <LocalAccountCard />
 
               <section className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden">
                 <div className="flex justify-between items-center p-4 gap-3">

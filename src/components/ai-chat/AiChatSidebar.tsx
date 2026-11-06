@@ -5,7 +5,7 @@
 //   - 产物区：二者共用同一份专属产物库列表
 // chat 子模块为纯会话列表，不显示该切换。全部逻辑由宿主（Root）托管，侧栏只负责展示与触发。
 import { memo, useState } from 'react';
-import { Bot, Users, MessageSquare, Trash2, Pencil, LayoutGrid, FileText, Workflow, Save, Star, Clock, Image as ImageIcon, Video as VideoIcon } from 'lucide-react';
+import { Bot, Users, MessageSquare, Trash2, Pencil, LayoutGrid, FileText, Workflow, Save, Star, Clock, Image as ImageIcon, Video as VideoIcon, Network, Sparkles, BarChart3 } from 'lucide-react';
 import { ModuleSidebarShell } from '@/components/ModuleSidebarShell';
 import { NestedNavList, type NavLayerItem } from '@/components/NestedNavList';
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu';
@@ -14,6 +14,7 @@ import { AiWorkTabs, type AiWorkTab } from '@/components/ai-chat/AiWorkTabs';
 import type { Conversation } from '@/components/capsule/types';
 import type { AISubmoduleDef } from '@/core/ai/submodules';
 import type { AiWorkProduct } from '@/core/ai/aiWorkProducts';
+import type { CollabRoom } from '@/core/ai/aiCollab';
 
 export interface AiChatSidebarProps {
   conversations: Conversation[];
@@ -25,6 +26,10 @@ export interface AiChatSidebarProps {
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onOpenModuleSettings?: () => void;
+  /** 打开「统计」页（侧栏 footer 的 icon-only 按钮；与音乐/阅读/图片/视频同一位置与图标） */
+  onOpenStats?: () => void;
+  /** 统计页是否正在显示（按钮高亮） */
+  statsActive?: boolean;
   /** 子模块切换入口（桌面版接入）：标题区右上角显示「切换」按钮；不传则不显示 */
   submodule?: AISubmoduleDef;
   onOpenSubmoduleSwitcher?: () => void;
@@ -53,6 +58,17 @@ export interface AiChatSidebarProps {
     /** 右键「删除」：移出记录 + 删除本地文件 */
     onDeleteProduct: (id: string) => void;
   };
+  /** collab 子模块：协作房间列表（host 托管，侧栏只展示/触发） */
+  collab?: {
+    rooms: CollabRoom[];
+    activeRoomId: string | null;
+    onSelectRoom: (roomId: string) => void;
+    onNewRoom: () => void;
+    /** 新建使用 DeepSeek Harness 的房间（不可用时传 undefined，不显示入口） */
+    onNewDeepSeekRoom?: () => void;
+    deepseekAvailable?: boolean;
+    onDeleteRoom: (roomId: string) => void;
+  };
 }
 
 export const AiChatSidebar = memo(function AiChatSidebar({
@@ -69,6 +85,9 @@ export const AiChatSidebar = memo(function AiChatSidebar({
   area = 'task',
   onAreaChange,
   work,
+  collab,
+  onOpenStats,
+  statsActive,
 }: AiChatSidebarProps) {
   const [query, setQuery] = useState('');
   const [showGroupDialog, setShowGroupDialog] = useState(false);
@@ -76,6 +95,7 @@ export const AiChatSidebar = memo(function AiChatSidebar({
   const isChat = !submodule || submodule.id === 'chat';
   const isWork = submodule?.id === 'work';
   const isWorkflow = submodule?.id === 'workflow';
+  const isCollab = submodule?.id === 'collab';
   const showArea = isWork || isWorkflow;
   const inProduct = showArea && area === 'product';
 
@@ -133,6 +153,24 @@ export const AiChatSidebar = memo(function AiChatSidebar({
           <span className="flex items-center gap-2 text-red-500"><Trash2 size={14} /> 删除</span>
         </ContextMenuItem>
       </>
+    ),
+  }));
+
+  // collab 子模块：协作房间列表
+  const collabItems: NavLayerItem[] = (collab?.rooms ?? []).map((room) => ({
+    id: room.id,
+    icon: <Network size={15} />,
+    title: room.name,
+    subtitle: room.source?.kind === 'dsh-import'
+      ? `DeepSeek 导入 · ${room.agents.length} 位成员`
+      : room.agents.some((agent) => agent.nativeSessionId)
+        ? `DeepSeek 原生 · ${room.agents.length} 位成员`
+        : `${room.agents.length} 位成员 · 主导 ${room.agents.find((a) => a.id === room.leadId)?.name ?? '—'}`,
+    active: room.id === collab?.activeRoomId,
+    contextMenu: (
+      <ContextMenuItem onSelect={() => collab?.onDeleteRoom(room.id)}>
+        <span className="flex items-center gap-2 text-red-500"><Trash2 size={14} /> 删除</span>
+      </ContextMenuItem>
     ),
   }));
 
@@ -212,20 +250,42 @@ export const AiChatSidebar = memo(function AiChatSidebar({
   );
 
   let title = 'AI 对话';
-  if (!isChat && inProduct) title = '专属产物库';
+  if (isCollab) title = 'AI 协作';
+  else if (!isChat && inProduct) title = '专属产物库';
   else if (showArea) title = '任务';
 
   let icon = <Bot size={20} />;
-  if (!isChat && inProduct) icon = <Workflow size={20} />;
+  if (isCollab) icon = <Network size={20} />;
+  else if (!isChat && inProduct) icon = <Workflow size={20} />;
   else if (showArea) icon = <Workflow size={20} />;
 
-  const primaryAction = isChat
-    ? { label: '新对话', onClick: onNew }
-    : inProduct
-      ? undefined
-      : showArea
-        ? { label: '新建任务', onClick: work?.onNewSession ?? (() => {}) }
-        : undefined;
+  const primaryAction = isCollab
+    ? { label: '新建房间', onClick: () => collab?.onNewRoom() }
+    : isChat
+      ? { label: '新对话', onClick: onNew }
+      : inProduct
+        ? undefined
+        : showArea
+          ? { label: '新建任务', onClick: work?.onNewSession ?? (() => {}) }
+          : undefined;
+
+  // 侧栏底部统计按钮：与音乐/阅读/图片/视频同一模式（footer 区、icon-only、18px、激活高亮）。
+  // 只对 chat 子模块有意义（work/workflow/collab 用的是各自的会话集合）。
+  const statsButton = isChat && onOpenStats ? (
+    <button
+      key="open-stats"
+      onClick={() => onOpenStats()}
+      title={statsActive ? '关闭统计' : '统计'}
+      aria-label={statsActive ? '关闭统计' : '统计'}
+      className={`p-2 rounded-lg transition-colors ${
+        statsActive
+          ? 'text-[var(--element-color-raw)] bg-black/5 dark:bg-white/5'
+          : 'text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5'
+      }`}
+    >
+      <BarChart3 size={18} strokeWidth={2} />
+    </button>
+  ) : null;
 
   return (
     <ModuleSidebarShell
@@ -235,9 +295,13 @@ export const AiChatSidebar = memo(function AiChatSidebar({
       icon={icon}
       title={title}
       primaryAction={primaryAction}
-      secondaryActions={isChat ? [
-        { icon: <Users size={15} />, label: '新群聊', onClick: () => setShowGroupDialog(true) },
-      ] : undefined}
+      secondaryActions={
+        isChat
+          ? [{ icon: <Users size={15} />, label: '新群聊', onClick: () => setShowGroupDialog(true) }]
+          : isCollab && collab?.deepseekAvailable && collab.onNewDeepSeekRoom
+            ? [{ icon: <Sparkles size={15} />, label: 'DeepSeek', onClick: collab.onNewDeepSeekRoom }]
+            : undefined
+      }
       titleActions={onOpenSubmoduleSwitcher ? (
         <button
           onClick={onOpenSubmoduleSwitcher}
@@ -249,11 +313,18 @@ export const AiChatSidebar = memo(function AiChatSidebar({
         </button>
       ) : undefined}
       onOpenModuleSettings={onOpenModuleSettings}
+      footerExtra={statsButton}
       searchQuery={isChat ? query : ''}
       onSearchChange={isChat ? setQuery : undefined}
       searchPlaceholder="搜索对话"
     >
-      {isChat ? (
+      {isCollab ? (
+        <NestedNavList
+          layers={[{ title: '房间', items: collabItems, emptyText: '还没有协作房间，点「新建房间」创建' }]}
+          onBack={() => {}}
+          onItemClick={(item) => collab?.onSelectRoom(item.id)}
+        />
+      ) : isChat ? (
         <>
           <NestedNavList
             layers={[{ title: '对话', items: convItems, emptyText: query ? '没有匹配的对话' : '暂无对话，点「新对话」开始' }]}

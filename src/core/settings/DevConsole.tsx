@@ -38,6 +38,7 @@ interface LogFileInfo {
 const COMMAND_NAMES = [
   'help', 'clear', 'echo', 'pwd', 'ls',
   'logs', 'log', 'storage', 'zoom', 'backup', 'install', 'refresh', 'reload', 'http',
+  'webauthn', 'webauthn-create',
 ];
 
 // ========== 帮助文本 ==========
@@ -57,6 +58,8 @@ const HELP_TEXT = `开发者控制台 · 热指令列表
 :refresh                      刷新插件列表（重新扫描 user_plugins / user_external_deps）
 :reload <plugin_id>          热重载插件
 :http <METHOD> <url> [body]  HTTP 联网（METHOD = GET/POST/PUT/DELETE）
+:webauthn                    探测 WebAuthn / 平台认证器是否可用（Windows Hello 路线判据）
+:webauthn-create             真实发起一次平台认证器注册（会弹 Windows Hello）
 
 说明：
 - 历史记录通过 ↑/↓ 切换，Ctrl+L 清屏，Tab 自动补全命令名`;
@@ -204,6 +207,76 @@ export function DevConsole() {
           pushOutput('out', `${head}\n按占用降序（前 ${top.length} 条）：\n${rows.join('\n') || '(空)'}`);
           const warn = storageWarning(audit);
           if (warn) pushOutput('err', warn);
+          break;
+        }
+
+        case 'webauthn': {
+          const lines: string[] = [
+            `secureContext: ${window.isSecureContext}`,
+            `origin: ${window.location.origin}（rp.id 预期: ${window.location.hostname}）`,
+          ];
+          const PKC = (window as unknown as { PublicKeyCredential?: typeof PublicKeyCredential })
+            .PublicKeyCredential;
+          lines.push(`PublicKeyCredential: ${typeof PKC}`);
+          if (PKC) {
+            try {
+              lines.push(
+                `isUserVerifyingPlatformAuthenticatorAvailable: ${await PKC.isUserVerifyingPlatformAuthenticatorAvailable()}`,
+              );
+            } catch (e) {
+              lines.push(`UVPA 检查失败: ${String(e)}`);
+            }
+            const cm = (
+              PKC as unknown as { isConditionalMediationAvailable?: () => Promise<boolean> }
+            ).isConditionalMediationAvailable;
+            if (cm) {
+              try {
+                lines.push(`isConditionalMediationAvailable: ${await cm.call(PKC)}`);
+              } catch (e) {
+                lines.push(`CM 检查失败: ${String(e)}`);
+              }
+            }
+            lines.push('真实唤起需用户手势：输入 :webauthn-create');
+            pushOutput('out', lines.join('\n'));
+          } else {
+            pushOutput('err', lines.join('\n'));
+          }
+          break;
+        }
+
+        case 'webauthn-create': {
+          try {
+            const challenge = crypto.getRandomValues(new Uint8Array(32));
+            const cred = (await navigator.credentials.create({
+              publicKey: {
+                challenge,
+                rp: { name: '安得云荟', id: window.location.hostname },
+                user: {
+                  id: crypto.getRandomValues(new Uint8Array(16)),
+                  name: 'local-probe',
+                  displayName: '本地探针',
+                },
+                pubKeyCredParams: [
+                  { type: 'public-key', alg: -7 },
+                  { type: 'public-key', alg: -257 },
+                ],
+                authenticatorSelection: {
+                  authenticatorAttachment: 'platform',
+                  userVerification: 'required',
+                  residentKey: 'preferred',
+                },
+                timeout: 60000,
+                attestation: 'none',
+              },
+            })) as PublicKeyCredential | null;
+            pushOutput(
+              'out',
+              cred ? `平台认证器注册成功：credentialId=${cred.id.slice(0, 20)}…` : 'create 返回 null',
+            );
+          } catch (e) {
+            const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+            pushOutput('err', `平台认证器注册失败：${detail}`);
+          }
           break;
         }
 

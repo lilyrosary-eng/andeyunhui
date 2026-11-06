@@ -14,6 +14,8 @@ import { HostSidebar } from '@/components/HostSidebar';
 import { ImmersiveChrome } from '@/components/ImmersiveChrome';
 import { GoldChessboardHub } from '@/components/GoldChessboardHub';
 import { CommandPalette } from '@/components/command-palette/CommandPalette';
+import { GlobalContextMenu } from '@/core/contextMenu/GlobalContextMenu';
+import { AutofillHost } from '@/core/autofill/AutofillHost';
 import { initHostCommandProviders } from '@/core/commandPalette/hostProviders';
 import { setModuleActivator } from '@/core/navigation/navigation';
 import { attachDeepLinkClickHandler } from '@/core/navigation/deepLink';
@@ -772,6 +774,9 @@ function App() {
       <TransferReceiveModal />
       {/* 全局命令面板：Ctrl+K（输入框内用 Ctrl+Shift+K 强制打开） */}
       <CommandPalette onScreenshot={startScreenshot} />
+      <GlobalContextMenu />
+      {/* 应用内自动填充：聚焦登录字段时挂小钥匙图标，点选条目填充（不自动填、不自动保存） */}
+      <AutofillHost />
       {/* 数据迁移进度遮罩：迁移进行中叠加在加载页之上，避免用户以为卡死 */}
       {migrationPct !== null && (
         <div className="fixed inset-0 z-[var(--layer-fullscreen)] flex items-center justify-center bg-black/40 backdrop-blur-sm">

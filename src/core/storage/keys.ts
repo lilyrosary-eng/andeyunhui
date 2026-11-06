@@ -47,6 +47,7 @@ export const KEYS = {
     deskpetSettings:   { key: 'deskpet:settings', kind: 'json', scope: 'desktop', note: 'DeskpetSettingsPanel.tsx 读写（本批改造）' },
     aiChatMemory:      { key: 'andeyunhui.aichat.memory.enabled', kind: 'flag', scope: 'desktop', default: 'true', note: 'useAiChat 永久记忆开关（本批改造）' },
     userAvatar:        { key: 'andeyunhui.aichat.user.avatar', kind: 'string', scope: 'desktop', default: '你', note: 'core/avatar/userAvatar 读写（本批改造）' },
+    userName:          { key: 'andeyunhui.profile.name', kind: 'string', scope: 'desktop', default: '本地用户', note: '本地账号显示名（core/profile/userProfile；不接云）' },
   },
   i18n: {
     language:          { key: 'language', kind: 'string', scope: 'shared', default: 'zh-CN', note: 'i18n 语言选择' },

@@ -6,6 +6,7 @@ import type { MutableRefObject } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import type { ChatMsg } from './types';
 import { recordGenerateFail } from '@/core/ai/comfyui/skills';
+import { parsePlanSnapshot, parsePlanApproval } from '@/core/ai/planTypes';
 
 export interface AiStreamConfig {
   /** 事件前缀：'ai'（对话）/ 'capsule-ide-chat'（编程对话）/ 'capsule-ide-agent'（编程代理） */
@@ -16,6 +17,8 @@ export interface AiStreamConfig {
   hasReasoning: boolean;
   /** 是否监听 agent-step（agent 模式工具步骤；实时累积到消息的 agentSteps，供执行轨迹面板） */
   hasAgentStep?: boolean;
+  /** 是否监听 plan-approval（计划确认闸门：{prefix}-plan-approval） */
+  hasPlanApproval?: boolean;
 }
 
 export interface AiStreamRefs {
@@ -37,7 +40,7 @@ export interface AiStreamRefs {
  * 忠实复刻原三套内联实现，仅去重，不改行为。
  */
 export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
-  const { prefix, deltaMode, hasReasoning, hasAgentStep } = config;
+  const { prefix, deltaMode, hasReasoning, hasAgentStep, hasPlanApproval } = config;
   const { reqRef, asstRef, streamConvIdRef, updateMessages, setBusy } = refs;
 
   useEffect(() => {
@@ -154,13 +157,21 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
 
       // agent 工具步骤（运行中实时累积，供执行轨迹面板在落盘前展示）
       if (hasAgentStep) {
-        const u5 = await listen<{ requestId: string; stage: string; name: string; ok: boolean; detail: string; meta?: Record<string, unknown> }>(`${prefix}-agent-step`, (e) => {
+        const u5 = await listen<{ requestId: string; stage: string; name: string; ok: boolean; detail: string; meta?: Record<string, unknown>; plan?: unknown }>(`${prefix}-agent-step`, (e) => {
           if (cancelled) return;
           if (e.payload.requestId !== reqRef.current || !asstRef.current) return;
           const id = asstRef.current;
           const cid = streamConvIdRef.current;
           const step = { stage: e.payload.stage, name: e.payload.name, ok: e.payload.ok, detail: e.payload.detail, meta: e.payload.meta };
-          updateMessages(cid, (prev) => prev.map((m) => (m.id === id ? { ...m, agentSteps: [...(m.agentSteps || []), step] } : m)));
+          // plan 工具执行后携带的完整计划快照：覆盖到当前助手消息，供 PlanPanel 只读渲染。
+          // 同一份快照也留在 step 上，轨迹面板回看时能看到当时的计划（不必依赖最后一条消息）。
+          const plan = parsePlanSnapshot(e.payload.plan);
+          const stepWithPlan = plan ? { ...step, plan } : step;
+          updateMessages(cid, (prev) => prev.map((m) => {
+            if (m.id !== id) return m;
+            const next = { ...m, agentSteps: [...(m.agentSteps || []), stepWithPlan] };
+            return plan ? { ...next, plan } : next;
+          }));
           // AI 写回备注：生图失败时，把原因沉淀进该 ComfyUI 工作流的技能包备注，
           // 下次规划（L3 注入）与运行（日志披露）都能看到，同一坑不踩第二次。
           if (e.payload.name === 'generate_image' && e.payload.ok === false) {
@@ -169,6 +180,35 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
         });
         if (cancelled) { u5(); return; }
         un.push(u5);
+      }
+
+      // 计划确认闸门（agent 调 create_plan 后暂停，等用户确认/否决）。
+      // 两种载荷：state='pending' 开启待确认面板；state='rejected' 是后端超时/否决的终态，
+      // 只用来把还亮着的按钮收掉（用户自己的点击由 useAiChat.decidePlan 先行置态）。
+      if (hasPlanApproval) {
+        const u6 = await listen<{ requestId: string; approvalId: string; state?: string; plan?: unknown }>(`${prefix}-plan-approval`, (e) => {
+          if (cancelled) return;
+          if (e.payload.requestId !== reqRef.current || !asstRef.current) return;
+          const approvalId = e.payload.approvalId;
+          const cid = streamConvIdRef.current;
+          const plan = parsePlanApproval(e.payload.plan);
+          if (e.payload.state === 'rejected') {
+            updateMessages(cid, (prev) => prev.map((m) => (
+              m.planApproval?.approvalId === approvalId
+                ? { ...m, planApproval: { ...m.planApproval, state: 'rejected' } }
+                : m
+            )));
+            return;
+          }
+          const id = asstRef.current;
+          updateMessages(cid, (prev) => prev.map((m) => {
+            if (m.id !== id) return m;
+            const next = plan ? { ...m, plan } : m;
+            return { ...next, planApproval: { approvalId, state: 'pending' } };
+          }));
+        });
+        if (cancelled) { u6(); return; }
+        un.push(u6);
       }
     })();
     return () => {
@@ -181,5 +221,5 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
       flushDelta();
       un.forEach((f) => f());
     };
-  }, [prefix, deltaMode, hasReasoning, hasAgentStep, updateMessages, setBusy]);
+  }, [prefix, deltaMode, hasReasoning, hasAgentStep, hasPlanApproval, updateMessages, setBusy]);
 }

@@ -10,6 +10,7 @@ import type { ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Activity, ChevronDown, ChevronRight, Loader2, X } from 'lucide-react';
 import type { AgentStep } from '@/components/capsule/types';
+import type { PlanSnapshot } from '@/core/ai/planTypes';
 
 /** 后端 ai_session.rs::SessionEvent（serde 默认 externally tagged：{ "User": {...} }） */
 type SessionEvent =
@@ -169,6 +170,22 @@ export function AgentTracePanel({
                   className="mt-1.5 max-w-full max-h-[220px] rounded-lg object-contain border border-black/10 dark:border-white/10"
                 />
               );
+            } else {
+              // plan 工具：meta.plan 是当时的计划快照（随日志落盘，fork/replay 后仍可回看）
+              const snap = (t.meta as { plan?: PlanSnapshot } | null | undefined)?.plan;
+              if (snap && Array.isArray(snap.todos)) {
+                extra = (
+                  <div className="mt-1 rounded-lg border border-black/10 px-2 py-1.5 text-[11px] dark:border-white/10">
+                    <div className="font-medium text-neutral-700 dark:text-stone-200">{snap.title || '执行计划'}</div>
+                    {snap.todos.map((td) => (
+                      <div key={td.id} className="flex items-start gap-1 leading-relaxed">
+                        <span className="shrink-0">{td.done ? '✓' : '○'}</span>
+                        <span className={td.done ? 'line-through opacity-60' : 'text-neutral-600 dark:text-stone-300'}>{td.content}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
             }
           } else if (kind === 'Compact') {
             const c = (ev as { Compact: { summary: string; shadow_until: number } }).Compact;

@@ -20,6 +20,7 @@ export const CAPABILITY_LABELS: Record<string, string> = {
   ai: 'AI / 知识库 / MCP',
   data: '模块数据与配置（音乐库、会话等）',
   attack: '攻防工具集',
+  vault: '密码库（解锁态由后端维护）',
 };
 
 export const KNOWN_CAPABILITIES = Object.keys(CAPABILITY_LABELS);
