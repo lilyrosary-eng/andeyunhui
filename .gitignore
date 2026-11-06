@@ -168,6 +168,10 @@ src-tauri/gen/android/tauri.settings.gradle
 # 曾因 *.mjs 全量忽略而漏出仓库（2026-10-18 已补 git add）。
 scripts/_*
 tmp_*
+# 本机并行开发留下的临时空文件与 node_modules 备份目录（约 2.9 万个文件）。
+# 只忽略、不删除：备份目录可能还有用途，但它绝不该进版本库。
+_tmp_*
+/node_modules.win32.bak/
 
 # AI 协作工作目录：只存在于 .git/info/exclude（本地私有），换机/协作者 clone 下来
 # 不会被忽略，一不留神就 `git add -A` 提交进去。这里补成仓库级规则。
