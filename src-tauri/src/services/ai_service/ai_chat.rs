@@ -621,6 +621,74 @@ pub async fn ai_chat(
     }));
     Ok(())
 }
+
+/// 单轮**非流式**问答：发一句、同步拿一段文本。
+///
+/// 与 `ai_chat` 的差别：不带工具、不落会话、不推进流式事件 —— 供插件做
+/// 「选中文字 → 解释 / 翻译 / 总结」这类轻量调用（事件流对它们太重）。
+/// 需要流式或工具能力时仍走 `ai_chat` / `ai_chat_agent`。
+#[tauri::command]
+pub async fn ai_quick_ask(
+    app: AppHandle,
+    prompt: String,
+    system: Option<String>,
+    profile_id: Option<String>,
+) -> Result<String, String> {
+    let config = load_config(&app);
+    let cfg = resolve_target(&config, profile_id.as_deref());
+    ensure_api_key(&app, "ai-quick-ask", &cfg)?;
+
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let persona = compose_persona_system(&cfg);
+    let effective = compose_effective_system(&system, &persona);
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    if !effective.trim().is_empty() {
+        messages.push(serde_json::json!({ "role": "system", "content": effective }));
+    }
+    messages.push(serde_json::json!({ "role": "user", "content": prompt }));
+
+    // 与 ai_chat 同口径：档位不是 off 就只发 reasoning_effort；off 时回落到温度/上限。
+    let mut body = serde_json::json!({
+        "model": cfg.model,
+        "messages": messages,
+        "stream": false,
+    });
+    let effort = cfg.effort_with_override(None::<&str>);
+    if effort != "off" {
+        body["reasoning_effort"] = serde_json::json!(effort);
+    } else {
+        body["temperature"] = serde_json::json!(cfg.temperature);
+        if let Some(mt) = cfg.max_tokens {
+            body["max_tokens"] = serde_json::json!(mt);
+        }
+    }
+
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let brief: String = text.chars().take(200).collect();
+        return Err(format!("HTTP {status}: {brief}"));
+    }
+    let payload: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应失败: {e}"))?;
+    let content = payload["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if content.is_empty() {
+        return Err("模型未返回内容".to_string());
+    }
+    Ok(content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

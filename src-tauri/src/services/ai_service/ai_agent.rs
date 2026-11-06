@@ -10,8 +10,22 @@ use tauri::{AppHandle, Emitter, Manager};
 use futures_util::StreamExt;
 use crate::services::ai_service::ai_profile::{load_config, resolve_target, compose_persona_system, compose_effective_system, ensure_api_key};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
-use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, tool_schemas_for_api, tool_schemas_for_api_without, mcp_tools_guide, skills_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, take_subagent_settles};
+use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, tool_schemas_for_api, tool_schemas_for_api_without, mcp_tools_guide, skills_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, register_approval, take_subagent_settles};
 use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session_in, persist_agent_session_in, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text, hydrate_images_in, persist_images_in};
+
+/// 计划闸门等待用户确认的最长时长（默认值，可由请求参数覆盖）。
+/// 超时按「否决」处理（让模型重新规划）—— 既不把 agent 永久挂起，也不会在没人看着时
+/// 悄悄开始执行一份没人确认过的计划。
+const PLAN_GATE_TIMEOUT_SECS: u64 = 300;
+/// 可配置区间：太短会在用户还在读计划时误判为否决，太长又把 agent 挂太久。
+const PLAN_GATE_TIMEOUT_MIN_SECS: u64 = 30;
+const PLAN_GATE_TIMEOUT_MAX_SECS: u64 = 1800;
+
+/// 收敛请求传入的超时（越界夹到区间内，缺省用默认值）。
+fn clamp_plan_gate_timeout(v: Option<u64>) -> u64 {
+    v.unwrap_or(PLAN_GATE_TIMEOUT_SECS)
+        .clamp(PLAN_GATE_TIMEOUT_MIN_SECS, PLAN_GATE_TIMEOUT_MAX_SECS)
+}
 
 /// Agent 对话：原生 tool_calls + 循环。
 /// 流程：非流式请求（带 tools）→ 若返回 message.tool_calls →
@@ -41,6 +55,14 @@ async fn run_agent(
     effort: Option<String>,
     // 是否把 web_search 放进 tools（其余工具始终在）。false 时模型根本收不到该定义。
     web_search: bool,
+    // 计划模式闸门：create_plan 落地后暂停，等前端「确认并执行 / 重新规划」。
+    // 缺省 false —— 只有认识 ai-plan-approval 事件的入口（AI 对话 / 浮岛对话）才打开，
+    // 否则旧入口会白等一次超时（那里没人渲染确认按钮）。
+    plan_gate: bool,
+    // 闸门等待超时（秒）。前端可配，越界会被夹到 [30, 1800]。
+    plan_gate_timeout_secs: u64,
+    // 计划作用域（= 前端会话 id）：plan 工具按它分槽，多会话并行不会互相覆盖。
+    plan_scope: String,
 ) -> Result<(), String> {
     // 轮数上限 20：默认 4，但前端会传实际设置（默认 8）。
     // 之所以把上限从 12 抬到 20 —— "自己搭一张 ComfyUI 工作流"天然要多轮：
@@ -190,6 +212,7 @@ async fn run_agent(
         profile_id: profile_id.clone(),
         media,
         images,
+        plan_scope: plan_scope.clone(),
     };
     let mut final_text = String::new();
     let mut tool_calls_occurred = false;
@@ -270,6 +293,9 @@ async fn run_agent(
     // 气泡里的「思考过程」折叠块才有内容。此前这条链完全没转发，等于 agent 模式下
     // 思考过程凭空消失（执行轨迹里也没有它——轨迹只存工具事件）。
     let mut reasoning_acc = String::new();
+    // 计划闸门否决/超时后要在**下一轮**告诉模型「重新规划」。走 system 注入而不是伪造 tool 结果：
+    // 伪造 tool 消息会破坏 assistant(tool_calls) / tool(result) 的配对，derive 时会直接崩。
+    let mut plan_gate_notice: Option<String> = None;
     for _round in 0..max_rounds {
         // 每轮按「静态排除 + 运行时失败禁用」重建工具列表：
         // 某个后端不可达/未配置时，该工具下一轮不再下发，避免模型反复重试。
@@ -308,7 +334,7 @@ async fn run_agent(
         // M3：在 turn 边界取走后台并行子代理的 settle 结论，拼进当轮 system，
         //     让主 agent 能感知/汇总先前委派子代理的最新最终结论。
         let settles = take_subagent_settles(&request_id);
-        let turn_system = if settles.is_empty() {
+        let mut turn_system = if settles.is_empty() {
             system_final.clone()
         } else {
             let mut block = String::from("\n\n以下是你先前委派的并行子代理已返回的最终结论，请结合汇总或给出后续行动：\n");
@@ -323,6 +349,11 @@ async fn run_agent(
             block.push_str("\n如需继续追问某个子代理，可用 send_message 向它投递新指令。");
             format!("{}{}", system_final, block)
         };
+        // 计划未获确认：只在紧接着的这一轮注入，之后清空（避免一直挂在 system 里）。
+        if let Some(note) = plan_gate_notice.take() {
+            turn_system.push_str("\n\n");
+            turn_system.push_str(&note);
+        }
         let mut derived = derive_messages(&session, &turn_system, collect_interrupted_tools(&session));
         // 真实发送量 = 派生消息 + 工具定义固定开销（tools 每请求都携带，必须计入，
         // 否则工具增多时会低估实际上下文、逼近上游硬限制）。
@@ -511,6 +542,8 @@ async fn run_agent(
                 return Ok(());
             }
             let mut active = 0;
+            // 本批是否成功提交了一份新计划（plan 工具的 create_plan 动作）。批结束后据此开闸门。
+            let mut plan_gate_pending = false;
             while active < prepared.len() {
                 // 段边界：连续 Parallel 组成一段；Exclusive 单独成段（长 1），起批次屏障。
                 // 段内用有界滚动缓冲（buffer_unordered）执行：任一卷位完成即补充下一个，对齐 dsh 的
@@ -560,6 +593,13 @@ async fn run_agent(
                     let fname = prepared[p].1.clone();
                     let (ok, res) = slots[k].as_ref().expect("滚动缓冲 slot 必有结果");
                     let detail = &res.text;
+                    // 计划闸门：create_plan 真正落地才需要确认（失败/未知 action 不算）。
+                    if *ok
+                        && fname == "plan"
+                        && prepared[p].3.get("action").and_then(|v| v.as_str()) == Some("create_plan")
+                    {
+                        plan_gate_pending = true;
+                    }
                     // 后端不可达/未配置：本轮后续不再下发该工具，防止模型反复重试。
                     if !*ok && (detail.contains("未配置") || detail.contains("不可达") || detail.contains("探测失败")) {
                         if !excluded_tools.iter().any(|n| n == &fname) {
@@ -569,11 +609,19 @@ async fn run_agent(
                     }
                     // 结构化呈现 meta（对齐 dsh presentResult → ToolResultView）：优先用 execute 自带 meta，
                     // 缺省再尝试工具的 present_result 二次结构化；都不提供则前端回退渲染 detail。
-                    let meta = res.meta.clone().or_else(|| {
+                    let mut meta = res.meta.clone().or_else(|| {
                         prepared[p]
                             .2
                             .and_then(|i| tools[i].present_result(detail, &prepared[p].3))
                     });
+                    // plan 工具的计划快照随 meta 一起落盘：fork / replay / 执行轨迹回看时仍能看到
+                    // 「当时那份计划」。此前快照只存在于实时事件里，日志一落盘就没了。
+                    if fname == "plan" {
+                        let m = meta.get_or_insert_with(|| serde_json::json!({}));
+                        if let Some(obj) = m.as_object_mut() {
+                            obj.insert("plan".to_string(), plan_snapshot_json(&plan_scope));
+                        }
+                    }
                     let _ = app.emit(
                         "ai-agent-step",
                         serde_json::json!({
@@ -586,7 +634,7 @@ async fn run_agent(
                             "detail": detail,
                             "meta": meta.as_ref(),
                             // plan 工具执行后附带当前计划结构化快照，供前端渲染计划/待办面板
-                            "plan": if fname == "plan" { plan_snapshot_json() } else { serde_json::Value::Null },
+                            "plan": if fname == "plan" { plan_snapshot_json(&plan_scope) } else { serde_json::Value::Null },
                         }),
                     );
                     // 通用 Hook：每单步工具执行完成后触发（副作用管线，无钩时 O(1) 空操作）。
@@ -617,6 +665,49 @@ async fn run_agent(
             }
             // 崩溃恢复：每轮工具结果落地即持久化一次，进程在中途被杀也能从那轮续拉。
             persist_agent_session_in(&app, &session, project_root_store.as_deref());
+
+            // ── 计划确认闸门（计划模式）────────────────────────────────────
+            // create_plan 只等于「提交计划」，不等于「开始执行」：把计划摆给前端，等用户决定。
+            // 闸门放在**整批工具跑完之后**而不是工具内部，原因：
+            //   · create_plan 常与 add_todo 在同一批并发下发，批后拿到的才是完整计划；
+            //   · 不在并行工具执行路径里长时间阻塞（同批其它工具不受影响）。
+            // 否决/超时都不执行计划，只把一句「重新规划」塞进下一轮 system（见 plan_gate_notice）。
+            if plan_gate && plan_gate_pending {
+                let mut ticket = register_approval("plan", "create_plan");
+                let approval_id = ticket.id.clone();
+                let _ = app.emit(
+                    "ai-plan-approval",
+                    serde_json::json!({
+                        "requestId": request_id,
+                        "approvalId": approval_id,
+                        "state": "pending",
+                        "plan": plan_snapshot_json(&plan_scope),
+                    }),
+                );
+                log::info!("[ai-agent] 计划闸门：等待用户确认（{approval_id}，最长 {plan_gate_timeout_secs}s）");
+                match ticket.wait(std::time::Duration::from_secs(plan_gate_timeout_secs)).await {
+                    Some(true) => log::info!("[ai-agent] 计划闸门：已确认，继续执行"),
+                    decided => {
+                        let why = if decided.is_none() { "用户未在时限内确认（超时）" } else { "用户要求重新规划" };
+                        log::info!("[ai-agent] 计划闸门：{why}");
+                        // 补一条终态事件：前端据此收掉按钮（超时/否决都要收，否则点击会撞过期 id）。
+                        let _ = app.emit(
+                            "ai-plan-approval",
+                            serde_json::json!({
+                                "requestId": request_id,
+                                "approvalId": approval_id,
+                                "state": "rejected",
+                                "plan": plan_snapshot_json(&plan_scope),
+                            }),
+                        );
+                        plan_gate_notice = Some(format!(
+                            "【计划未获确认】{why}。不要执行这个计划里的任何步骤。\
+                             请按用户本轮的真实需求重新规划，并再次调用 plan(create_plan) 提交新计划；\
+                             用户确认后才会开始执行。若需求本身不清楚，先向用户提问。"
+                        ));
+                    }
+                }
+            }
             continue;
         }
 
@@ -841,6 +932,13 @@ pub async fn ai_chat_agent(
     // 是否允许联网检索（对话页「联网」开关）。缺省 true。
     // 其它工具一律常开 —— 这里只过滤 web_search，见 ai_tools::tool_schemas_for_api_without。
     web_search: Option<bool>,
+    // 计划模式确认闸门：true 时 create_plan 之后暂停等用户「确认并执行 / 重新规划」。
+    // 缺省 false：不认识 ai-plan-approval 的旧入口不传，避免白等超时。
+    plan_gate: Option<bool>,
+    // 闸门等待超时（秒）。留空用默认 300；越界夹到 [30, 1800]。
+    plan_gate_timeout_secs: Option<u64>,
+    // 计划作用域（前端会话 id）：plan 工具按它分槽，多会话并行不互相覆盖。留空 = 默认槽。
+    plan_scope: Option<String>,
 ) -> Result<(), String> {
     // 同步预检：无 API Key 直接拒绝（对齐原契约），无需开后台任务。
     let config = load_config(&app);
@@ -870,6 +968,9 @@ pub async fn ai_chat_agent(
             cancel_cl,
             effort,
             web_search.unwrap_or(true),
+            plan_gate.unwrap_or(false),
+            clamp_plan_gate_timeout(plan_gate_timeout_secs),
+            plan_scope.unwrap_or_default(),
         )
         .await;
         // 自然结束（非取消）→ 登记 DONE 后从注册表移除；取消走 cancel_worker 的 abort 路径。

@@ -53,6 +53,7 @@ pub fn resolve_plugin_namespace(plugin_id: Option<&str>, requested: Option<Strin
         .unwrap_or_else(|| RAG_NS_DEFAULT.to_string())
 }
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -396,6 +397,12 @@ pub struct RagSourceInfo {
     /// 向量维度（768 / 1024 / 2560 / 4096 …）。老数据为 0。
     #[serde(default)]
     pub embed_dim: i64,
+    /// 从该来源**实际存量块**反推的维度。
+    /// 为什么不能只看 `embed_dim`：它是建库时写的一列，2026-10 之前的行全是 0，
+    /// 可块里其实躺着 768 维向量 —— 那样一条永远检索不到，而列表行上一个字都没显示。
+    /// 0 = 这个来源压根没有带向量的块。
+    #[serde(default)]
+    pub vec_dim: i64,
 }
 
 /// 单条检索命中。
@@ -776,6 +783,7 @@ fn source_from_row(row: &rusqlite::Row) -> RagSourceInfo {
         namespace: row.get(7).unwrap_or_else(|_| RAG_NS_DEFAULT.to_string()),
         embed_model: row.get(8).unwrap_or_default(),
         embed_dim: row.get(9).unwrap_or_default(),
+        vec_dim: row.get(10).unwrap_or(0),
     }
 }
 
@@ -792,10 +800,16 @@ pub fn rag_list_sources(
         None => namespace.filter(|s| !s.is_empty()),
     };
     // 单条 SQL + 单闭包：namespace 为 NULL 时（?1 IS NULL）匹配全部，否则只返回该命名空间。
+    // 第 11 列 `vec_dim` 从存量块反推：`sources.embed_dim` 是历史列（老行一律 0），
+    // 拿它当「能不能检索」的依据会把 6 条 768 维的来源显示成正常。
     let mut stmt = conn
         .prepare(
-            "SELECT id, title, uri, type, created_at, chunk_count, status, namespace, embed_model, embed_dim
-             FROM sources WHERE (?1 IS NULL OR namespace = ?1) ORDER BY created_at DESC",
+            "SELECT s.id, s.title, s.uri, s.type, s.created_at, s.chunk_count, s.status, s.namespace,
+                    s.embed_model, s.embed_dim,
+                    COALESCE((SELECT length(c.vec)/4 AS d FROM chunks c
+                              WHERE c.source_id = s.id AND length(c.vec) > 0
+                              GROUP BY d ORDER BY count(*) DESC, d ASC LIMIT 1), 0)
+             FROM sources s WHERE (?1 IS NULL OR s.namespace = ?1) ORDER BY s.created_at DESC",
         )
         .map_err(|e| format!("准备列表语句失败: {}", e))?;
     let ns_param: Option<&str> = effective.as_deref();
@@ -880,12 +894,16 @@ pub struct RagChunkRow {
     pub embed_model: String,
 }
 
-/// 列出某个来源下**带向量**的块（供前端重新嵌入）。只读。
+/// 列出某个来源下的块。只读。
+///
+/// 默认**只返回带向量的块**（重新嵌入的用法）；`with_all = true` 时把父块也带上 ——
+/// 「正文阅读器」要靠父块拼出全文，而父块按设计不存向量。
 pub fn rag_list_chunks(
     app: &AppHandle,
     source_id: String,
     namespace: Option<String>,
     plugin_id: Option<String>,
+    with_all: Option<bool>,
 ) -> Result<Vec<RagChunkRow>, String> {
     let ns = resolve_plugin_namespace(plugin_id.as_deref(), namespace);
     let conn = open_db(app)?;
@@ -900,12 +918,19 @@ pub fn rag_list_chunks(
     if owned.is_none() {
         return Err(format!("来源 {source_id} 不存在或不属于命名空间 {ns}"));
     }
+    // 父块 vec 为 NULL：`length(NULL)/4` 是 NULL，直接 get::<i64> 会报错，统一 COALESCE。
+    let vec_filter = if with_all.unwrap_or(false) {
+        ""
+    } else {
+        " AND length(vec) > 0"
+    };
+    let sql = format!(
+        "SELECT id, idx, text, char_start, char_end, parent_idx, COALESCE(length(vec), 0)/4, embed_model
+         FROM chunks WHERE source_id = ?1 AND namespace = ?2{vec_filter}
+         ORDER BY idx"
+    );
     let mut stmt = conn
-        .prepare(
-            "SELECT id, idx, text, char_start, char_end, parent_idx, length(vec)/4, embed_model
-             FROM chunks WHERE source_id = ?1 AND namespace = ?2 AND length(vec) > 0
-             ORDER BY idx",
-        )
+        .prepare(&sql)
         .map_err(|e| format!("准备查询失败: {}", e))?;
     let rows = stmt
         .query_map(params![source_id, ns], |row| {
@@ -1140,8 +1165,222 @@ pub fn rag_stats(
     })
 }
 
-/// 清理「对话记录」类来源，只保留最近 `keep_recent` 条。
+// ============ 全库来源相似度图（「全库」视图） ============
+
+/// 图上一个来源节点。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RagGraphNode {
+    pub id: String,
+    pub title: String,
+    pub r#type: String,
+    pub chunks: i64,
+    /// 该来源存量块的多数维度；0 = 没有带向量的块。
+    pub dim: i64,
+    /// 维度是否与最近一次写入一致（false = 检索不到，画灰点、不参与连边）。
+    pub current: bool,
+}
+
+/// 一条来源间连边（相似度）。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RagGraphEdge {
+    pub a: String,
+    pub b: String,
+    pub sim: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RagGraphData {
+    pub nodes: Vec<RagGraphNode>,
+    pub edges: Vec<RagGraphEdge>,
+    /// 因维度不符/缺向量而没参与连边的来源数（UI 要如实说明"图上这些点没连线是因为…"）。
+    pub stranded: usize,
+    pub current_dim: i64,
+}
+
+/// 全库来源图：用**存量向量**算来源两两余弦，只回传边，不回传向量。
 ///
+/// 为什么边是相似度而不是 Obsidian 的双链：库里没有文档间链接这一关系，
+/// 唯一真实的连边依据就是向量。父块不存向量（按设计），所以每个来源取
+/// 「多数维度下的子块均值」当代表向量 —— 均值比"取第一块"稳，一篇长文不会
+/// 因为开头那段偏题就整体靠边。
+///
+/// 跨维度不能比（768 与 1024 的点积无意义），所以维度与最近一次写入不符的来源
+/// 只做灰点、不连线，并用 `stranded` 计数说清楚。
+pub fn rag_source_graph(
+    app: &AppHandle,
+    namespace: Option<String>,
+    plugin_id: Option<String>,
+    min_score: Option<f32>,
+    top_k: Option<usize>,
+) -> Result<RagGraphData, String> {
+    let ns = resolve_plugin_namespace(plugin_id.as_deref(), namespace);
+    let threshold = min_score.unwrap_or(0.55);
+    let keep = top_k.unwrap_or(3).max(1);
+    let conn = open_db(app)?;
+
+    let current_dim: i64 = conn
+        .query_row(
+            "SELECT embed_dim FROM namespace_state WHERE namespace = ?1",
+            params![ns],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    // 每个来源的多数维度（与 rag_list_sources 的 vec_dim 同一口径）
+    let mut majority: HashMap<String, (i64, i64)> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_id, length(vec)/4 AS d, count(*) FROM chunks
+                 WHERE namespace = ?1 AND length(vec) > 0 GROUP BY source_id, d",
+            )
+            .map_err(|e| format!("准备来源维度统计失败: {}", e))?;
+        let rows = stmt
+            .query_map(params![ns], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))
+            .map_err(|e| format!("读取来源维度失败: {}", e))?;
+        for row in rows.flatten() {
+            let (sid, d, n) = row;
+            match majority.get(&sid) {
+                Some((_, best)) if *best >= n => {}
+                _ => {
+                    majority.insert(sid, (d, n));
+                }
+            }
+        }
+    }
+
+    // 代表向量 = 该来源在多数维度下所有块的和（最后除以块数）
+    let mut sums: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_id, length(vec)/4, vec FROM chunks
+                 WHERE namespace = ?1 AND length(vec) > 0 ORDER BY source_id, idx",
+            )
+            .map_err(|e| format!("准备向量读取失败: {}", e))?;
+        let rows = stmt
+            .query_map(params![ns], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(|e| format!("读取向量失败: {}", e))?;
+        for row in rows.flatten() {
+            let (sid, d, blob) = row;
+            if majority.get(&sid).map(|x| x.0) != Some(d) {
+                continue; // 少数维度的块不参与（它们本来就检索不到）
+            }
+            let v = blob_to_vec(&blob);
+            let e = sums.entry(sid.clone()).or_insert_with(|| vec![0.0; v.len()]);
+            if e.len() != v.len() {
+                continue;
+            }
+            for (acc, x) in e.iter_mut().zip(v.iter()) {
+                *acc += *x;
+            }
+            *counts.entry(sid).or_insert(0) += 1;
+        }
+    }
+
+    // 节点
+    let mut nodes: Vec<RagGraphNode> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, type, chunk_count FROM sources WHERE namespace = ?1 ORDER BY created_at DESC",
+            )
+            .map_err(|e| format!("准备来源节点失败: {}", e))?;
+        let rows = stmt
+            .query_map(params![ns], |r| {
+                Ok(RagGraphNode {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    r#type: r.get(2)?,
+                    chunks: r.get(3)?,
+                    dim: 0,
+                    current: false,
+                })
+            })
+            .map_err(|e| format!("读取来源节点失败: {}", e))?;
+        for r in rows.flatten() {
+            nodes.push(r);
+        }
+    }
+    for n in nodes.iter_mut() {
+        let d = majority.get(&n.id).map(|x| x.0).unwrap_or(0);
+        n.dim = d;
+        // namespace_state 还没写过（老库第一次启动）时 current_dim = 0，此时不做判断，
+        // 免得把整库都标成"检索不到"。
+        n.current = current_dim == 0 || d == current_dim;
+    }
+
+    // 边：只对维度与当前一致、且有代表向量的来源两两算余弦
+    let mut reps: Vec<(String, Vec<f32>)> = Vec::new();
+    for n in nodes.iter() {
+        if !n.current || n.dim == 0 {
+            continue;
+        }
+        if let (Some(s), Some(c)) = (sums.get(&n.id), counts.get(&n.id)) {
+            if *c == 0 || s.is_empty() {
+                continue;
+            }
+            let inv = 1.0 / *c as f32;
+            reps.push((n.id.clone(), s.iter().map(|x| x * inv).collect()));
+        }
+    }
+    let mut cands: Vec<RagGraphEdge> = Vec::new();
+    for i in 0..reps.len() {
+        for j in i + 1..reps.len() {
+            let sim = cosine(&reps[i].1, &reps[j].1);
+            if sim >= threshold {
+                cands.push(RagGraphEdge {
+                    a: reps[i].0.clone(),
+                    b: reps[j].0.clone(),
+                    sim,
+                });
+            }
+        }
+    }
+    cands.sort_by(|a, b| b.sim.partial_cmp(&a.sim).unwrap_or(std::cmp::Ordering::Equal));
+
+    // 每个来源最多贡献 `keep` 条最像的连线（两端取并集）。
+    // 为什么必须这一刀：这类中文嵌入模型的余弦天然挤在一条窄带上 ——
+    // 实测本机 6 条互不相关的对话记录两两 cos 全落在 0.775~0.806。
+    // 只按绝对阈值过滤会把图画成全连接的毛线球，一眼看不出任何信息；
+    // 取前 k 名之后，图上留下的都是「相对它自己最像的那几个」。
+    let mut budget: HashMap<String, usize> = reps.iter().map(|(id, _)| (id.clone(), keep)).collect();
+    let mut edges: Vec<RagGraphEdge> = Vec::new();
+    for e in cands {
+        let la = budget.get(&e.a).copied().unwrap_or(0);
+        let lb = budget.get(&e.b).copied().unwrap_or(0);
+        if la == 0 && lb == 0 {
+            continue;
+        }
+        if la > 0 {
+            *budget.entry(e.a.clone()).or_insert(0) -= 1;
+        }
+        if lb > 0 {
+            *budget.entry(e.b.clone()).or_insert(0) -= 1;
+        }
+        edges.push(e);
+        if edges.len() >= 600 {
+            break; // 图再密也画不出更多信息，不如不画
+        }
+    }
+
+    let stranded = nodes.iter().filter(|n| n.dim == 0 || !n.current).count();
+    Ok(RagGraphData {
+        nodes,
+        edges,
+        stranded,
+        current_dim,
+    })
+}
+
+/// 清理「对话记录」类来源，只保留最近 `keep_recent` 条。///
 /// 为什么只清 `type='chat'`：persona / core / memory 是用户资产的浓缩，不能自动删。
 /// 安全策略：
 /// - 只在总数超过 `keep_recent * 1.5` 时才动手（避免每次启动都删一遍）

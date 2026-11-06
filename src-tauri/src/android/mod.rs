@@ -70,6 +70,7 @@ pub fn run() {
             rag_list_chunks,
             rag_update_vectors,
             rag_stats,
+            rag_source_graph,
             rag_backup_db,
             rag_prune,
             // ========== 多模态（阶段 5 · AI 发图 + 语音）==========
@@ -111,7 +112,7 @@ pub fn run() {
 // rag_service 的同名函数（rag_service 用 &AppHandle，Tauri command 需值参数）。
 
 use crate::services::rag_service::{
-    RagChunkInput, RagChunkRow, RagEmbedRequest, RagEmbedResponse, RagIngestResult,
+    RagChunkInput, RagChunkRow, RagEmbedRequest, RagEmbedResponse, RagGraphData, RagIngestResult,
     RagQueryResult, RagRerankRequest, RagRerankResponse, RagSourceInput, RagSourceInfo, RagStats,
     RagVecUpdate,
 };
@@ -262,9 +263,10 @@ pub async fn rag_list_chunks(
     source_id: String,
     namespace: Option<String>,
     plugin_id: Option<String>,
+    with_all: Option<bool>,
 ) -> Result<Vec<RagChunkRow>, String> {
     rag_blocking("rag_list_chunks", move || {
-        crate::services::rag_service::rag_list_chunks(&app, source_id, namespace, plugin_id)
+        crate::services::rag_service::rag_list_chunks(&app, source_id, namespace, plugin_id, with_all)
     })
     .await
 }
@@ -291,6 +293,20 @@ pub async fn rag_stats(
 ) -> Result<RagStats, String> {
     rag_blocking("rag_stats", move || {
         crate::services::rag_service::rag_stats(&app, namespace, plugin_id)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn rag_source_graph(
+    app: tauri::AppHandle,
+    namespace: Option<String>,
+    plugin_id: Option<String>,
+    min_score: Option<f32>,
+    top_k: Option<usize>,
+) -> Result<RagGraphData, String> {
+    rag_blocking("rag_source_graph", move || {
+        crate::services::rag_service::rag_source_graph(&app, namespace, plugin_id, min_score, top_k)
     })
     .await
 }

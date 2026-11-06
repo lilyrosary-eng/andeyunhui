@@ -29,7 +29,9 @@ const IV_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 
 /// 机器+用户绑定口令（不落盘、不随文件走）。把文件拷到别的机器/账户即无法解密。
-fn machine_passphrase() -> String {
+/// `pub(crate)`：密码库的 device 槽位要复用**同一个口径**，不能再写第二份机器标识实现，
+/// 否则两处对「换机器/改名」的判定会各自漂移。行为与可见性改动无关。
+pub(crate) fn machine_passphrase() -> String {
     let username = std::env::var("USERNAME")
         .ok()
         .or_else(|| std::env::var("USER").ok())

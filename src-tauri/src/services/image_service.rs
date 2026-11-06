@@ -118,6 +118,79 @@ pub fn get_image_file_info(path_str: &str) -> Result<ImageFileInfo, String> {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 临时目录里放测试图片：进程 id 进文件名，避免并行用例互相踩
+    fn temp_path(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("andeyunhui-image-service-tests");
+        std::fs::create_dir_all(&dir).expect("创建测试临时目录");
+        dir.join(format!("{tag}-{}.bin", std::process::id()))
+    }
+
+    #[test]
+    fn 读出真实宽高格式大小与修改时间() {
+        let path = temp_path("real").with_extension("png");
+        image::DynamicImage::new_rgb8(24, 16)
+            .save_with_format(&path, image::ImageFormat::Png)
+            .expect("写出测试 PNG");
+        let info = get_image_file_info(&path.to_string_lossy()).expect("读取图片信息");
+        assert_eq!((info.width, info.height), (24, 16));
+        assert_eq!(info.format, "PNG");
+        assert_eq!(info.size, std::fs::metadata(&path).unwrap().len());
+        // mtime 真读磁盘（不是 0，也不是未来时间）
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(info.modified_at > 0 && info.modified_at <= now + 5, "modified_at={}", info.modified_at);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn 非图片文件仍返回尺寸零与信息() {
+        // 信息面板的降级契约：头解析失败不能整条报错，宽高归零、格式取扩展名
+        let path = temp_path("not-image").with_extension("txt");
+        std::fs::write(&path, b"just text, not an image").unwrap();
+        let info = get_image_file_info(&path.to_string_lossy()).expect("读取应成功");
+        assert_eq!((info.width, info.height), (0, 0));
+        assert_eq!(info.format, "TXT");
+        assert_eq!(info.size, std::fs::metadata(&path).unwrap().len());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn 无扩展名图片靠内容猜格式() {
+        // 真的不带扩展名（temp_path 的 .bin 要去掉），否则这个用例其实在测扩展名兜底
+        let path = temp_path("no-ext").with_extension("");
+        image::DynamicImage::new_rgb8(8, 8)
+            .save_with_format(&path, image::ImageFormat::Png)
+            .expect("写出无扩展名 PNG");
+        let info = get_image_file_info(&path.to_string_lossy()).expect("读取应成功");
+        assert_eq!(info.format, "PNG");
+        assert_eq!((info.width, info.height), (8, 8));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn 认不出来的无扩展名文件返回空格式而非硬编码中文() {
+        // 后端回传的字符串会直接显示在外语界面上，所以「未知」这类文案必须留给前端做
+        let path = temp_path("unknown").with_extension("");
+        std::fs::write(&path, b"\x00\x01\x02 not a recognized image").unwrap();
+        let info = get_image_file_info(&path.to_string_lossy()).expect("读取应成功");
+        assert_eq!(info.format, "");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn 路径不存在或目标是目录时报错不崩溃() {
+        assert!(get_image_file_info(&temp_path("missing").to_string_lossy()).is_err());
+        let dir = std::env::temp_dir();
+        assert!(get_image_file_info(&dir.to_string_lossy()).is_err());
+    }
+}
+
 fn count_recursive_images(folder_path: &Path) -> usize {
     let mut count = 0;
     for entry in WalkDir::new(folder_path).max_depth(1) {

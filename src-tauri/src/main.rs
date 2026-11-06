@@ -2284,6 +2284,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             rag_commands::rag_list_chunks,
             rag_commands::rag_update_vectors,
             rag_commands::rag_stats,
+            rag_commands::rag_source_graph,
             rag_commands::rag_backup_db,
             rag_commands::rag_prune,
             // ========== 全局：密码托管（茑萝 · vault 子插件）==========

@@ -23,8 +23,9 @@ use crate::services::rag_service::{
     rag_init_db as svc_rag_init_db, rag_list_chunks as svc_rag_list_chunks,
     rag_list_sources as svc_rag_list_sources, rag_prune as svc_rag_prune,
     rag_query as svc_rag_query, rag_rerank_api as svc_rag_rerank_api,
-    rag_stats as svc_rag_stats, rag_update_vectors as svc_rag_update_vectors, RagChunkInput,
-    RagChunkRow, RagEmbedRequest, RagEmbedResponse, RagIngestResult, RagQueryResult,
+    rag_source_graph as svc_rag_source_graph, rag_stats as svc_rag_stats,
+    rag_update_vectors as svc_rag_update_vectors, RagChunkInput,
+    RagChunkRow, RagEmbedRequest, RagEmbedResponse, RagGraphData, RagIngestResult, RagQueryResult,
     RagRerankRequest, RagRerankResponse, RagSourceInfo, RagSourceInput, RagStats, RagVecUpdate,
 };
 
@@ -170,16 +171,18 @@ pub async fn rag_backup_db(app: AppHandle, reason: Option<String>) -> Result<Str
     .await
 }
 
-/// 列出某来源下带向量的块（只读，供前端重新嵌入）。
+/// 列出某来源下的块（只读）。默认只给带向量的（重建向量用），
+/// `with_all=true` 时连父块一起给（正文阅读器要拼全文，父块按设计不存向量）。
 #[tauri::command]
 pub async fn rag_list_chunks(
     app: AppHandle,
     source_id: String,
     namespace: Option<String>,
     plugin_id: Option<String>,
+    with_all: Option<bool>,
 ) -> Result<Vec<RagChunkRow>, String> {
     run_blocking("rag_list_chunks", move || {
-        svc_rag_list_chunks(&app, source_id, namespace, plugin_id)
+        svc_rag_list_chunks(&app, source_id, namespace, plugin_id, with_all)
     })
     .await
 }
@@ -207,6 +210,22 @@ pub async fn rag_stats(
     plugin_id: Option<String>,
 ) -> Result<RagStats, String> {
     run_blocking("rag_stats", move || svc_rag_stats(&app, namespace, plugin_id)).await
+}
+
+/// 全库来源相似度图（只回传节点与边，不回传向量）。
+/// `min_score` = 连边下限，`top_k` = 每个来源最多贡献几条最像的连线（默认 3）。
+#[tauri::command]
+pub async fn rag_source_graph(
+    app: AppHandle,
+    namespace: Option<String>,
+    plugin_id: Option<String>,
+    min_score: Option<f32>,
+    top_k: Option<usize>,
+) -> Result<RagGraphData, String> {
+    run_blocking("rag_source_graph", move || {
+        svc_rag_source_graph(&app, namespace, plugin_id, min_score, top_k)
+    })
+    .await
 }
 
 /// 清理对话记录类来源（保留最近 N 条；只在超过 1.5 倍时才动手，删除前自动备份）。

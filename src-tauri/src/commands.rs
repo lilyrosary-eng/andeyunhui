@@ -18,6 +18,8 @@ use crate::services::document_parser;
 use crate::services::reading_service;
 // RAG 共享后台服务命令子模块（rag_query / rag_ingest / rag_embed_api 等）
 pub mod rag_commands;
+// 密码库命令子模块（密码托管插件专用；async + spawn_blocking）
+pub mod vault_commands;
 
 
 // ========== 命令实现按领域拆分到 commands/ 子模块（P1-5，2026-10-18） ==========

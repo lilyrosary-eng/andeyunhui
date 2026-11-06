@@ -59,6 +59,59 @@ pub(crate) async fn request_approval(ctx: &ToolContext, tool: &str, operation: &
     }
 }
 
+/// 一次「事件由调用方自定义」的审批票据：仍登记在同一张 approval_store，
+/// `ai_agent_approve` 照常按 approval_id resolve。
+///
+/// 为什么需要它：`request_approval` 固定发 `ai-agent-approval`（只有 tool/operation 两个字段），
+/// 而计划闸门要把**计划快照**一起摆给前端，payload 不同。于是事件由调用方自行 emit，
+/// 审批表与回调命令共用一份 —— 前端只需认识 `ai_agent_approve` 一个回调。
+pub(crate) struct ApprovalTicket {
+    pub(crate) id: String,
+    // 用 Option 是为了让 Drop 能在字段不被 move 的前提下持有结构（wait 里 take 出来等）。
+    rx: Option<tokio::sync::oneshot::Receiver<bool>>,
+}
+
+impl Drop for ApprovalTicket {
+    /// 无论正常结束、超时，还是**等待中途被 abort**（用户点停止强杀任务），
+    /// 悬挂条目都必须回收：否则前端迟到的确认会命中一个已经没人等的 id。
+    fn drop(&mut self) {
+        let _ = approval_store().lock().map(|mut m| m.remove(&self.id));
+    }
+}
+
+impl ApprovalTicket {
+    /// 等待用户决定：`Some(true)` 放行、`Some(false)` 拒绝、`None` 超时（调用方按拒绝处理）。
+    pub(crate) async fn wait(&mut self, timeout: std::time::Duration) -> Option<bool> {
+        let rx = self.rx.take()?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(v)) => Some(v),
+            // 发送端被丢弃（存储被并发替换/清理）与超时都按「没拿到决定」处理。
+            Ok(Err(_)) | Err(_) => None,
+        }
+    }
+}
+
+/// 登记一次待审批操作并返回票据（不发射事件，payload 由调用方决定）。
+pub(crate) fn register_approval(tool: &str, operation: &str) -> ApprovalTicket {
+    let id = format!(
+        "ap_{}_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+        rand_short()
+    );
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    if let Ok(mut m) = approval_store().lock() {
+        m.insert(
+            id.clone(),
+            PendingApproval { _tool: tool.to_string(), _operation: operation.to_string(), sender: tx },
+        );
+    }
+    ApprovalTicket { id, rx: Some(rx) }
+}
+
 /// 简短随机串（事件/审批 id 后缀，避免多请求冲突）。
 pub(crate) fn rand_short() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -855,5 +908,56 @@ mod adapt_tests {
         ] {
             assert!(adapt_unix_command(c).is_none(), "不该改写: {c}");
         }
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::{approval_store, register_approval};
+    use std::time::Duration;
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    }
+
+    /// 放行：票据等到的就是 true；条目在决议后被回收。
+    #[test]
+    fn approved_ticket_resolves_true() {
+        let rt = runtime();
+        let mut ticket = register_approval("plan", "create_plan");
+        let id = ticket.id.clone();
+        // 模拟 ai_agent_approve：从审批表取出发送端并 resolve。
+        let sender = approval_store()
+            .lock()
+            .unwrap()
+            .remove(&id)
+            .map(|p| p.sender)
+            .expect("登记的审批条目必须可取回");
+        sender.send(true).unwrap();
+        assert_eq!(rt.block_on(async { ticket.wait(Duration::from_millis(500)).await }), Some(true));
+        assert!(!approval_store().lock().unwrap().contains_key(&id), "决议后不该残留条目");
+    }
+
+    /// 否决：等到的就是 Some(false)（调用方据此让模型重新规划）。
+    #[test]
+    fn rejected_ticket_resolves_false() {
+        let rt = runtime();
+        let mut ticket = register_approval("plan", "create_plan");
+        let id = ticket.id.clone();
+        approval_store().lock().unwrap().remove(&id).unwrap().sender.send(false).unwrap();
+        assert_eq!(rt.block_on(async { ticket.wait(Duration::from_millis(500)).await }), Some(false));
+    }
+
+    /// 超时：返回 None，并且票据 Drop 后不留悬挂 id（否则前端迟到的确认会命中过期 id）。
+    #[test]
+    fn timeout_returns_none_and_cleans_up() {
+        let rt = runtime();
+        let id = {
+            let mut ticket = register_approval("plan", "create_plan");
+            let id = ticket.id.clone();
+            assert_eq!(rt.block_on(async { ticket.wait(Duration::from_millis(20)).await }), None);
+            id
+        };
+        assert!(!approval_store().lock().unwrap().contains_key(&id), "超时后不该留下悬挂审批");
     }
 }

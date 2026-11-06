@@ -218,6 +218,8 @@ pub(crate) async fn run_subagent_once(
         //    否则 analyze_image 会报出**误导性**的「本轮对话没有附带图片」（用户明明发了图）。
         media: Default::default(),
         images: Vec::new(),
+        // 子代理工具白名单只有 file/grep/glob，不会调用 plan；用默认槽即可
+        plan_scope: String::new(),
     };
     for _ in 0..6usize {
         match subagent_model_round(&client, &url, cfg, &mut messages, &tools, &sub_ctx).await? {
@@ -283,6 +285,8 @@ pub(crate) async fn run_subagent_worker(
         //    否则 analyze_image 会报出**误导性**的「本轮对话没有附带图片」（用户明明发了图）。
         media: Default::default(),
         images: Vec::new(),
+        // 子代理工具白名单只有 file/grep/glob，不会调用 plan；用默认槽即可
+        plan_scope: String::new(),
     };
     let mut total_rounds = 0usize;
     const MAX_ROUNDS: usize = 20;

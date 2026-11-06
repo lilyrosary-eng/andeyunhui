@@ -33,6 +33,11 @@ pub mod recording_service;
 pub mod window_manager;
 // 插件能力模型：命令→能力规则、授权账本、效果层写入范围校验。
 pub mod plugin_access;
+// 密码库加密内核：随机数据密钥 + 多槽位包裹信封（主密码 / 本机免密 / 备用码）。
+// 与 ai_service/secret.rs 并存：那边是单把机器绑定钥匙（API Key 用），这边支持随文件走与改口令。
+pub mod vault_crypto;
+// 密码库服务层：文件生命周期 / 内存解锁态 / 条目 CRUD / 闲置自动锁 / 审计。
+pub mod vault_service;
 pub mod checkpoint;
 // 项目工作区 .adyh / 跨 harness 通道 .Talk：规则、记忆、会话、媒体、消息总线。
 pub mod adyh_service;

@@ -31,10 +31,19 @@ pub(crate) struct Plan {
     todos: Vec<PlanTodo>,
 }
 
-/// 全局计划存储：单份「当前计划」，跨请求延续，供 plan 工具读写。
-pub(crate) static PLAN_STORE: OnceLock<Mutex<Plan>> = OnceLock::new();
-pub(crate) fn plan_store() -> &'static Mutex<Plan> {
-    PLAN_STORE.get_or_init(|| Mutex::new(Plan { title: String::new(), next_id: 1, todos: vec![] }))
+/// 全局计划存储：**按作用域分槽**（作用域 = 前端会话 id）。
+///
+/// 为什么要分槽：单份计划是进程级共享的，主窗口对话 + 浮岛 + AIWork 同时跑会互相覆盖
+/// （A 对话建的待办会出现在 B 的 plan 面板里）。分槽后每个会话各自演进。
+/// 空作用域落到 "default" 槽，保持不传 plan_scope 的老入口行为不变。
+pub(crate) static PLAN_STORE: OnceLock<Mutex<std::collections::HashMap<String, Plan>>> = OnceLock::new();
+pub(crate) fn plan_store() -> &'static Mutex<std::collections::HashMap<String, Plan>> {
+    PLAN_STORE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 作用域 → 存储键（空串归一成 "default"）。
+pub(crate) fn plan_key(scope: &str) -> String {
+    if scope.trim().is_empty() { "default".to_string() } else { scope.to_string() }
 }
 
 /// 把当前计划渲染为模型可见的文本（含 id，便于调用方按 id 勾选/删除）。
@@ -81,11 +90,15 @@ impl AiTool for PlanTool {
             }
         })
     }
-    async fn execute(&self, args: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolExecResult, String> {
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("").trim();
-        let mut g = plan_store()
+        let mut store = plan_store()
             .lock()
             .map_err(|_| "计划存储锁获取失败".to_string())?;
+        // 按作用域取当前计划；第一次访问时惰性建一份空计划
+        let g = store
+            .entry(plan_key(&ctx.plan_scope))
+            .or_insert_with(|| Plan { title: String::new(), next_id: 1, todos: vec![] });
         match action {
             "create_plan" => {
                 g.title = args

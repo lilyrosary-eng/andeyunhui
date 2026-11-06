@@ -234,7 +234,7 @@ pub(crate) fn skills_guide(project_root: Option<&std::path::Path>) -> String {
         return String::new();
     }
     let mut s = String::from(
-        "\n\n项目可用技能（用 skill 工具按 name 加载完整说明后再执行相应任务；按触发关键词判断是否用到）：",
+        "\n\n可用技能（随包内置 + 项目 `.agent/skills` 定制；用 skill 工具按 name 加载完整说明后再执行相应任务，按触发关键词判断是否用到）：",
     );
     for sk in &dir.skills {
         let kws: Vec<String> = sk.keywords.clone();

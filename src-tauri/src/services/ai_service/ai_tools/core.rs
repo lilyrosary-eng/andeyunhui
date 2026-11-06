@@ -54,6 +54,9 @@ pub(crate) struct ToolContext {
     /// 用户**本轮**发来的图片（data URL）。`analyze_image` 工具按序号引用它们，
     /// 避免把数 MB base64 塞进模型上下文。子代理不继承（任务不同）。
     pub(crate) images: Vec<String>,
+    /// 计划作用域（前端会话 id）。`plan` 工具按它分槽：多个对话 / 浮岛 / 工作台
+    /// 并行时不会互相覆盖同一份计划。空串 = 默认槽（兼容不传的老入口）。
+    pub(crate) plan_scope: String,
 }
 
 /// 媒体配置集合：能力 → 已选定的后端配置。缺某能力键 = 该能力未配置后端。

@@ -43,7 +43,9 @@
     ],
     "resources": {
       "../bundled-dlc": "bundled-dlc/",
-      "../bundled-plugins": "bundled-plugins/"
+      "../bundled-plugins": "bundled-plugins/",
+      "agent-skills": "agent-skills/",
+      "binaries/": "binaries/"
     },
     "fileAssociations": [
       {

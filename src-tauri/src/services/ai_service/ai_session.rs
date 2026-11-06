@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use crate::services::ai_service::ai_tools::{estimate_tokens, plan_store};
+use crate::services::ai_service::ai_tools::{estimate_tokens, plan_store, plan_key};
 
 // ============ 事件溯源会话模型（对齐 dsh 的 append-only Session + surface 派生） ============
 // 核心思想：Agent 的交互历史不直接存成「消息数组」，而是维护一份**只追加（append-only）的事件日志**，
@@ -471,10 +471,15 @@ pub(crate) fn collect_interrupted_tools(session: &EventSession) -> Vec<SessionEv
     repairs
 }
 
-/// plan 工具执行后，返回当前计划的结构化快照（供前端渲染计划/待办面板）。
-pub(crate) fn plan_snapshot_json() -> serde_json::Value {
+/// plan 工具执行后，返回**该作用域**的计划结构化快照（供前端渲染计划/待办面板）。
+///
+/// 作用域 = 前端会话 id；空串落到默认槽。分槽后多会话并行不会互相覆盖。
+pub(crate) fn plan_snapshot_json(scope: &str) -> serde_json::Value {
     if let Ok(g) = plan_store().lock() {
-        serde_json::to_value(&*g).unwrap_or_default()
+        let key = plan_key(scope);
+        g.get(&key)
+            .and_then(|p| serde_json::to_value(p).ok())
+            .unwrap_or_default()
     } else {
         serde_json::Value::Null
     }

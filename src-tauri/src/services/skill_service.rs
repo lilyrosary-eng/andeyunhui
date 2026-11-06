@@ -3,9 +3,11 @@
 //! 对齐 agent-skills：不把所有技能详情塞进上下文，而是先注入「技能索引」（名称 + 一句话说明 +
 //! 触发关键词），模型判断需要某项能力时再按名称加载该技能的完整 markdown 说明。
 //!
-//! 存放约定（技能目录，均为项目级）：
-//! - 项目根 `.agent/skills/<skill_name>/SKILL.md`：技能说明（可含 front-matter 或直接 markdown）。
-//! - 也支持 `.agent/skills/<skill_name>.md` 单文件扁平形式。
+//! 技能来源（两层，项目优先）：
+//! - **随包内置**：`src-tauri/agent-skills/<name>/SKILL.md`，编译期 `include_str!` 嵌入，开箱即用；
+//!   也随 bundle.resources 打包，用户可复制到项目里魔改。
+//! - **项目定制**：项目根 `.agent/skills/<skill_name>/SKILL.md`（或 `<name>.md` 扁平形式），
+//!   同名时覆盖内置版本。
 //!
 //! 本模块只做「发现 + 按名读取」，不缓存二次解析；读取仅限项目目录内，防路径越界。
 //! 调用方（agent 系统提示 / skill 工具）把索引与详情供给模型。
@@ -36,6 +38,35 @@ pub struct SkillContent {
     pub content: String,
     pub source: String,
 }
+
+/// 随包内置技能：编译期嵌入，故任何项目（含无 `.agent/skills` 的项目）都能开箱可用。
+/// 项目根同名技能会覆盖这里的版本。
+struct BuiltinSkill {
+    name: &'static str,
+    content: &'static str,
+}
+
+const BUILTIN_SKILLS: &[BuiltinSkill] = &[
+    BuiltinSkill { name: "ci-cd-and-automation", content: include_str!("../../agent-skills/ci-cd-and-automation/SKILL.md") },
+    BuiltinSkill { name: "code-review-and-quality", content: include_str!("../../agent-skills/code-review-and-quality/SKILL.md") },
+    BuiltinSkill { name: "code-simplification", content: include_str!("../../agent-skills/code-simplification/SKILL.md") },
+    BuiltinSkill { name: "context-engineering", content: include_str!("../../agent-skills/context-engineering/SKILL.md") },
+    BuiltinSkill { name: "debugging-and-error-recovery", content: include_str!("../../agent-skills/debugging-and-error-recovery/SKILL.md") },
+    BuiltinSkill { name: "deprecation-and-migration", content: include_str!("../../agent-skills/deprecation-and-migration/SKILL.md") },
+    BuiltinSkill { name: "documentation-and-adrs", content: include_str!("../../agent-skills/documentation-and-adrs/SKILL.md") },
+    BuiltinSkill { name: "frontend-ui-engineering", content: include_str!("../../agent-skills/frontend-ui-engineering/SKILL.md") },
+    BuiltinSkill { name: "git-workflow-and-versioning", content: include_str!("../../agent-skills/git-workflow-and-versioning/SKILL.md") },
+    BuiltinSkill { name: "idea-refine", content: include_str!("../../agent-skills/idea-refine/SKILL.md") },
+    BuiltinSkill { name: "incremental-implementation", content: include_str!("../../agent-skills/incremental-implementation/SKILL.md") },
+    BuiltinSkill { name: "observability-and-instrumentation", content: include_str!("../../agent-skills/observability-and-instrumentation/SKILL.md") },
+    BuiltinSkill { name: "performance-optimization", content: include_str!("../../agent-skills/performance-optimization/SKILL.md") },
+    BuiltinSkill { name: "planning-and-task-breakdown", content: include_str!("../../agent-skills/planning-and-task-breakdown/SKILL.md") },
+    BuiltinSkill { name: "security-and-hardening", content: include_str!("../../agent-skills/security-and-hardening/SKILL.md") },
+    BuiltinSkill { name: "source-driven-development", content: include_str!("../../agent-skills/source-driven-development/SKILL.md") },
+    BuiltinSkill { name: "spec-driven-development", content: include_str!("../../agent-skills/spec-driven-development/SKILL.md") },
+    BuiltinSkill { name: "test-driven-development", content: include_str!("../../agent-skills/test-driven-development/SKILL.md") },
+    BuiltinSkill { name: "using-agent-skills", content: include_str!("../../agent-skills/using-agent-skills/SKILL.md") },
+];
 
 /// 解析单条 markdown 技能的头部描述：取首行非空 H1 之外的简短说明 + `keywords:` 行。
 /// 简易解析，不引依赖；front-matter 未强制，纯文本也能用。
@@ -166,56 +197,74 @@ fn skills_root(root: &std::path::Path) -> Option<PathBuf> {
     }
 }
 
-/// 列出项目内全部技能索引。技能文件量少，直接扫描（不缓存），保证技能目录变更即时可见。
+/// 列出可用技能索引：随包内置 + 项目定制（同名项目优先）。
 pub fn list_skills(project_root: Option<&Path>) -> SkillDirectory {
-    let root = match project_root {
-        Some(r) if !r.as_os_str().is_empty() => r.to_path_buf(),
-        _ => return SkillDirectory { root: String::new(), skills: vec![] },
-    };
-    let root_s = root.to_string_lossy().to_string();
-    if let Some(dir) = skills_root(&root) {
-        let skills = scan_skills(&dir);
-        SkillDirectory { root: dir.to_string_lossy().to_string(), skills }
-    } else {
-        SkillDirectory { root: root_s, skills: vec![] }
-    }
-}
+    let mut skills: Vec<SkillIndex> = BUILTIN_SKILLS
+        .iter()
+        .map(|b| {
+            let (description, keywords) = parse_meta(b.content, b.name);
+            SkillIndex { name: b.name.to_string(), description, keywords }
+        })
+        .collect();
 
-/// 按名称加载技能全文。名称已做非字符转义（见 [nonce_guard]），再经 safe_join 规范路径越界校验。
-pub fn load_skill(project_root: Option<&Path>, name: &str) -> Result<SkillContent, String> {
-    let root = project_root.ok_or("未提供项目根目录")?;
-    if root.as_os_str().is_empty() {
-        return Err("项目根目录为空".to_string());
-    }
-    let safe = nonce_guard(name);
-    if safe.is_empty() {
-        return Err("技能名为空".to_string());
-    }
-    let dir = skills_root(root).ok_or_else(|| format!("项目内无技能目录（缺失 {}/.agent/skills）", root.display()))?;
-
-    let candidates: Vec<PathBuf> = vec![
-        dir.join(&safe).join("SKILL.md"), // 目录形式
-        dir.join(format!("{}.md", safe)), // 扁平形式
-        dir.join(&safe),                  // 无扩展名兜底
-    ];
-    for p in candidates {
-        // 规范化并校验仍在技能目录内（防越界）
-        if p.exists() {
-            if let Ok(canon) = p.canonicalize() {
-                if let Ok(dir_canon) = dir.canonicalize() {
-                    if !canon.starts_with(&dir_canon) {
-                        return Err(format!("路径越界: {}", canon.display()));
-                    }
+    let mut root = String::from("builtin");
+    if let Some(pr) = project_root.filter(|r| !r.as_os_str().is_empty()) {
+        root = pr.to_string_lossy().to_string();
+        if let Some(dir) = skills_root(pr) {
+            root = dir.to_string_lossy().to_string();
+            for ps in scan_skills(&dir) {
+                if let Some(existing) = skills.iter_mut().find(|s| s.name == ps.name) {
+                    // 项目同名技能覆盖内置版本
+                    *existing = ps;
+                } else {
+                    skills.push(ps);
                 }
-                let content = std::fs::read_to_string(&canon)
-                    .map_err(|e| format!("读取技能 {} 失败: {}", safe, e))?;
-                return Ok(SkillContent {
-                    name: safe,
-                    content,
-                    source: canon.to_string_lossy().to_string(),
-                });
             }
         }
+    }
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    SkillDirectory { root, skills }
+}
+
+/// 按名称加载技能全文：项目 `.agent/skills` 优先，其次随包内置。
+pub fn load_skill(project_root: Option<&Path>, name: &str) -> Result<SkillContent, String> {
+    let safe = nonce_guard(name);
+
+    if let Some(root) = project_root.filter(|r| !r.as_os_str().is_empty()) {
+        if let Some(dir) = skills_root(root) {
+            let candidates: Vec<PathBuf> = vec![
+                dir.join(&safe).join("SKILL.md"), // 目录形式
+                dir.join(format!("{}.md", safe)), // 扁平形式
+                dir.join(&safe),                  // 无扩展名兜底
+            ];
+            for p in candidates {
+                // 规范化并校验仍在技能目录内（防越界）
+                if p.exists() {
+                    if let Ok(canon) = p.canonicalize() {
+                        if let Ok(dir_canon) = dir.canonicalize() {
+                            if !canon.starts_with(&dir_canon) {
+                                return Err(format!("路径越界: {}", canon.display()));
+                            }
+                        }
+                        let content = std::fs::read_to_string(&canon)
+                            .map_err(|e| format!("读取技能 {} 失败: {}", safe, e))?;
+                        return Ok(SkillContent {
+                            name: safe,
+                            content,
+                            source: canon.to_string_lossy().to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(b) = BUILTIN_SKILLS.iter().find(|b| b.name == safe.as_str()) {
+        return Ok(SkillContent {
+            name: safe,
+            content: b.content.to_string(),
+            source: "builtin".to_string(),
+        });
     }
     Err(format!("未找到技能: {}", safe))
 }
@@ -242,5 +291,23 @@ mod tests {
         assert!(!nonce_guard("带 空格/斜杠").contains('/'));
         assert!(!nonce_guard("带 空格\\斜杠").contains('\\'));
         assert_eq!(nonce_guard(""), "skill");
+    }
+
+    /// 随包内置技能必须开箱可用：即使没有项目根 / 没有 `.agent/skills`。
+    #[test]
+    fn builtins_available_without_project() {
+        let dir = list_skills(None);
+        assert_eq!(dir.skills.len(), BUILTIN_SKILLS.len());
+        assert!(dir.skills.iter().any(|s| s.name == "code-simplification"));
+        // 索引描述不能为空，否则注入系统提示后模型无法判断何时使用
+        assert!(dir.skills.iter().all(|s| !s.description.is_empty()));
+        assert_eq!(dir.root, "builtin");
+    }
+
+    #[test]
+    fn builtin_skill_content_loads() {
+        let c = load_skill(None, "code-simplification").expect("内置技能应可加载");
+        assert!(c.content.contains("代码简化"));
+        assert_eq!(c.source, "builtin");
     }
 }
