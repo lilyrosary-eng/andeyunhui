@@ -58,6 +58,11 @@ src/lib/_waitingPages.generated.ts
 src-tauri/target/
 target/
 
+# 打包用 sidecar（由 scripts/prepare-collab-mcp.mjs 从 target/release 复制而来）
+# 目录本身要留在仓库里（tauri.conf.json 的 resources 需要它存在），只忽略产物
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+
 # 前端 / 脚本临时构建日志
 fe_build*.txt
 cargo_check.txt

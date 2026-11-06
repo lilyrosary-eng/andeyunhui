@@ -9,9 +9,11 @@
       /* 防白屏：脚本执行前先给页面一个底色（浅色默认，深色由预加载脚本切换）。 */
       html, body { margin: 0; height: 100%; background: #f4f2ec; }
       body { overflow: hidden; }
-      /* 主窗：三层透明（窗口 → html/body → #root），圆角加在真正有背景的
-         App 根容器上。浮岛一直是这个结构，所以它的圆角能透出桌面。 */
-      html[data-window="main"], html[data-window="main"] body { background: transparent; }
+      /* 主窗三层透明（窗口 → html/body → #root）只在 Linux 生效：那边没有系统级
+         圆角，只能靠透明窗口 + CSS 裁圆。Windows 由 DWM 原生裁圆，若这里也透明，
+         内容层再裁一次就会在圆角处露出第二层底色（2026-11-04 实测）。
+         .is-linux 由 src/main.tsx 统一打（平台判定单例，不在这里另嗅 UA）。 */
+      html.is-linux[data-window="main"], html.is-linux[data-window="main"] body { background: transparent; }
     </style>
     <script>
       // 主窗标记：只有主窗需要"透明 + 圆角"，浮窗/托盘菜单/截图覆盖层各自已有处理。

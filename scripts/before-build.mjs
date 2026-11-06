@@ -30,7 +30,8 @@ const FULL_CHAIN =
   'node scripts/deploy-plugins.mjs && ' +
   'node scripts/copy-waiting.mjs && ' +
   'pnpm run build && ' +
-  'node scripts/prepare-bundled-dlc.mjs';
+  'node scripts/prepare-bundled-dlc.mjs && ' +
+  'node scripts/prepare-collab-mcp.mjs';
 
 // 递归取目录内最新 mtime（毫秒）
 function latestMtime(dir) {
