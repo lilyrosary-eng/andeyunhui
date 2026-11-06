@@ -8,12 +8,14 @@ import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
 import { TransferStationPanel, emitDropzoneChange } from '@/components/TransferStationPanel';
 import { api, type ImportedFile } from '@/lib/api';
+import { TranslateModelPicker } from '@/components/TranslateModelPicker';
 import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
 import { basename, extOf, pathToDataUrl } from '@/platform/nativeDropFiles';
 import {
   SOURCE_LANGS,
   TARGET_LANGS,
   TRANSLATE_NODES,
+  DEFAULT_TRANSLATE_CHAIN,
   loadSourceLang,
   loadTargetLang,
   saveSourceLang,
@@ -621,6 +623,8 @@ function TranslateBox() {
   const [sourceLang, setSourceLang] = useState<string>(() => loadSourceLang());
   const [targetLang, setTargetLang] = useState<string>(() => loadTargetLang());
   const [node, setNode] = useState<string>(() => loadTranslateSettings().node || 'auto');
+  // AI 节点用哪个模型（与设置页/中转站同一份 profileId）
+  const [aiProfile, setAiProfile] = useState<string | undefined>(() => loadTranslateSettings().profileId);
   const [notices, setNotices] = useState('');
   const [meta, setMeta] = useState('');
 
@@ -703,6 +707,22 @@ function TranslateBox() {
           ))}
         </select>
       </div>
+      {/* 走到 AI 时给一个模型选择（与设置页、中转站同一个组件、同一份存储） */}
+      <TranslateModelPicker
+        visible={node === 'ai' || (loadTranslateSettings().chain ?? DEFAULT_TRANSLATE_CHAIN).includes('ai')}
+        value={aiProfile}
+        onChange={(profileId) => {
+          setAiProfile(profileId);
+          const s = loadTranslateSettings();
+          s.profileId = profileId;
+          saveTranslateSettings(s);
+        }}
+        label="AI 模型"
+        followLabel="跟随 AI 设置"
+        emptyLabel="还没有可用的 AI 档案"
+        staleLabel="上次选的已不在档案里"
+        className="flex items-center gap-2 flex-shrink-0 text-[12px] opacity-80"
+      />
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
         <span style={{ fontSize: 12, fontWeight: 600, opacity: 0.7 }}>原文</span>
         <div style={{ flex: 1 }} />

@@ -160,3 +160,31 @@ describe('插件用到的 i18n key 必须真的存在（否则界面显示原始
     expect(bad, '占位符丢了会显示成字面 {n}').toEqual([]);
   });
 });
+
+/**
+ * 同一类漏口的宿主侧版本：`t('key')` / `tr('key')` 用到的 key 必须在 zh-CN 里存在。
+ * 2026-11-06 扫过一次是 0 缺失，所以这条断言现在就能立住；立住之后才防得住以后有人加功能只写兜底。
+ */
+const HOST_SRC = import.meta.glob('../../**/*.tsx', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+}) as Record<string, string>;
+
+describe('宿主组件用到的 i18n key 必须存在', () => {
+  const HOST_KEY_RE = /\b(?:t|tr)\(\s*'([a-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+)'\s*[,)]/g;
+
+  it('glob 命中足量宿主组件（空 glob 会让断言假绿）', () => {
+    expect(Object.keys(HOST_SRC).length).toBeGreaterThan(60);
+  });
+
+  it('每个 t(key) / tr(key) 都在 zh-CN 里', () => {
+    const missing: string[] = [];
+    for (const [file, src] of Object.entries(HOST_SRC)) {
+      for (const m of src.matchAll(HOST_KEY_RE)) {
+        if (!(m[1] in zhCN)) missing.push(`${m[1]} ← ${file.split('/').pop()}`);
+      }
+    }
+    expect([...new Set(missing)].sort(), '缺 key 时界面会显示原始 key').toEqual([]);
+  });
+});

@@ -393,6 +393,26 @@ describe('写完/撤销后内存必须跟到文件真值（13 字段那条线的
   });
 });
 
+describe('自动获取必须三源并查（不是「网易云有结果就不问别人」）', () => {
+  it('元信息与歌词两条链都并发，合并后按标题+歌手去重', () => {
+    const src = read('index.tsx');
+    const chain = src.slice(
+      src.indexOf('handleFetchMetaCandidates'),
+      src.indexOf('handleFetchLyric = useCallback'),
+    );
+    expect(chain.length, '切片没覆盖两条候选链，断言会假绿').toBeGreaterThan(3000);
+    // 并发：两条链各一次 Promise.all
+    expect(chain.split('Promise.all([').length - 1, '候选链必须并发查三源').toBe(2);
+    // 不许回退成「前一个源有结果就不问后一个」—— 那正是用户报的「只有网易云的源」
+    expect(chain).not.toContain('if (out.length === 0) {');
+    expect(chain.split('const seen = new Set<string>();').length - 1).toBe(2);
+    // 三个源都得真的被调用
+    for (const fn of ['neteaseSearchSongs', 'kugouSearchSongs', 'qqSearchSongs']) {
+      expect(chain.split(fn).length - 1, `${fn} 在两条链里各用一次`).toBeGreaterThanOrEqual(2);
+    }
+  });
+});
+
 describe('插件权限声明不能被顺手删', () => {
   it('歌词与标签写回相关命令仍在 manifest 内', () => {
     const m = readManifest();

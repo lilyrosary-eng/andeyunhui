@@ -10,6 +10,7 @@ import {
   SOURCE_LANGS,
   TARGET_LANGS,
   TRANSLATE_NODES,
+  DEFAULT_TRANSLATE_CHAIN,
   loadSourceLang,
   loadTargetLang,
   saveSourceLang,
@@ -20,6 +21,7 @@ import {
   formatNotices,
   type TranslateResult,
 } from '@/lib/translateLanguages';
+import { TranslateModelPicker } from '@/components/TranslateModelPicker';
 import { EVENTS } from '@/core/events/schema';
 import { isLinux } from '@/platform/isLinux';
 import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
@@ -1065,6 +1067,8 @@ function TranslateWorkspace({ onClose }: { onClose: () => void }) {
   const [sourceLang, setSourceLang] = useState<string>(() => loadSourceLang());
   const [targetLang, setTargetLang] = useState<string>(() => loadTargetLang());
   const [node, setNode] = useState<string>(() => loadTranslateSettings().node || 'auto');
+  // AI 节点用哪个模型（后端 profileId → resolve_target）。与设置页同一份存储，不另立一套。
+  const [aiProfile, setAiProfile] = useState<string | undefined>(() => loadTranslateSettings().profileId);
   const [notices, setNotices] = useState('');
   const [meta, setMeta] = useState('');
 
@@ -1150,6 +1154,22 @@ function TranslateWorkspace({ onClose }: { onClose: () => void }) {
             ))}
           </select>
         </div>
+        {/* 走到 AI 时给一个模型选择（与设置页、浮窗同一个组件、同一份存储） */}
+        <TranslateModelPicker
+          visible={node === 'ai' || (loadTranslateSettings().chain ?? DEFAULT_TRANSLATE_CHAIN).includes('ai')}
+          value={aiProfile}
+          onChange={(profileId) => {
+            setAiProfile(profileId);
+            const s = loadTranslateSettings();
+            s.profileId = profileId;
+            saveTranslateSettings(s);
+          }}
+          label={tr('translate.aiModel')}
+          followLabel={tr('translate.aiModelFollow')}
+          emptyLabel={tr('translate.aiModelNone')}
+          staleLabel={tr('translate.aiModelStale')}
+          className="flex items-center gap-2 flex-shrink-0 text-xs text-neutral-500 dark:text-stone-400"
+        />
         <div className="flex items-center justify-between flex-shrink-0">
           <span className="text-xs font-medium text-neutral-600 dark:text-stone-300">{tr('transfer.sourceText')}</span>
           <button

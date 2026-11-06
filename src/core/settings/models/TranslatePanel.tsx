@@ -10,6 +10,7 @@
 import { useState, useEffect } from 'react';
 import { Languages, ChevronDown, Loader2, RotateCcw } from 'lucide-react';
 import { api } from '@/lib/api';
+import { TranslateModelPicker } from '@/components/TranslateModelPicker';
 import {
   listAutoGlossary,
   deleteAutoGlossary,
@@ -110,6 +111,21 @@ export function TranslatePanel({ t }: { t: TFunc }) {
                 <option key={n.id} value={n.id}>{n.label}</option>
               ))}
             </select>
+            {/* 只要这条链会走到 AI（选了 ai 节点，或自动链里含 ai），就给一个模型选择。
+                以前 profileId 这个字段后端在读、界面上却没人能填，翻译只能跟着对话模型走。 */}
+            <TranslateModelPicker
+              visible={
+                (cfg.node || 'auto') === 'ai' ||
+                (cfg.chain ?? DEFAULT_TRANSLATE_CHAIN).includes('ai')
+              }
+              value={cfg.profileId}
+              onChange={(profileId) => save({ profileId })}
+              label={t('translate.aiModel')}
+              followLabel={t('translate.aiModelFollow')}
+              emptyLabel={t('translate.aiModelNone')}
+              staleLabel={t('translate.aiModelStale')}
+              className="mt-2 text-xs text-neutral-500 dark:text-stone-400"
+            />
           </div>
 
           {/* 自动链顺序 */}

@@ -2056,57 +2056,60 @@ useEffect(() => {
         new Promise<null>((resolve) => setTimeout(() => { logStage(`${label} 超时 ${ms}ms`); resolve(null); }, ms)),
       ]);
     logStage(`begin kw=${kw}`);
-    const out: TrackMetaCandidate[] = [];
-    try {
-      const res = await withTimeout(neteaseSearchSongs(kw, 9), 12000, 'netease');
-      for (const s of res?.tracks ?? []) {
-        out.push({
-          key: 'netease-' + s.id,
-          title: s.name || '',
-          artist: s.artist || '',
-          album: s.album || '',
-          durationSecs: Math.round((s.duration || 0) / 1000),
-          coverUrl: s.cover || '',
-          source: 'netease',
-        });
-      }
-    } catch (e) { console.warn('[Music] 网易云检索失败:', e); }
-    logStage(`netease done n=${out.length}`);
-    if (out.length === 0) {
-      try {
-        const kg = await withTimeout(kugouSearchSongs(kw, 9), 12000, 'kugou');
-        for (const s of kg ?? []) {
-          out.push({
-            key: 'kugou-' + (s.hash || s.id || out.length),
-            title: s.name || '',
-            artist: s.artist || '',
-            album: s.album || '',
-            durationSecs: Math.round((s.duration || 0) / 1000),
-            coverUrl: s.cover || '',
-            source: 'kugou',
-          });
-        }
-      } catch (e) { console.warn('[Music] 酷狗检索失败:', e); }
+    // 三个源**并发**查。以前写成回退式（网易云有结果就完全不问酷狗/QQ），
+    // 用户看到的就是「候选里只有网易云」—— 另外两个源等于没接上，
+    // 而多源并排正是这件事的意义：同名不同人、翻唱冒充原唱，只有一份结果时看不出来。
+    const [neteaseRaw, kugouRaw, qqRaw] = await Promise.all([
+      withTimeout(neteaseSearchSongs(kw, 9), 12000, 'netease'),
+      withTimeout(kugouSearchSongs(kw, 9), 12000, 'kugou'),
+      withTimeout(qqSearchSongs(kw, 9), 15000, 'qq'),
+    ]);
+    const merged: TrackMetaCandidate[] = [];
+    for (const s of neteaseRaw?.tracks ?? []) {
+      merged.push({
+        key: 'netease-' + s.id,
+        title: s.name || '',
+        artist: s.artist || '',
+        album: s.album || '',
+        durationSecs: Math.round((s.duration || 0) / 1000),
+        coverUrl: s.cover || '',
+        source: 'netease',
+      });
     }
-    logStage(`kugou done n=${out.length}`);
-    // QQ 音乐作第三兜底（探针实测免签名可用；空结果由客户端内部退避重试，不当「没搜到」）
-    if (out.length === 0) {
-      try {
-        const qq = (await withTimeout(qqSearchSongs(kw, 9), 15000, 'qq')) ?? [];
-        for (const s of qq) {
-          out.push({
-            key: 'qq-' + s.mid,
-            title: s.title || '',
-            artist: s.artist || '',
-            album: s.album || '',
-            durationSecs: s.durationSecs || undefined,
-            coverUrl: s.coverUrl || '',
-            source: 'qq',
-          });
-        }
-      } catch (e) { console.warn('[Music] QQ 音乐检索失败:', e); }
+    for (const s of (kugouRaw ?? []) as any[]) {
+      merged.push({
+        key: 'kugou-' + (s.hash || s.id || merged.length),
+        title: s.name || '',
+        artist: s.artist || '',
+        album: s.album || '',
+        durationSecs: Math.round((s.duration || 0) / 1000),
+        coverUrl: s.cover || '',
+        source: 'kugou',
+      });
     }
-    logStage(`qq done n=${out.length}`);
+    for (const s of ((qqRaw ?? []) as any[])) {
+      merged.push({
+        key: 'qq-' + s.mid,
+        title: s.title || '',
+        artist: s.artist || '',
+        album: s.album || '',
+        durationSecs: s.durationSecs || undefined,
+        coverUrl: s.coverUrl || '',
+        source: 'qq',
+      });
+    }
+    // 去重：同一首歌往往三个源都有。标题+歌手归一后相同只留先出现的那条
+    // （源优先级网易云→酷狗→QQ）—— 重复条目会把真正不同的候选挤出屏幕。
+    const seen = new Set<string>();
+    const out: TrackMetaCandidate[] = merged.filter((c) => {
+      const k = `${c.title.toLowerCase().replace(/\s+/g, '')}|${c.artist.toLowerCase().replace(/\s+/g, '')}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    logStage(
+      `sources netease=${neteaseRaw?.tracks?.length ?? 0} kugou=${(kugouRaw ?? []).length} qq=${(qqRaw ?? []).length} → merged=${merged.length} deduped=${out.length}`,
+    );
     // 用宿主打分引擎排序（标题/歌手/专辑三维，「同名不同人」会被记 -2 压到队尾）。
     // 弹窗里「分项自动获取」直接取第 0 条，所以排序一生效它就自动受益，不必动编辑器。
     // 注意：打分器会淘汰标题完全不搭的候选；若全部被淘汰则退回原顺序 ——
@@ -2152,51 +2155,50 @@ useEffect(() => {
     const artist = (Array.isArray(track.artist) ? track.artist.join(' ') : (track.artist || '')).trim();
     const kw = [title, artist].filter(Boolean).join(' ');
     if (!kw) return [];
-    const out: LyricCandidate[] = [];
-    try {
-      const res = await neteaseSearchSongs(kw, 9);
-      for (const s of res?.tracks ?? []) {
-        out.push({
-          key: 'netease-lyric-' + s.id,
-          title: s.name || '',
-          artist: s.artist || '',
-          source: 'netease',
-          neteaseId: s.id,
-        });
-      }
-    } catch (e) { console.warn('[Music] 网易云歌词检索失败:', e); }
-    if (out.length === 0) {
-      try {
-        const kg = await kugouSearchSongs(kw, 9);
-        for (const s of kg ?? []) {
-          out.push({
-            key: 'kugou-lyric-' + (s.hash || s.id || out.length),
-            title: s.name || '',
-            artist: s.artist || '',
-            source: 'kugou',
-            kugouHash: s.hash,
-            kugouKeyword: title,
-          });
-        }
-      } catch (e) { console.warn('[Music] 酷狗歌词检索失败:', e); }
+    // 三源并发（理由同元信息候选链：回退式会让用户只看得到一个源）
+    const [neteaseRaw, kugouRaw, qqRaw] = await Promise.all([
+      neteaseSearchSongs(kw, 9).catch((e) => { console.warn('[Music] 网易云歌词检索失败:', e); return null; }),
+      kugouSearchSongs(kw, 9).catch((e) => { console.warn('[Music] 酷狗歌词检索失败:', e); return []; }),
+      qqSearchSongs(kw, 9).catch((e) => { console.warn('[Music] QQ 歌词检索失败:', e); return []; }),
+    ]);
+    const merged: LyricCandidate[] = [];
+    for (const s of neteaseRaw?.tracks ?? []) {
+      merged.push({
+        key: 'netease-lyric-' + s.id,
+        title: s.name || '',
+        artist: s.artist || '',
+        source: 'netease',
+        neteaseId: s.id,
+      });
     }
-    // QQ 音乐作第三兜底：网易云与酷狗都没词时（小众/新发行常见）才有机会出词。
-    // 此前 qqGetLyric 已实现且实测能拿到整首 LRC，却没接进候选链 —— 等于白写。
-    if (out.length === 0) {
-      try {
-        const qq = (await qqSearchSongs(kw, 9)) ?? [];
-        for (const s of qq) {
-          if (!s.mid) continue;
-          out.push({
-            key: 'qq-lyric-' + s.mid,
-            title: s.title || '',
-            artist: s.artist || '',
-            source: 'qq',
-            qqMid: s.mid,
-          });
-        }
-      } catch (e) { console.warn('[Music] QQ 歌词检索失败:', e); }
+    for (const s of (kugouRaw ?? []) as any[]) {
+      merged.push({
+        key: 'kugou-lyric-' + (s.hash || s.id || merged.length),
+        title: s.name || '',
+        artist: s.artist || '',
+        source: 'kugou',
+        kugouHash: s.hash,
+        kugouKeyword: title,
+      });
     }
+    for (const s of ((qqRaw ?? []) as any[])) {
+      if (!s.mid) continue;
+      merged.push({
+        key: 'qq-lyric-' + s.mid,
+        title: s.title || '',
+        artist: s.artist || '',
+        source: 'qq',
+        qqMid: s.mid,
+      });
+    }
+    const seen = new Set<string>();
+    const out = merged.filter((c) => {
+      const k = `${c.title.toLowerCase().replace(/\s+/g, '')}|${c.artist.toLowerCase().replace(/\s+/g, '')}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    console.log('[Music] 歌词候选 netease=%d kugou=%d qq=%d → %d', neteaseRaw?.tracks?.length ?? 0, (kugouRaw ?? []).length, (qqRaw ?? []).length, out.length);
     return out;
   }, []);
 
