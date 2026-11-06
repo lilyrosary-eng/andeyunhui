@@ -9,6 +9,7 @@
   "hostApiVersion": 1,
   "permissions": {
     "commands": [
+      "ai_get_config",
       "add_to_blacklist",
       "cancel_open_book",
       "cancel_scan",

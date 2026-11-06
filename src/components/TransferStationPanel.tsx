@@ -1166,6 +1166,8 @@ function TranslateWorkspace({ onClose }: { onClose: () => void }) {
           }}
           label={tr('translate.aiModel')}
           followLabel={tr('translate.aiModelFollow')}
+          pickLabel={tr('translate.aiModelPick')}
+          loadingLabel={tr('translate.aiModelLoading')}
           emptyLabel={tr('translate.aiModelNone')}
           staleLabel={tr('translate.aiModelStale')}
           className="flex items-center gap-2 flex-shrink-0 text-xs text-neutral-500 dark:text-stone-400"

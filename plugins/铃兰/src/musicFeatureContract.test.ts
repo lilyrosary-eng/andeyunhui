@@ -406,10 +406,29 @@ describe('自动获取必须三源并查（不是「网易云有结果就不问�
     // 不许回退成「前一个源有结果就不问后一个」—— 那正是用户报的「只有网易云的源」
     expect(chain).not.toContain('if (out.length === 0) {');
     expect(chain.split('const seen = new Set<string>();').length - 1).toBe(2);
+    // 去重键必须带 source：跨源去重会让热门歌又只剩一条网易云，等于白并发
+    expect(chain.split('`${c.source}|').length - 1, '去重只能限同一个源内部').toBe(2);
     // 三个源都得真的被调用
     for (const fn of ['neteaseSearchSongs', 'kugouSearchSongs', 'qqSearchSongs']) {
       expect(chain.split(fn).length - 1, `${fn} 在两条链里各用一次`).toBeGreaterThanOrEqual(2);
     }
+  });
+});
+
+describe('歌词翻译的 AI 模型选择器（用户实机指出：选了 AI 节点下面没有选模型的框）', () => {
+  it('歌词面板必须挂上选择器；插件侧取数只能走 hostApi，不许碰 tauri api', () => {
+    mustContain('TrackList.tsx', ['LyricsModelPicker', 'setAiModel', 'saveTranslateSettings', 'DEFAULT_TRANSLATE_CHAIN']);
+    const p = read('aiModelPicker.tsx');
+    expect(p).toContain("invoke('ai_get_config')");
+    // 只拦真 import（注释里提到包名不算），否则以后谁写句解释就把这条断言踩红
+    expect(p, '插件直接引 tauri api 会绕过权限闸门').not.toMatch(/from\s+['"]@tauri-apps/);
+    // 分组渲染与宿主共用一份（厂商分组 + 粘性标题），不在插件里另画一套
+    expect(p).toContain("from '@/components/ModelPicker'");
+    expect(p).toContain("from '@/lib/aiModelTree'");
+  });
+
+  it('manifest 必须声明 ai_get_config，否则沙箱会直接拒掉', () => {
+    expect(readManifest()).toContain('"ai_get_config"');
   });
 });
 

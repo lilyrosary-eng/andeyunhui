@@ -122,6 +122,8 @@ export function TranslatePanel({ t }: { t: TFunc }) {
               onChange={(profileId) => save({ profileId })}
               label={t('translate.aiModel')}
               followLabel={t('translate.aiModelFollow')}
+              pickLabel={t('translate.aiModelPick')}
+              loadingLabel={t('translate.aiModelLoading')}
               emptyLabel={t('translate.aiModelNone')}
               staleLabel={t('translate.aiModelStale')}
               className="mt-2 text-xs text-neutral-500 dark:text-stone-400"

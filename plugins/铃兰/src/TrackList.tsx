@@ -15,7 +15,8 @@ import { baseName, formatMillis } from './tagHistoryView';
 
 /** 字段中文展示名（批量确认面板与「分项自动获取」的来源提示共用） */
 const FIELD_LABEL_CN: Record<string, string> = { title: '标题', artist: '歌手', album: '专辑' };
-import { loadLyricsTargetLang, saveLyricsTargetLang, TARGET_LANGS, TRANSLATE_NODES, translateSettingsFor, loadTranslateSettings } from '@/lib/translateLanguages';
+import { loadLyricsTargetLang, saveLyricsTargetLang, saveTranslateSettings, DEFAULT_TRANSLATE_CHAIN, TARGET_LANGS, TRANSLATE_NODES, translateSettingsFor, loadTranslateSettings } from '@/lib/translateLanguages';
+import { LyricsModelPicker } from './aiModelPicker';
 import { isGlossaryOff, learnGlossaryPairs } from '@/lib/translateGlossary';
 
 interface Track {
@@ -309,6 +310,8 @@ export function TrackList({
   const [translateNode, setTranslateNode] = useState('');
   // 歌词的目标语言：独立于中转站翻译页那颗（共用引擎不等于共用预设，见 translateLanguages 注释）
   const [lyricsTargetLang, setLyricsTargetLang] = useState<string>(() => loadLyricsTargetLang());
+  // AI 节点用哪个模型（profileId 与设置页/中转站同一份存储，不另立一套）
+  const [aiModel, setAiModel] = useState<string | undefined>(() => loadTranslateSettings().profileId);
 
   // 歌词编辑器弹窗状态
   const [lyricsTrack, setLyricsTrack] = useState<Track | null>(null);
@@ -1950,6 +1953,32 @@ export function TrackList({
                   <option key={n.id} value={n.id}>{n.label}</option>
                 ))}
               </select>
+            </div>
+
+            {/* 这次会走到 AI（选了 ai 节点，或跟随设置且默认链里含 ai）就给模型选择。
+                以前 profileId 后端一直在读、界面上没人能填，歌词翻译只能跟着对话模型走。 */}
+            <div className="px-5 pb-1">
+              <LyricsModelPicker
+                visible={
+                  translateNode === 'ai' ||
+                  (translateNode === '' &&
+                    ((loadTranslateSettings().node || 'auto') === 'ai' ||
+                      (loadTranslateSettings().chain ?? DEFAULT_TRANSLATE_CHAIN).includes('ai')))
+                }
+                value={aiModel}
+                onChange={(id) => {
+                  setAiModel(id);
+                  const s = loadTranslateSettings();
+                  s.profileId = id;
+                  saveTranslateSettings(s);
+                }}
+                label={T('translate.aiModel')}
+                followLabel={T('translate.aiModelFollow')}
+                pickLabel={T('translate.aiModelPick')}
+                emptyLabel={T('translate.aiModelNone')}
+                staleLabel={T('translate.aiModelStale')}
+                loadingLabel={T('translate.aiModelLoading')}
+              />
             </div>
 
             {/* 目标语言：可改且**只影响歌词**（引擎/节点/术语表仍与设置页共用）。

@@ -2098,11 +2098,12 @@ useEffect(() => {
         source: 'qq',
       });
     }
-    // 去重：同一首歌往往三个源都有。标题+歌手归一后相同只留先出现的那条
-    // （源优先级网易云→酷狗→QQ）—— 重复条目会把真正不同的候选挤出屏幕。
+    // 去重**只限同一个源内部**。跨源的同名同歌手要留着：那正是这件事的价值 ——
+    // 三个源都给同一首歌说明对得上；某个源给出不同的专辑/封面，才是能挑的依据。
+    // （上一版按「标题+歌手」跨源去重，结果热门歌又只剩网易云一条，等于白并发。）
     const seen = new Set<string>();
     const out: TrackMetaCandidate[] = merged.filter((c) => {
-      const k = `${c.title.toLowerCase().replace(/\s+/g, '')}|${c.artist.toLowerCase().replace(/\s+/g, '')}`;
+      const k = `${c.source}|${c.title.toLowerCase().replace(/\s+/g, '')}|${c.artist.toLowerCase().replace(/\s+/g, '')}`;
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
@@ -2193,7 +2194,8 @@ useEffect(() => {
     }
     const seen = new Set<string>();
     const out = merged.filter((c) => {
-      const k = `${c.title.toLowerCase().replace(/\s+/g, '')}|${c.artist.toLowerCase().replace(/\s+/g, '')}`;
+      // 只去同一个源内部的重复；跨源的同名同歌手留着当交叉验证（理由同元信息链）
+      const k = `${c.source}|${c.title.toLowerCase().replace(/\s+/g, '')}|${c.artist.toLowerCase().replace(/\s+/g, '')}`;
       if (seen.has(k)) return false;
       seen.add(k);
       return true;

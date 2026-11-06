@@ -719,6 +719,8 @@ function TranslateBox() {
         }}
         label="AI 模型"
         followLabel="跟随 AI 设置"
+        pickLabel="选择模型"
+        loadingLabel="读取中…"
         emptyLabel="还没有可用的 AI 档案"
         staleLabel="上次选的已不在档案里"
         className="flex items-center gap-2 flex-shrink-0 text-[12px] opacity-80"

@@ -30,6 +30,8 @@ pub const CAPABILITIES: &[&str] = &[
     "ai",
     "data",
     "attack",
+    // 密码托管：只放行 vault_* 命令族（解锁态由后端内存状态机保证，插件拿不到未解锁的 DK）
+    "vault",
 ];
 
 /// 精确规则（先于前缀规则匹配）
@@ -194,6 +196,7 @@ const PREFIX_RULES: &[(&str, &str)] = &[
     ("ai_", "ai"),
     ("rag_", "ai"),
     ("gongfang_", "attack"),
+    ("vault_", "vault"),
     ("plugin:", "system"),
 ];
 
@@ -553,6 +556,8 @@ mod tests {
         assert_eq!(capability_for("music_rollback_tag_edit"), Some("data"));
         assert_eq!(capability_for("music_rank_tag_candidates"), Some("data"));
         assert_eq!(capability_for("music_list_tag_batches"), Some("data"));
+        // 歌词翻译的模型选择器要读 v2 配置（providers→models），走 ai_ 前缀 = ai 能力
+        assert_eq!(capability_for("ai_get_config"), Some("ai"));
         assert_eq!(capability_for("read_file_base64"), Some("fs.read"));
         assert_eq!(capability_for("write_file_bytes"), Some("fs.write"));
         assert_eq!(capability_for("gongfang_scan"), Some("attack"));
