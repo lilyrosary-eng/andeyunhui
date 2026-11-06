@@ -468,7 +468,9 @@ export function useAiCollab(): UseAiCollabResult {
             ? 'stream-json 协作'
             : harnessId === 'mailbox'
               ? '.Talk 信箱协作'
-              : '协作房间';
+              : harnessId === 'native'
+                ? '应用内置模型协作'
+                : '协作房间';
       const room = await invoke<CollabRoom>('collab_room_create', {
         name: name?.trim() || fallbackName,
         agents,

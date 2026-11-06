@@ -21,6 +21,8 @@ pub mod dsh_sessions;
 pub mod harness;
 /// MCP 控制面（stdio JSON-RPC）：宿主 exe `--mcp` 模式与独立 bin 共用同一实现。
 pub mod mcp;
+/// 应用内置模型 harness：宿主注册一次「文本生成」实现，成员即可直接走应用自己的模型配置。
+pub mod native;
 /// ACP 权限桥接：agent 的权限请求 → 前端确认 → 回传选择。
 pub mod permission;
 pub mod runtime;

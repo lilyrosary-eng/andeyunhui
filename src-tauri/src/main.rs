@@ -48,6 +48,8 @@ use andeyunhui_lib::transfer;
 use andeyunhui_lib::services::window_manager::overlay_window_destroy;
 mod filesearch;
 mod system_fonts;
+// AI 协作 native harness：把宿主 AI 配置注入 ai-collab-kit（桌面版专属）。
+mod collab_native;
 use filesearch::*;
 // 资源占用实时监控（CPU/GPU/显存/内存/硬盘/网络）：Windows 原生采集，仅 Windows 编译；
 // 其他平台这些模块整体不参与编译，命令行跨平台可用。
@@ -986,6 +988,9 @@ fn main() {
             // AI 模型档案是核心能力：启动即后台预热内存缓存（读盘+scrypt 解密一次），
             // 之后任意窗口/插件读取都是毫秒级，不再触发式慢加载。
             andeyunhui_lib::services::ai_service::warm_profile_cache(app.handle().clone());
+            // AI 协作 native harness：注册应用内置模型 runner，
+            // 让本应用自己的 AI 配置也能作为成员加入协作房间（与 dsh / MCP / 信箱同室）。
+            collab_native::register(app.handle().clone());
             // 资源监视：启动即后台建立并预热 PDH 会话（7 个性能计数器挂在同一个 query 上）。
             // 速率类计数器（CPU 功耗 / GPU 利用率 / 磁盘读写与活动度）靠两次采样之间的时间差
             // 算值；若等用户点开资源监视时才建会话，那一帧的采样窗口近似为 0，会读出伪 0

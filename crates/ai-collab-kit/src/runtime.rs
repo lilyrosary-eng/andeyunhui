@@ -33,6 +33,8 @@ static CANCELLED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 pub const MAX_TASK_DEPTH: usize = 4;
 /// 单房间同时未结束（queued / running / waiting）的任务上限。
 pub const MAX_ACTIVE_TASKS: usize = 64;
+/// 内置模型单次调用上限：端点偶发不返回时不能把任务永久卡在 running。
+const NATIVE_TIMEOUT_SECS: u64 = 300;
 
 fn board_lock() -> &'static Mutex<()> {
     BOARD_LOCK.get_or_init(|| Mutex::new(()))
@@ -849,6 +851,11 @@ async fn run_assignment(app: AppHandle, base: PathBuf, room: Room, assignment: A
         return;
     }
 
+    if harness_id == crate::harness::NATIVE {
+        run_native_assignment(app, base, room, assignment).await;
+        return;
+    }
+
     if harness_id != crate::harness::DSH {
         run_echo_assignment(app, base, room, assignment).await;
         return;
@@ -1307,6 +1314,116 @@ async fn run_dsh_assignment(
                     "transport": "headless",
                     "exitCode": output.exit_code,
                 })),
+            );
+        }
+        Err(error) => fail_assignment(&app, &base, &room, &assignment, &error),
+    }
+}
+
+/// 取消轮询：ACP / headless 都在自己的子进程里查取消标记；
+/// native 调用没有可插入的轮询点，用这个 future 与模型请求并存，取消时直接丢弃请求。
+async fn wait_cancelled(assignment_id: &str) {
+    loop {
+        if is_cancelled(assignment_id) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// 应用内置模型执行器（native）：
+/// - 不拉起外部进程，prompt 交给宿主注册的 runner（宿主的 AI 配置 + 成员模型）；
+/// - 与 dsh headless 同为一次性调用，因此也注入共享会话最近上下文；
+/// - 取消 / 超时都只结束任务，不覆盖 `assignment.cancelled` 事件。
+async fn run_native_assignment(
+    app: AppHandle,
+    base: PathBuf,
+    room: Room,
+    assignment: Assignment,
+) {
+    if is_cancelled(&assignment.id) {
+        return;
+    }
+    let model = room
+        .agents
+        .iter()
+        .find(|agent| agent.id == assignment.assignee_id)
+        .map(|agent| agent.model.trim().to_string())
+        .unwrap_or_default();
+
+    let _ = emit_status(
+        &app,
+        &base,
+        &room,
+        &assignment,
+        AssignmentStatus::Running,
+        "assignment.running",
+        Some(format!(
+            "{} 已接单（应用内置模型）",
+            agent_name(&room, &assignment.assignee_id)
+        )),
+    );
+    let _ = emit_event(
+        &app,
+        &base,
+        &room.id,
+        "assignment.progress",
+        Some(assignment.assignee_id.clone()),
+        Some(assignment.id.clone()),
+        Some(if model.is_empty() {
+            "正在调用应用内置模型（跟随设置页当前模型）".to_string()
+        } else {
+            format!("正在调用应用内置模型：{model}")
+        }),
+        None,
+        None,
+    );
+
+    let request = crate::native::NativeRequest {
+        room_id: room.id.clone(),
+        assignment_id: assignment.id.clone(),
+        agent_id: assignment.assignee_id.clone(),
+        model: model.clone(),
+        prompt: build_prompt(&base, &room, &assignment, true),
+    };
+    let future = match crate::native::run(request) {
+        Ok(future) => future,
+        Err(error) => {
+            fail_assignment(&app, &base, &room, &assignment, &error);
+            return;
+        }
+    };
+
+    let outcome = tokio::select! {
+        // 取消优先：用户点了取消就不要再用结果覆盖 cancelled 事件。
+        biased;
+        _ = wait_cancelled(&assignment.id) => return,
+        result = tokio::time::timeout(Duration::from_secs(NATIVE_TIMEOUT_SECS), future) => {
+            match result {
+                Ok(done) => done,
+                Err(_) => Err(format!("内置模型调用超时（{NATIVE_TIMEOUT_SECS}s）")),
+            }
+        }
+    };
+
+    if is_cancelled(&assignment.id) {
+        return;
+    }
+    match outcome {
+        Ok(text) => {
+            let trimmed = text.trim();
+            let text = if trimmed.is_empty() {
+                "（内置模型未返回文本）".to_string()
+            } else {
+                trimmed.to_string()
+            };
+            complete_assignment(
+                &app,
+                &base,
+                &room,
+                &assignment,
+                &text,
+                Some(json!({ "transport": "native", "model": model })),
             );
         }
         Err(error) => fail_assignment(&app, &base, &room, &assignment, &error),

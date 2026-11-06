@@ -26,6 +26,9 @@ interface AiCollabViewProps {
   onCreateDeepSeekRoom?: () => void;
   /** 新建 MCP 房间：任务只入队，交给外部 harness 认领 */
   onCreateMcpRoom?: () => void;
+  /** 新建应用内置模型房间：直接用设置页的 AI 配置执行 */
+  onCreateNativeRoom?: () => void;
+  nativeAvailable?: boolean;
   /** 新建 stream-json 房间（需要先配置 stream-json.json） */
   onCreateStreamJsonRoom?: () => void;
   streamJsonAvailable?: boolean;
@@ -376,6 +379,8 @@ export const AiCollabView = memo(function AiCollabView({
   onCreateRoom,
   onCreateDeepSeekRoom,
   onCreateMcpRoom,
+  onCreateNativeRoom,
+  nativeAvailable,
   onCreateStreamJsonRoom,
   streamJsonAvailable,
   onCreateMailboxRoom,
@@ -456,6 +461,15 @@ export const AiCollabView = memo(function AiCollabView({
                 MCP 协作房间
               </button>
             )}
+            {nativeAvailable && onCreateNativeRoom && (
+              <button
+                onClick={onCreateNativeRoom}
+                title="直接用设置页里的 AI 模型执行，不依赖外部 CLI"
+                className="btn-press rounded-full border border-violet-500/40 bg-violet-500/10 px-5 py-2 text-sm font-medium text-violet-700 hover:bg-violet-500/20 dark:text-violet-300"
+              >
+                应用内置模型房间
+              </button>
+            )}
             {streamJsonAvailable && onCreateStreamJsonRoom && (
               <button
                 onClick={onCreateStreamJsonRoom}
@@ -496,6 +510,8 @@ export const AiCollabView = memo(function AiCollabView({
             {deepseekAvailable
               ? 'DeepSeek 房间使用本机 LM Studio 小模型；导入会话优先 ACP 原位恢复，失败回退 headless，并镜像到项目的 .adyh/collab/。'
               : 'P2 未检测到 DeepSeek Harness；设置 ANDY_DSH_BIN 后可新建本地房间。'}
+            <br />
+            应用内置模型房间直接用设置页的 AI 配置，可与 dsh / MCP / 信箱成员同室协作；成员模型留空即跟随当前选中模型。
             <br />
             MCP 接入让 Trae / WorkBuddy 等外部 harness 直接读写同一份共享会话。
           </p>

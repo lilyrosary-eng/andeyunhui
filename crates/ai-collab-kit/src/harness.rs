@@ -34,6 +34,8 @@ pub const MCP: &str = "mcp";
 pub const ACP: &str = "acp";
 pub const STREAM_JSON: &str = "stream-json";
 pub const MAILBOX: &str = "mailbox";
+/// 应用内置模型（宿主 AI 配置）：不拉起外部进程，成员 `model` 填模型 id。
+pub const NATIVE: &str = "native";
 
 const DSH_CONFIG_FILE: &str = "dsh.json";
 const DSH_PATCH_FILE: &str = "dsh-local.patch.yml";
@@ -385,6 +387,17 @@ pub fn catalog(app: &AppHandle) -> Vec<HarnessInfo> {
 
     vec![
         EchoHarness.info(),
+        HarnessInfo {
+            id: NATIVE.to_string(),
+            name: "应用内置模型".to_string(),
+            kind: NATIVE.to_string(),
+            available: crate::native::is_registered(),
+            detail: if crate::native::is_registered() {
+                "直接使用设置页里的 AI 模型配置，不拉起外部进程；成员 model 填模型 id 即可用不同模型。".to_string()
+            } else {
+                "当前宿主未注册内置模型 runner（仅桌面版注入）。".to_string()
+            },
+        },
         HarnessInfo {
             id: DSH.to_string(),
             name: "DeepSeek Harness（本地）".to_string(),
