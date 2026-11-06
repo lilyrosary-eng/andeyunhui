@@ -1,0 +1,39 @@
+{
+  "id": "vault",
+  "name": "密码托管",
+  "version": "0.1.0",
+  "kind": "module",
+  "visible": false,
+  "entry": "index.js",
+  "iconName": "ShieldCheck",
+  "hostApiVersion": 1,
+  "parent": "niaoluo",
+  "codename": "茑萝",
+  "requiredAssets": [],
+  "category": "加密安全",
+  "desc": "本地密码库：主密码解锁 / 本机免密 / 备用码兜底 / 自动锁定 / 导入导出",
+  "permissions": {
+    "commands": [
+      "vault_status",
+      "vault_create",
+      "vault_unlock",
+      "vault_unlock_device",
+      "vault_lock",
+      "vault_change_password",
+      "vault_rotate_recovery_codes",
+      "vault_redeem_recovery",
+      "vault_list",
+      "vault_get_item",
+      "vault_save_item",
+      "vault_delete_item",
+      "vault_restore_item",
+      "vault_empty_trash",
+      "vault_mark_used",
+      "vault_set_auto_lock",
+      "vault_audit_log",
+      "vault_export_json",
+      "vault_import_items"
+    ],
+    "note": "能力域 vault：只放行 vault_* 命令族；解锁态由 Rust 内存状态机维护，插件拿不到未解锁的 DK"
+  }
+}

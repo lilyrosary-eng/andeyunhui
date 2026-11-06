@@ -522,7 +522,9 @@ function resolveModule(path: string, params: Record<string, any>): { uri: string
       const sub = params.t === 1 || params.t === true ? 'subscribe' : 'unsubscribe';
       return { uri: `/api/playlist/${sub}`, data: { id: params.id }, crypto: 'eapi' };
     case PATHS.manipulatePlaylistTracks:
-      return { uri: '/api/playlist/manipulate/tracks', data: { pid: params.pid, tracks: params.tracks, op: params.op }, crypto: 'weapi' };
+      // 必须走 eapi：Rust 代理白名单只放行 /eapi/playlist/manipulate/tracks。
+      // 此前用 weapi 会拼出 /weapi/... 被代理拒绝，这也是该能力一直没接 UI 的隐藏原因。
+      return { uri: '/api/playlist/manipulate/tracks', data: { pid: params.pid, tracks: params.tracks, op: params.op }, crypto: 'eapi' };
     // 歌手/专辑详情（铃兰顶部抽屉，weapi 通道，对齐 MusicStorm modules.ts）
     case PATHS.artistDetail:
       return { uri: `/api/v1/artist/${params.id}`, data: {}, crypto: 'weapi' };
@@ -910,6 +912,10 @@ export interface TopListResult {
   coverUrl?: string;
   description?: string;
   playCount?: number;
+  /** 歌单创建者 userId：用于判断当前登录用户是否可编辑该歌单 */
+  creatorUserId?: number;
+  /** 网易云特殊歌单类型（5 = 我喜欢的音乐，不可用 manipulate 编辑） */
+  specialType?: number;
 }
 export async function getTopList(
   id: number,
@@ -927,6 +933,9 @@ export async function getTopList(
     coverUrl: r?.playlist?.coverImgUrl || '',
     description: r?.playlist?.description || '',
     playCount: r?.playlist?.playCount || 0,
+    // 兼容两种返回：creator.userId / 顶层 userId
+    creatorUserId: r?.playlist?.creator?.userId ?? r?.playlist?.userId ?? 0,
+    specialType: r?.playlist?.specialType ?? 0,
   };
 }
 

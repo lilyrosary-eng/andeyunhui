@@ -19,6 +19,14 @@ interface ImageViewerProps {
   onBack: () => void;
   /** 以安得云荟打开 / 拖入时，定位到指定图片 */
   initialPath?: string;
+  /**
+   * 直接给定图片列表（「收藏」这类虚拟相册用）：提供时不再按 folderPath 扫描磁盘，
+   * 也不恢复浏览进度（收藏是被手工挑出来的集合，进度没有意义）。
+   */
+  imagesOverride?: string[];
+  /** 收藏的图片路径集合（心形按钮状态） */
+  favorites?: string[];
+  onToggleFavorite?: (path: string) => void;
 }
 
 interface ImageFileMetadata {
@@ -68,7 +76,7 @@ const ZOOM_MAX = 16;
 const PRESET_INTERVALS = [0.1, 0.5, 1, 2, 3, 5, 10];
 
 // ========== 主组件 ==========
-export function ImageViewer({ folderPath, folderName, onBack, initialPath }: ImageViewerProps) {
+export function ImageViewer({ folderPath, folderName, onBack, initialPath, imagesOverride, favorites, onToggleFavorite }: ImageViewerProps) {
   useLang();
   const [images, setImages] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -269,9 +277,21 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
   curIdxRef.current = currentIndex;
   const curImgsRef = useRef(images);
   curImgsRef.current = images;
+  // 当前图片路径 + 是否已收藏（心形按钮用）
+  const currentPath = shuffledImages[currentIndex] || '';
+  const isFavorite = currentPath ? (favorites?.includes(currentPath) ?? false) : false;
 
   // 加载图片列表
   useEffect(() => {
+    // 虚拟相册（收藏）：直接用外部传入的列表，不扫描磁盘
+    if (imagesOverride) {
+      setImages(imagesOverride);
+      const j = initialPath ? imagesOverride.indexOf(initialPath) : 0;
+      setCurrentIndex(Math.max(0, j));
+      setRestoreIdx(null);
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setRestoreIdx(null);
@@ -302,7 +322,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [folderPath]);  // eslint-disable-line react-hooks/exhaustive-deps
+  }, [folderPath, imagesOverride]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // 位置变化防抖持久化（仅当「记住浏览进度」开启）
   useEffect(() => {
@@ -725,6 +745,25 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
         </div>
 
         {/* 右侧：信息 + 缩放比例（点击复位）+ 序号（点击可输入页码跳转） */}
+        {/* 收藏当前图片：实心=已收藏，空心=未收藏 */}
+        {onToggleFavorite && currentPath && (
+          <button
+            type="button"
+            onClick={() => onToggleFavorite(currentPath)}
+            className={`mr-1 btn-press p-1.5 rounded-md transition-colors text-xs ${
+              isFavorite
+                ? 'text-rose-500 bg-rose-50 dark:bg-rose-900/30'
+                : 'text-neutral-400 dark:text-stone-500 hover:text-rose-500'
+            }`}
+            title={isFavorite ? '取消收藏' : '收藏'}
+            aria-label={isFavorite ? '取消收藏' : '收藏'}
+            aria-pressed={isFavorite}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill={isFavorite ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+            </svg>
+          </button>
+        )}
         {viewMode === 'full' && (
           <button
             type="button"

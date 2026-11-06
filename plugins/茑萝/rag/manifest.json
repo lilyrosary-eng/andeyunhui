@@ -10,6 +10,7 @@
   "permissions": {
     "commands": [
       "ai_chat",
+      "ai_get_config",
       "ai_get_profiles",
       "convert_bytes_to_markdown",
       "convert_to_markdown",
@@ -22,6 +23,7 @@
       "rag_list_chunks",
       "rag_list_sources",
       "rag_query",
+      "rag_source_graph",
       "rag_stats",
       "rag_update_vectors"
     ]

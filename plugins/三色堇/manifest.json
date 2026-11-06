@@ -10,6 +10,7 @@
   "permissions": {
     "commands": [
       "add_to_blacklist",
+      "ai_quick_ask",
       "cancel_open_book",
       "cancel_scan",
       "get_all_notes",

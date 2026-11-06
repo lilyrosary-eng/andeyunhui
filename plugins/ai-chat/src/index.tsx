@@ -3,12 +3,13 @@ import { Bot, Trash2 } from 'lucide-react';
 import type { SendAttachment } from '@/components/capsule/types';
 import { AiChatSidebar } from '@/components/ai-chat/AiChatSidebar';
 import { AiChatConversation } from '@/components/ai-chat/AiChatConversation';
+import { AiChatStatsPage } from '@/components/ai-chat/AiChatStatsPage';
 import { AiChatCompanionCard } from '@/components/ai-chat/AiChatCompanionCard';
 import { AiChatCompanionSettings } from '@/components/ai-chat/settings/AiChatCompanionSettings';
 import { AiChatMemorySettings } from '@/components/ai-chat/settings/AiChatMemorySettings';
 import { UserAvatarSettings } from '@/components/bricks/UserAvatarSettings';
 import { ModuleSettingsPanel } from '@/components/ModuleSettingsPanel';
-import { useAiChat, DEFAULT_PERSIST_KEY } from '@/core/ai/useAiChat';
+import { useAiChat, DEFAULT_PERSIST_KEY, planGateTimeoutSecs, setPlanGateTimeoutSecs, PLAN_GATE_TIMEOUT_MIN, PLAN_GATE_TIMEOUT_MAX } from '@/core/ai/useAiChat';
 import { useCompanionStore, buildPersonaContext, buildCoreContext } from '@/core/stores/companionStore';
 import { submoduleById, type AISubmoduleId, SUBMODULE_STORAGE_KEY } from '@/core/ai/submodules';
 import { AISubmoduleDrawer } from '@/components/ai-chat/AISubmoduleSwitcher';
@@ -171,6 +172,10 @@ const Root = memo(function Root() {
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [companionEnabled, setCompanionEnabled] = useState(readCompanionEnabled);
+  // 计划确认闸门的等待上限（秒）：与 useAiChat 的请求参数同源，改完下一次请求即生效
+  const [planTimeout, setPlanTimeout] = useState(() => planGateTimeoutSecs());
+  // 「AI 对话」统计页（覆盖主区，不覆盖侧栏）
+  const [statsOpen, setStatsOpen] = useState(false);
 
   // 子模块切换（桌面版）：chat / work / workflow / collab。胶囊浮岛不接入，保持现有 ai 对话。
   const [subId, setSubId] = useState<AISubmoduleId>(() => {
@@ -184,6 +189,7 @@ const Root = memo(function Root() {
   const switchSub = (id: AISubmoduleId) => {
     setSubId(id);
     setSettingsOpen(false);
+    setStatsOpen(false);
     setArea('task'); // 切换子模块时回到任务区
     try { localStorage.setItem(SUBMODULE_STORAGE_KEY, id); } catch { /* 忽略 */ }
   };
@@ -309,6 +315,8 @@ const Root = memo(function Root() {
         }}
         submodule={sub}
         onOpenSubmoduleSwitcher={() => setSubDrawerOpen(true)}
+        onOpenStats={() => setStatsOpen((v) => !v)}
+        statsActive={statsOpen}
         area={area}
         onAreaChange={changeArea}
         work={{
@@ -420,6 +428,32 @@ const Root = memo(function Root() {
           </fieldset>
 
           <div className="rounded-xl border border-black/10 dark:border-white/10 p-4">
+            <div className="text-sm font-medium text-neutral-800 dark:text-stone-100">计划确认</div>
+            <div className="mt-0.5 text-xs text-neutral-400 dark:text-stone-500">
+              AI 提交计划后会暂停，等你点「确认并执行 / 重新规划」。这里设等待上限，
+              超时按「重新规划」处理（{PLAN_GATE_TIMEOUT_MIN}–{PLAN_GATE_TIMEOUT_MAX} 秒）。
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <input
+                type="number"
+                min={PLAN_GATE_TIMEOUT_MIN}
+                max={PLAN_GATE_TIMEOUT_MAX}
+                step={30}
+                value={planTimeout}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (!Number.isFinite(v)) return;
+                  setPlanTimeout(v);
+                  setPlanGateTimeoutSecs(v);
+                }}
+                onBlur={() => setPlanTimeout(planGateTimeoutSecs())}
+                className="w-24 rounded-lg border border-black/10 bg-white px-2.5 py-1.5 text-sm text-neutral-700 outline-none focus:border-sky-400 dark:border-white/10 dark:bg-stone-800 dark:text-stone-200"
+              />
+              <span className="text-xs text-neutral-400 dark:text-stone-500">秒</span>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-black/10 dark:border-white/10 p-4">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-medium text-neutral-800 dark:text-stone-100">清除所有对话</div>
@@ -436,26 +470,35 @@ const Root = memo(function Root() {
         </ModuleSettingsPanel>
         )
       ) : sub.id === 'chat' ? (
-        <AiChatConversation
-          activeConv={activeConv}
-          busy={busy}
-          profileId={profileId}
-          send={sendWithCompanion}
-          onStop={abort}
-          effort={effort}
-          onEffortChange={setEffort}
-          webSearch={webSearch}
-          onToggleWebSearch={setWebSearch}
-          onRegenerate={(id) => void regenerate(id)}
-          onSwitchVersion={switchVersion}
-          onRate={rateMessage}
-          onPlanDecision={(id, ok) => decidePlan(id, ok)}
-          onClear={() => deleteConversation(activeId)}
-          companionCard={companionEnabled ? (
-            <AiChatCompanionCard variant="compact" onEdit={() => setSettingsOpen(true)} />
-          ) : undefined}
-          showCompanionAvatar={companionEnabled}
-        />
+        <div className="relative flex-1 min-w-0 h-full">
+          {statsOpen && (
+            <AiChatStatsPage
+              conversations={conversations}
+              onClose={() => setStatsOpen(false)}
+              onSelectConv={(id) => { selectConv(id); setStatsOpen(false); }}
+            />
+          )}
+          <AiChatConversation
+            activeConv={activeConv}
+            busy={busy}
+            profileId={profileId}
+            send={sendWithCompanion}
+            onStop={abort}
+            effort={effort}
+            onEffortChange={setEffort}
+            webSearch={webSearch}
+            onToggleWebSearch={setWebSearch}
+            onRegenerate={(id) => void regenerate(id)}
+            onSwitchVersion={switchVersion}
+            onRate={rateMessage}
+            onPlanDecision={(id, ok) => decidePlan(id, ok)}
+            onClear={() => deleteConversation(activeId)}
+            companionCard={companionEnabled ? (
+              <AiChatCompanionCard variant="compact" onEdit={() => setSettingsOpen(true)} />
+            ) : undefined}
+            showCompanionAvatar={companionEnabled}
+          />
+        </div>
       ) : sub.id === 'work' ? (
       <AiWorkView
         profileId={aiWorkChat.profileId}

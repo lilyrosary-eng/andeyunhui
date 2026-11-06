@@ -98,6 +98,12 @@ export interface RagSourceInfo {
   /** 建库时用的嵌入模型 / 维度（自适应维度）。老数据为空 / 0。 */
   embed_model?: string;
   embed_dim?: number;
+  /**
+   * 从该来源**存量块**反推的真实维度；0 = 没有带向量的块。
+   * 别用 `embed_dim` 判断「这条能不能被检索到」：2026-10 之前建的行它一律是 0，
+   * 而块里其实躺着 768 维向量 —— 那种来源永远检索不到，却什么都看不出来。
+   */
+  vec_dim?: number;
 }
 
 /** 嵌入代理选项：端点/key/模型，复用现有 ai profiles / ModelSettings Ollama 预设。 */
@@ -144,9 +150,13 @@ export interface RagStats {
   updated_at?: string;
 }
 
-/** 列出某来源下带向量的块（只读）。 */
-export function ragListChunks(sourceId: string, namespace?: string): Promise<RagChunkRow[]> {
-  return hostApi.invoke<RagChunkRow[]>('rag_list_chunks', { sourceId, namespace });
+/**
+ * 列出某来源下带向量的块（重建向量用）。
+ * `withAll = true` 连父块一起返回 —— 父块按设计不存向量，但正文是拼在父块上的，
+ * 「看原文」必须拿到它们才看得全。
+ */
+export function ragListChunks(sourceId: string, namespace?: string, withAll?: boolean): Promise<RagChunkRow[]> {
+  return hostApi.invoke<RagChunkRow[]>('rag_list_chunks', { sourceId, namespace, withAll });
 }
 
 /** 批量写回新向量（后端全有或全无；覆盖前自动备份）。 */
@@ -161,6 +171,47 @@ export function ragUpdateVectors(
 /** 命名空间维度/模型分布。 */
 export function ragStats(namespace?: string): Promise<RagStats> {
   return hostApi.invoke<RagStats>('rag_stats', { namespace });
+}
+
+// ============ 全库来源相似度图（2026-11-04 新增） ============
+
+/**
+ * 图上的一个来源节点。
+ * 连边依据是**存量向量的余弦**（库里没有文档间链接关系，向量是唯一真实的相似依据），
+ * 所以 `dim === 0`（没向量）或 `!current`（维度与当前模型不符）的来源必然没有连线 ——
+ * 那不代表「它不相关」，而是「它压根不参与检索与比较」。UI 必须这么写明，否则会被误读。
+ */
+export interface RagGraphNode {
+  id: string;
+  title: string;
+  type: string;
+  chunks: number;
+  dim: number;
+  current: boolean;
+}
+
+export interface RagGraphEdge {
+  a: string;
+  b: string;
+  sim: number;
+}
+
+export interface RagGraphData {
+  nodes: RagGraphNode[];
+  edges: RagGraphEdge[];
+  /** 没参与连边的来源数（无向量或维度不符）。 */
+  stranded: number;
+  current_dim: number;
+}
+
+/**
+ * 全库来源图（后端只回传节点与边，不回传向量）。
+ * `minScore` 是连边下限；后端还会给每个来源留「最像的前 3 条」连线 ——
+ * 因为这类中文嵌入模型的余弦天然挤在 0.77~0.81 的窄带上（本机实测），
+ * 只靠绝对阈值会画成全连接的毛线球。
+ */
+export function ragSourceGraph(namespace?: string, minScore?: number, topK?: number): Promise<RagGraphData> {
+  return hostApi.invoke<RagGraphData>('rag_source_graph', { namespace, minScore, topK });
 }
 
 // 刻意不封装 rag_backup_db / rag_prune：

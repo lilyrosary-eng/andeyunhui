@@ -15,6 +15,8 @@ import { invalidateQueryCache } from '../retrieve/retriever';
 import { IngestDialog } from './IngestDialog';
 import { CitedChat } from './CitedChat';
 import { HitGraph } from './HitGraph';
+import { LibraryGraph } from './LibraryGraph';
+import { SourceReader } from './SourceReader';
 import { EmbedSettingsCard } from './EmbedSettingsCard';
 import { RetrieveSettingsCard } from './RetrieveSettingsCard';
 
@@ -31,6 +33,21 @@ function phaseText(p: ReembedProgress): string {
   if (p.phase === 'writing') return '写回向量…';
   if (p.phase === 'done') return '完成';
   return `嵌入中 ${p.done}/${p.total}`;
+}
+
+/**
+ * 这条来源到底能不能被检索到 —— 看**存量块的真实维度**，不看建库时写的 `embed_dim`。
+ * 为什么要新字段：2026-10 之前 ingest 的行 `embed_dim` 一律是 0，可块里其实躺着 768 维向量，
+ * 而检索按当前模型维度算余弦、维度不符的块整条跳过（rag_query 的 skipped_dim）。
+ * 在此之前列表行上一个字都没显示，用户完全看不出这条已经搁浅（实测 8 条里 6 条如此）。
+ */
+function strandedReason(s: RagSourceInfo, currentDim: number): string | null {
+  const dim = s.vec_dim || s.embed_dim || 0;
+  if (dim === 0) return '没有向量 · 检索不到';
+  if (currentDim > 0 && dim !== currentDim) {
+    return `${dim} 维 · 与当前模型 ${currentDim} 维不符 · 检索不到`;
+  }
+  return null;
 }
 
 export function KnowledgeBasePanel() {
@@ -171,6 +188,8 @@ export function KnowledgeBasePanel() {
   }
 
   const error = initError ?? storeError;
+  const currentDim = stats?.current_dim ?? 0;
+  const strandedCount = sources.filter((s) => strandedReason(s, currentDim) !== null).length;
 
   return (
     <div className="flex flex-col gap-4">
@@ -187,7 +206,14 @@ export function KnowledgeBasePanel() {
             onClick={() => setView('graph')}
             className={`btn-press px-3 py-1.5 rounded-lg text-sm ${view === 'graph' ? 'bg-[var(--element-bg)] text-white' : 'bg-neutral-200/60 dark:bg-stone-700 text-neutral-600 dark:text-stone-300'}`}
           >
-            图谱
+            命中图
+          </button>
+          <button
+            onClick={() => setView('library')}
+            title="按存量向量算来源之间的相似度，连边画出来（维度不符的来源是灰点，不连线）"
+            className={`btn-press px-3 py-1.5 rounded-lg text-sm ${view === 'library' ? 'bg-[var(--element-bg)] text-white' : 'bg-neutral-200/60 dark:bg-stone-700 text-neutral-600 dark:text-stone-300'}`}
+          >
+            全库图
           </button>
           <button
             onClick={() => setView('manage')}
@@ -195,6 +221,10 @@ export function KnowledgeBasePanel() {
           >
             管理
           </button>
+          {/* 正文视图没有工具栏入口：它只能从引用角标 / 图谱节点的「看原文」进来 */}
+          {view === 'reader' && (
+            <button className="px-3 py-1.5 rounded-lg text-sm bg-[var(--element-bg)] text-white">正文</button>
+          )}
         </div>
       </div>
 
@@ -218,6 +248,10 @@ export function KnowledgeBasePanel() {
       {view === 'chat' && <CitedChat />}
 
       {view === 'graph' && <HitGraph />}
+
+      {view === 'library' && <LibraryGraph />}
+
+      {view === 'reader' && <SourceReader />}
 
       {view === 'manage' && (
         <div className="flex flex-col gap-4">
@@ -250,6 +284,9 @@ export function KnowledgeBasePanel() {
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-sm font-medium text-neutral-500 dark:text-stone-400">
                 已摄取来源（{sources.length}）
+                {strandedCount > 0 && (
+                  <span className="ml-1 text-red-500 dark:text-red-400">· {strandedCount} 条检索不到</span>
+                )}
               </h3>
               <div className="flex items-center gap-1.5">
                 <button
@@ -274,7 +311,9 @@ export function KnowledgeBasePanel() {
               <div className="text-xs text-neutral-400">暂无来源，先摄取文档吧。</div>
             ) : (
               <div className="flex flex-col gap-2">
-                {sources.map((s) => (
+                {sources.map((s) => {
+                  const stranded = strandedReason(s, currentDim);
+                  return (
                   <div
                     key={s.id}
                     id={`rag-source-${s.id}`}
@@ -288,10 +327,13 @@ export function KnowledgeBasePanel() {
                       <div className="text-sm text-neutral-700 dark:text-stone-200 truncate">{s.title}</div>
                       <div className="text-[11px] text-neutral-400 dark:text-stone-500 truncate">
                         {s.type} · {s.chunk_count} 块
-                        {s.embed_dim ? ` · ${s.embed_dim} 维` : ''}
+                        {(s.vec_dim || s.embed_dim) ? ` · ${s.vec_dim || s.embed_dim} 维` : ''}
                         {s.embed_model ? ` · ${s.embed_model}` : ''}
                         {' · '}
                         {formatTime(s.created_at)}
+                        {stranded && (
+                          <span className="ml-1 text-red-500 dark:text-red-400">· {stranded}</span>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
@@ -312,7 +354,8 @@ export function KnowledgeBasePanel() {
                       </button>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </section>

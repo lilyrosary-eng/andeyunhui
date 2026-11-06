@@ -1,6 +1,7 @@
 /// <reference path="../../global.d.ts" />
 import { ImageViewer } from './ImageViewer';
 import { ImageSidebar, albumCoverKey } from './ImageSidebar';
+import { ImageStatsPage } from './ImageStatsPage';
 import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 const React = window.__HOST_REACT__;
@@ -14,6 +15,10 @@ const STORAGE_KEY_RENAMES = 'image_plugin_folder_renames';
 //   'f:<folderPath>' 扫描到的文件夹相册；'a:<albumId>' 自定义相册。
 // 未设置时回落到自动封面（文件夹用扫描出的 coverImage，自定义相册用第一张图）。
 const STORAGE_KEY_COVERS = 'image_plugin_album_covers';
+// 收藏的图片路径（最近收藏在前）。用虚拟相册展示，不涉及文件系统。
+const STORAGE_KEY_FAVORITES = 'image_favorites';
+/** 虚拟相册路径：点「收藏」时用这个 folderPath 打开查看器（不会与真实路径冲突） */
+const FAVORITES_PATH = '__favorites__';
 
 interface ImageFolder {
   folderPath: string;
@@ -132,6 +137,23 @@ function ImageModule() {
   const [rescanCounter, setRescanCounter] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  // 「统计」页：覆盖主内容区（不覆盖侧栏），数据取自已扫描的 folders/customAlbums
+  const [showStats, setShowStats] = useState(false);
+  // 收藏的图片（路径列表，最近收藏在前）
+  const [favorites, setFavorites] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_FAVORITES);
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string') : [];
+    } catch { return []; }
+  });
+  const toggleFavorite = useCallback((path: string) => {
+    setFavorites((prev) => {
+      const next = prev.includes(path) ? prev.filter((p) => p !== path) : [path, ...prev];
+      try { localStorage.setItem(STORAGE_KEY_FAVORITES, JSON.stringify(next)); } catch { /* 配额满等忽略 */ }
+      return next;
+    });
+  }, []);
   // 记住浏览进度（图库级，localStorage 持久化；与视频/阅读的进度记录同款模式）
   const [rememberProgress, setRememberProgress] = useState<boolean>(() => {
     try { return localStorage.getItem('image.rememberProgress') === '1'; } catch { return false; }
@@ -396,6 +418,18 @@ function ImageModule() {
       .map((x) => x.f);
   }, [displayFolderList, searchQuery]);
 
+  // 「收藏」虚拟相册：排在扫描文件夹最前；没有收藏时整项不出现
+  const sidebarFolders = useMemo(() => {
+    if (!favorites.length) return filteredFolders;
+    const virtualFolder: ImageFolder = {
+      folderPath: FAVORITES_PATH,
+      folderName: '收藏',
+      coverImage: favorites[0],
+      imageCount: favorites.length,
+    };
+    return [virtualFolder, ...filteredFolders];
+  }, [filteredFolders, favorites]);
+
   if (rootPaths.length === 0) {
     return (
       <EmptyState
@@ -445,7 +479,7 @@ function ImageModule() {
   return (
     <div className="flex-1 flex h-full overflow-hidden">
       <ImageSidebar
-        folders={filteredFolders}
+        folders={sidebarFolders}
         customAlbums={customAlbums}
         loading={loading}
         selectedFolder={selectedFolder}
@@ -459,11 +493,19 @@ function ImageModule() {
         albumCovers={albumCovers}
         onSetCover={handleSetCover}
         onOpenModuleSettings={handleOpenModuleSettings}
+        onOpenStats={() => setShowStats((v) => !v)}
+        statsActive={showStats}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
       />
-      <div className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917]">
-        {showSettings ? (
+      <div className="relative flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917]">
+        {showStats ? (
+          <ImageStatsPage
+            folders={folders}
+            customAlbums={customAlbums}
+            onClose={() => setShowStats(false)}
+          />
+        ) : showSettings ? (
           React.createElement(window.__HOST_UI__?.ModuleSettingsPanel || 'div', {
             title: T('image.title'),
             icon: React.createElement('svg', { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', children: [
@@ -539,6 +581,9 @@ function ImageModule() {
             folderName={selectedFolder.folderName}
             onBack={handleBack}
             initialPath={openWithInitialPath ?? undefined}
+            imagesOverride={selectedFolder.folderPath === FAVORITES_PATH ? favorites : undefined}
+            favorites={favorites}
+            onToggleFavorite={toggleFavorite}
           />
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center h-full gap-3 text-neutral-400 dark:text-stone-500">

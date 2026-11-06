@@ -68,6 +68,9 @@ export function CitedChat() {
   const [dropped, setDropped] = useState(0);
   const [dimSkipped, setDimSkipped] = useState(0);
   const [openIdx, setOpenIdx] = useState<number | null>(null);
+  /** 悬停预览（Obsidian 的 hover preview，但走内联而不是 fixed 浮层：见 scheduleHover 注释）。 */
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const hoverTimer = useRef<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [noHit, setNoHit] = useState(false);
@@ -160,6 +163,35 @@ export function CitedChat() {
     }
   }
 
+  /**
+   * 悬停 250ms 才预览（Obsidian 也是这个套路）：鼠标扫过一排角标时不应该逐个闪出正文。
+   * 预览刻意走**内联**而不是 `position: fixed` 浮层 —— 整个应用在外面那层 CSS `zoom` 包裹里，
+   * fixed 浮层拿的是视觉 px、缩放却按祖先的 zoom 走，正是本项目已经定位过的双坐标系坑；
+   * 这里只需要"省一次点击"，不值得为此再造一个坐标 bug。
+   */
+  function scheduleHover(i: number) {
+    if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
+    hoverTimer.current = window.setTimeout(() => setHoverIdx(i), 250);
+  }
+
+  function cancelHover() {
+    if (hoverTimer.current !== null) {
+      clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+    setHoverIdx(null);
+  }
+
+  useEffect(
+    () => () => {
+      if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
+    },
+    [],
+  );
+
+  /** 钉住的优先；没钉住就显示悬停预览。 */
+  const shown = openIdx ?? hoverIdx;
+
   return (
     <div className="flex flex-col gap-3">
       <div className="flex gap-2">
@@ -186,8 +218,10 @@ export function CitedChat() {
       </div>
 
       {hits.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {hits.map((h, i) => {
+        // 角标行 + 预览框包在一起：离开整块才取消预览，鼠标从角标移进预览框不会闪没
+        <div className="flex flex-col gap-1.5" onPointerLeave={cancelHover}>
+          <div className="flex flex-wrap gap-1.5">
+            {hits.map((h, i) => {
             const label = scoreLabel(h);
             const moved =
               h.rerank_score !== undefined && h.original_rank !== undefined && h.original_rank !== i + 1
@@ -197,32 +231,62 @@ export function CitedChat() {
               <button
                 key={i}
                 onClick={() => setOpenIdx(openIdx === i ? null : i)}
+                onPointerEnter={() => scheduleHover(i)}
                 className={`text-[11px] px-2 py-0.5 rounded-full border ${
+                  shown === i ? 'ring-1 ring-[var(--element-border)] ' : ''
+                }${
                   h.rerank_score !== undefined
                     ? 'bg-sky-50 dark:bg-sky-900/20 text-sky-700 dark:text-sky-300 border-sky-200/60 dark:border-sky-800/40'
                     : 'bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 border-amber-200/60 dark:border-amber-800/40'
                 }`}
                 title={`${h.source_title}（${label} ${effectiveScore(h).toFixed(3)}${
                   h.rerank_score !== undefined ? ` · 向量 ${h.score.toFixed(3)}` : ''
-                }）${moved} — 点击查看命中原文`}
+                }）${moved} — 悬停预览原文，点击钉住`}
               >
                 📚 {h.source_title} · {effectiveScore(h).toFixed(2)}
               </button>
             );
           })}
-        </div>
-      )}
-
-      {openIdx !== null && hits[openIdx] && (
-        <div className="text-[11px] whitespace-pre-wrap rounded-lg border border-amber-200/60 dark:border-amber-800/40 bg-amber-50/50 dark:bg-amber-900/10 px-3 py-2 text-neutral-600 dark:text-stone-300 max-h-40 overflow-auto">
-          {hits[openIdx].text}
-          <div className="mt-1 text-neutral-400 dark:text-stone-500">
-            字符区间 [{hits[openIdx].char_start}, {hits[openIdx].char_end}) · {scoreLabel(hits[openIdx])}{' '}
-            {effectiveScore(hits[openIdx]).toFixed(4)}
-            {hits[openIdx].rerank_score !== undefined
-              ? ` · 向量 ${hits[openIdx].score.toFixed(4)}（原第 ${hits[openIdx].original_rank}）`
-              : ''}
           </div>
+
+          {/* 预览框必须在角标行的同一个容器里：否则鼠标一离开角标就消失，永远点不到「看原文」 */}
+          {shown !== null && hits[shown] && (
+            <div
+              className={`text-[11px] whitespace-pre-wrap rounded-lg border px-3 py-2 text-neutral-600 dark:text-stone-300 max-h-40 overflow-auto ${
+                openIdx === null
+                  ? 'border-dashed border-neutral-300/70 bg-white/40 dark:border-stone-600/60 dark:bg-stone-900/30'
+                  : 'border-amber-200/60 dark:border-amber-800/40 bg-amber-50/50 dark:bg-amber-900/10'
+              }`}
+            >
+              {openIdx === null && (
+                <div className="mb-1 text-[10px] text-neutral-400 dark:text-stone-500">悬停预览 · 点击角标钉住</div>
+              )}
+              {hits[shown].text}
+              <div className="mt-1 flex items-center justify-between gap-2 text-neutral-400 dark:text-stone-500">
+                <span>
+                  字符区间 [{hits[shown].char_start}, {hits[shown].char_end}) · {scoreLabel(hits[shown])}{' '}
+                  {effectiveScore(hits[shown]).toFixed(4)}
+                  {hits[shown].rerank_score !== undefined
+                    ? ` · 向量 ${hits[shown].score.toFixed(4)}（原第 ${hits[shown].original_rank}）`
+                    : ''}
+                </span>
+                {/* Obsidian「open at anchor」：落到整篇正文里被命中的那一处，而不只是这块切片 */}
+                <button
+                  onClick={() =>
+                    ragStore.openReader({
+                      sourceId: hits[shown].source_id,
+                      start: hits[shown].char_start,
+                      end: hits[shown].char_end,
+                      query: question,
+                    })
+                  }
+                  className="btn-press shrink-0 rounded border border-neutral-300/70 px-1.5 py-0.5 hover:bg-black/5 dark:border-stone-600 dark:hover:bg-white/10"
+                >
+                  看原文 →
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

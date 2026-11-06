@@ -4,10 +4,9 @@
 import { ideShared } from './modules/shared';
 import { IdeSidebar } from './modules/ideSidebar';
 import { CommandPalette, type PaletteCommand } from './modules/commandPalette';
-// Agent 工具系统增强（阶段二）：权限引擎 + 工具注册表 + 计划模式 + 子代理
-// 工具元数据与系统提示词（generateToolSystemPrompt/BUILTIN_TOOLS）暂用本地 SYSTEM_PROMPT，仅引入子代理运行器
-// 权限引擎：逐工具规则（alwaysAllow/alwaysAsk/alwaysDeny）覆盖 PermissionMode 默认行为
-// 技能系统（阶段五）：SKILL.md 渐进式披露——索引注入 system prompt + <skill> 工具按需加载全文
+// Agent 已迁出 IDE：2026-10-19 删除挂载点、2026-10-21 不再调用 ai_*。
+// 仍在运行的是 AI 对话 / 浮岛的 Agent，能力由 Rust 侧提供；技能由 skill_service 统一管理
+//（随包内置 + 项目根 .agent/skills 定制），IDE 前端不再自带技能层。
 // 真 PTY 终端（阶段四）：portable-pty 后端 + xterm.js 前端，替换原一次性命令终端 IdeTerminal
 import { IdePtyTerminal } from './modules/terminal';
 // 内核：CodeMirror 6（按需从 external-deps/茑萝/ide/codemirror 加载，不进插件包，保持本体轻量）。

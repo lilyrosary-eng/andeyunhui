@@ -3,7 +3,7 @@
 // 两种模式，取决于平台是否开放可取流的接口：
 //  · 'api'（哔哩哔哩）：前端调平台 API（wbi 签名在 TS 端）→ Rust 无 CORS 转发（白名单校验）→
 //    播放交给我们的 VideoPlayer（去广告 + 统一控制条 + SMTC）→ 下载由 Rust 落地到本地。
-//  · 'url'（抖音 / 腾讯 / 爱奇艺）：面板区作为**内嵌浏览器**（Rust 侧子 webview，
+//  · 'url'（抖音）：面板区作为**内嵌浏览器**（Rust 侧子 webview，
 //    精确铺在面板矩形上，不是独立浮窗），视频在该平台自己的网页里播放，
 //    再由「嗅探」列出页面加载的图片/视频资源供下载。
 //
@@ -17,8 +17,9 @@
 //           因此改为**「内嵌浏览器」模式** —— 面板区就是浏览器（Rust 侧子 webview），
 //           视频在该平台自己的网页里播放，再由「嗅探」列出页面加载过的
 //           图片/视频资源（带缩略图与信息）供下载。
-//           代表：抖音、腾讯视频、爱奇艺。
+//           代表：抖音。
 // 无论哪种模式都**不使用内嵌网页 / 浮窗**（旧方案的浮窗缺陷已移除）。
+// 注：腾讯视频 / 爱奇艺 因 DRM 且无公开接口，已从注册表移除。
 
 export type VideoPlatformMode = 'api' | 'url';
 
@@ -93,34 +94,6 @@ export const VIDEO_PLATFORMS: VideoPlatform[] = [
       '实测：分享页 window._SSR_DATA.data 为空对象、_ROUTER_DATA 仅含静态渲染配置（无 videoInfoRes/play_addr），' +
       '全部详情接口返回空响应或 403（仅能拿到反爬 Cookie __ac_nonce）。' +
       '因此「解析」可能失败；若你已有视频直链，粘贴进来即可播放或下载。',
-  },
-  {
-    id: 'tencent',
-    name: '腾讯视频',
-    home: 'https://v.qq.com',
-    mode: 'url',
-    accent: '#ff7c00',
-    accentDark: '#ff9d40',
-    desc: '内嵌浏览器（DRM）',
-    downloadable: true,
-    capabilities: ['浏览器', '嗅探下载'],
-    note:
-      '腾讯视频为 DRM 加密流，播放地址与密钥均受保护，且无公开 API，纯 API 无法取流。' +
-      '若你已有视频直链（.mp4 / .m3u8），粘贴进来即可播放或下载。',
-  },
-  {
-    id: 'iqiyi',
-    name: '爱奇艺',
-    home: 'https://www.iqiyi.com',
-    mode: 'url',
-    accent: '#00be06',
-    accentDark: '#3fd443',
-    desc: '内嵌浏览器（DRM）',
-    downloadable: true,
-    capabilities: ['浏览器', '嗅探下载'],
-    note:
-      '爱奇艺为 DRM 加密流，播放地址与密钥均受保护，且无公开 API，纯 API 无法取流。' +
-      '若你已有视频直链（.mp4 / .m3u8），粘贴进来即可播放或下载。',
   },
 ];
 

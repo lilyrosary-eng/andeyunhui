@@ -19,17 +19,12 @@ import { ApiEmbedder } from './api-embedder';
 /** 与主应用共享的嵌入配置存储 key（勿改名：改了就跟 AI 对话的记忆配置脱钩）。 */
 export const EMBED_CONFIG_KEY = 'andeyunhui.mobile.rag.embed';
 
-/** 兜底端点（Ollama 本机，OpenAI 不兼容路径的专用 /api/embeddings）。 */
-export const FALLBACK_ENDPOINT = 'http://localhost:11434/api/embeddings';
-/** 兜底模型（nomic-embed-text，768 维）。 */
-export const FALLBACK_MODEL = 'nomic-embed-text';
-
 export interface EmbedConfig {
   endpoint: string;
   apiKey: string;
   model: string;
-  /** 配置来源：explicit=显式配置 / profile=复用算力来源 / fallback=Ollama 兜底。 */
-  source: 'explicit' | 'profile' | 'fallback';
+  /** 配置来源：routing=路由页选定 / explicit=手动端点 / profile=自动猜测。 */
+  source: 'routing' | 'explicit' | 'profile';
   /** 来源说明（带 profile 名，便于用户核对）。 */
   label: string;
 }
@@ -105,31 +100,78 @@ function toEmbeddingsUrl(baseUrl: string): string {
 }
 
 /**
- * 解析嵌入配置（三级回落）。**永不静默**：每一级命中都打一条日志说明用了哪个端点。
+ * 解析嵌入配置。**永不静默**：每一级命中都打一条日志说明用了哪个端点。
+ *
+ * 优先级与宿主 `semanticMemory.resolveEmbedConfig()` 完全一致（2026-11-05 对齐，之前两边相反）：
+ *   ① 设置 → 模型 → 嵌入模型（`media_models.embedding`）
+ *   ② 手动端点（localStorage `andeyunhui.mobile.rag.embed`，只给自建服务的人）
+ *   ③ 自动猜测当前算力来源
+ *   ④ 都没有 → 抛错
+ *
+ * 为什么删掉原来的「Ollama 本机兜底」：那是个隐形入口 —— 三条路都没配时它会悄悄拿
+ * `localhost:11434` + `nomic-embed-text` 去试，用户看不到也察觉不到，失败表现成
+ * "RAG 莫名其妙没结果"。宁可显式失败。
  * @param force 跳过缓存（用户点「重新检测」时用）
  */
 export async function resolveEmbedConfig(force = false): Promise<EmbedConfig> {
   if (!force && cache && Date.now() - cache.at < CACHE_MS) return cache.cfg;
 
-  // 1) 显式配置
+  // 1) 路由页选定的嵌入模型（宿主配置档案，跨端可读）
+  try {
+    const cfg2 = await window.__HOST_API__.invoke<{ media_models?: { embedding?: string | null } }>(
+      'ai_get_config',
+    );
+    const want = (cfg2?.media_models?.embedding ?? '').trim();
+    if (want) {
+      const raw = await window.__HOST_API__.invoke<{ profiles?: AiProfileLite[] }>('ai_get_profiles');
+      const hit = (raw?.profiles ?? []).find(
+        (p) => p && (p.model ?? '').trim() === want && (p.base_url ?? '').trim(),
+      );
+      if (hit?.base_url) {
+        const c: EmbedConfig = {
+          endpoint: toEmbeddingsUrl(hit.base_url),
+          apiKey: hit.api_key ?? '',
+          model: want,
+          source: 'routing',
+          label: `路由页选定「${want}」`,
+        };
+        console.info('[rag] 嵌入端点 ← 路由页选定:', c.endpoint, `模型=${want}`);
+        cache = { cfg: c, at: Date.now() };
+        return c;
+      }
+      console.warn(`[rag] 路由页选的嵌入模型「${want}」在配置里找不到对应供应商，继续往下回落`);
+    }
+  } catch (e) {
+    console.warn('[rag] 读取路由页嵌入选择失败，继续往下回落:', e);
+  }
+
+  // 2) 手动端点（高级）
   const explicit = getExplicitConfig();
   if (explicit) {
-    const cfg: EmbedConfig = { ...explicit, source: 'explicit', label: '显式配置' };
-    console.info('[rag] 嵌入端点 ← 显式配置:', cfg.endpoint, `模型=${cfg.model}`);
+    const cfg: EmbedConfig = { ...explicit, source: 'explicit', label: '手动端点' };
+    console.info('[rag] 嵌入端点 ← 手动端点:', cfg.endpoint, `模型=${cfg.model}`);
     cache = { cfg, at: Date.now() };
     return cfg;
   }
 
-  // 2) 复用宿主算力来源。优先挑同名 provider 下的「嵌入模型」，而不是用户当前选中的对话模型。
+  // 3) 自动猜测：复用宿主算力来源。优先挑同名 provider 下的「嵌入模型」，而不是用户当前选中的对话模型。
   try {
     const raw = await window.__HOST_API__.invoke<{ profiles?: AiProfileLite[]; active?: string | null }>(
       'ai_get_profiles',
     );
     const list = (raw?.profiles ?? []).filter((p) => p && p.base_url);
-    const embedProfile = list.find(
-      (p) => EMBED_NAME_RE.test(p.model ?? '') || EMBED_NAME_RE.test(p.name ?? ''),
-    );
     const active = list.find((p) => p.id === raw?.active) ?? list[0];
+    const isEmbedName = (p: AiProfileLite) =>
+      EMBED_NAME_RE.test(p.model ?? '') || EMBED_NAME_RE.test(p.name ?? '');
+    // ★ 只在**当前那个 provider 的模型里**挑嵌入模型。
+    //   原先是全表第一个匹配项，而 v1 兼容视图是 providers × models 一条一档（本机 188 条），
+    //   模型列表长的供应商会插队：实测用户当前用的是本机 LM Studio，
+    //   却挑中了 `nvidia/embed-qa-4 @ integrate.api.nvidia.com`（远端），
+    //   于是「摄取文档」实际把正文发去了第三方，而不是用户自己维护的本地嵌入模型。
+    const embedProfile =
+      list.find((p) => isEmbedName(p) && p.base_url === active?.base_url) ??
+      (active && isEmbedName(active) ? active : undefined) ??
+      list.find(isEmbedName);
     const picked = embedProfile ?? active;
     if (picked?.base_url) {
       const usingEmbedModel = !!embedProfile;
@@ -137,6 +179,13 @@ export async function resolveEmbedConfig(force = false): Promise<EmbedConfig> {
         console.warn(
           '[rag] 没找到名字像「嵌入模型」的档案，只能复用当前算力来源的端点。' +
             '若该端点不提供 /v1/embeddings，摄取会失败 —— 请到面板「修改」里显式指定嵌入模型。',
+        );
+      } else if (embedProfile.base_url !== active?.base_url) {
+        // 跨供应商兜底也要说出来：维度、鉴权、是否出网都和用户以为的不一样
+        console.warn(
+          `[rag] 当前算力来源「${active?.name || active?.id || '?'}」里没有嵌入模型，` +
+            `改用其它来源的 ${embedProfile.model || embedProfile.name} @ ${embedProfile.base_url}` +
+            `（维度可能与库里已有的向量不一致 → 旧数据会检索不到）。建议在 AI 路由页显式选择嵌入模型。`,
         );
       }
       const cfg: EmbedConfig = {
@@ -154,22 +203,16 @@ export async function resolveEmbedConfig(force = false): Promise<EmbedConfig> {
       cache = { cfg, at: Date.now() };
       return cfg;
     }
-    console.warn('[rag] 没有可用的 AI 算力来源（ai_get_profiles 为空或缺少 base_url），回落到 Ollama 兜底');
+      console.warn('[rag] 没有可用的 AI 算力来源（ai_get_profiles 为空或缺少 base_url）');
   } catch (e) {
     console.error('[rag] 读取 AI 算力来源失败:', e);
   }
 
-  // 3) 兜底
-  const cfg: EmbedConfig = {
-    endpoint: FALLBACK_ENDPOINT,
-    apiKey: '',
-    model: FALLBACK_MODEL,
-    source: 'fallback',
-    label: 'Ollama 本机兜底',
-  };
-  console.warn('[rag] 嵌入端点 ← Ollama 兜底（若本机没跑 Ollama，摄取/检索会失败）:', cfg.endpoint);
-  cache = { cfg, at: Date.now() };
-  return cfg;
+  // 4) 三条路都没配 → 显式失败（原来这里是 Ollama 隐形兜底）
+  throw new Error(
+    '没有可用的嵌入端点：请到 设置 → 模型 → 「嵌入模型（RAG 记忆 / 知识库）」里选一个，' +
+      '或在该面板的「高级」里手动填端点。未配置时对话沉淀与文档摄取都不会执行。',
+  );
 }
 
 /** 探测端点是否可用（面板「检测」按钮）：发一条极短文本，返回向量维度或抛错。 */

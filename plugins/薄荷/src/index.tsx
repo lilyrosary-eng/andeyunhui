@@ -1,9 +1,10 @@
 /// <reference path="../../global.d.ts" />
 import React from "react";
+import { MintStatsPage } from './MintStatsPage';
 // 专业模块入口（薄荷）
 import * as XLSX from 'xlsx';
 const { useState, useMemo, useCallback, useRef, useEffect } = React;
-const { ModuleSidebarShell, SecondaryNavShell, Icon: HostIcon } = window.__HOST_UI__ || {};
+const { ModuleSidebarShell, SecondaryNavShell, Icon: HostIcon, BarChart3 } = window.__HOST_UI__ || {};
 const _HOST_UI = window.__HOST_UI__ || {};
 // i18n：宿主注入的翻译函数（语言切换由主应用广播，此处读取当前语言）
 const _I18N = window.__HOST_I18N__ || {};
@@ -2217,6 +2218,8 @@ function ProfessionalModule() {
   const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  // 工具箱统计页（与其它模块同一套统计入口）
+  const [showStats, setShowStats] = useState(false);
 
   const handleSelectCategory = useCallback((catId: string) => {
     setSelectedCategory(catId);
@@ -2307,6 +2310,23 @@ function ProfessionalModule() {
   const selectedTool = selectedToolId ? findTool(selectedToolId) : undefined;
   const ToolView = selectedToolId ? TOOL_VIEWS[selectedToolId] : undefined;
 
+  // 侧栏底部统计按钮：与音乐/阅读/图片/视频/AI 对话同一模式（footer 区、icon-only、18px、激活高亮）
+  const statsButton = BarChart3 ? (
+    <button
+      key="open-stats"
+      onClick={() => setShowStats((v) => !v)}
+      title={showStats ? '关闭统计' : '统计'}
+      aria-label={showStats ? '关闭统计' : '统计'}
+      className={`p-2 rounded-lg transition-colors ${
+        showStats
+          ? 'text-[var(--element-color-raw)] bg-black/5 dark:bg-white/5'
+          : 'text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5'
+      }`}
+    >
+      <BarChart3 size={18} strokeWidth={2} />
+    </button>
+  ) : null;
+
   // 侧边栏
   const sidebar = ModuleSidebarShell ? (
     <ModuleSidebarShell
@@ -2316,6 +2336,7 @@ function ProfessionalModule() {
       icon={<BriefcaseIcon />}
       title={T('mint.title')}
       onOpenModuleSettings={handleOpenModuleSettings}
+      footerExtra={statsButton}
       searchQuery={searchQuery}
       onSearchChange={setSearchQuery}
       searchPlaceholder={T('mint.searchPlaceholder')}
@@ -2377,10 +2398,17 @@ function ProfessionalModule() {
       {sidebar}
       <PushViewBox
         className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top"
-        activeKey={showSettings ? 'settings' : selectedTool ? `tool:${selectedTool.id}` : 'list'}
+        activeKey={showSettings ? 'settings' : showStats ? 'stats' : selectedTool ? `tool:${selectedTool.id}` : 'list'}
       >
         {showSettings ? (
           settingsPanel
+        ) : showStats ? (
+          <MintStatsPage
+            categories={CATEGORIES.map((c) => ({ id: c.id, label: T(c.name), count: c.count }))}
+            total={ALL_TOOLS.length}
+            implemented={Object.keys(TOOL_VIEWS).length}
+            onClose={() => setShowStats(false)}
+          />
         ) : selectedTool ? (
           <ToolShell tool={selectedTool} onBack={() => setSelectedToolId(null)}>
             {ToolView ? <ToolView /> : <ComingSoon tool={selectedTool} />}

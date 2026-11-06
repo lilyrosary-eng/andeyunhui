@@ -38,7 +38,17 @@ export interface RerankInfo {
 type RerankInfoListener = (info: RerankInfo | null) => void;
 
 /** 主面板视图（侧栏也能切换，所以状态放 store 而不是组件内）。 */
-export type RagView = 'chat' | 'graph' | 'manage';
+export type RagView = 'chat' | 'graph' | 'library' | 'manage' | 'reader';
+/** 「看原文」的目标：来源 + 要高亮的字符区间（命中块在文档里的位置）。 */
+export interface ReaderTarget {
+  sourceId: string;
+  /** 命中区间；缺省 = 只打开正文不高亮。 */
+  start?: number;
+  end?: number;
+  /** 从哪次提问进来的，显示在阅读器标题行。 */
+  query?: string;
+}
+type ReaderListener = (t: ReaderTarget | null) => void;
 type ViewListener = (v: RagView) => void;
 /** 侧栏「再问一次」把问题投递给对话面板。 */
 type AskListener = (q: string) => void;
@@ -57,6 +67,10 @@ class RagStore {
   private askListeners = new Set<AskListener>();
   private focusId: string | null = null;
   private focusListeners = new Set<FocusListener>();
+  private reader: ReaderTarget | null = null;
+  private readerListeners = new Set<ReaderListener>();
+  /** 打开正文前的视图，「← 返回」回到它 */
+  private readerFrom: RagView | null = null;
   private rerankInfo: RerankInfo | null = null;
   private rerankListeners = new Set<RerankInfoListener>();
 
@@ -100,6 +114,30 @@ class RagStore {
     this.focusId = id;
     this.setView('manage');
     for (const l of this.focusListeners) l(id);
+  }
+
+  /** 打开来源正文（引用 chip / 图谱节点点进来的「看原文」）。 */
+  openReader(t: ReaderTarget): void {
+    if (this.view !== 'reader') this.readerFrom = this.view;
+    this.reader = t;
+    this.setView('reader');
+    for (const l of this.readerListeners) l(t);
+  }
+
+  /** 返回打开正文前的那个视图。 */
+  closeReader(): void {
+    this.setView(this.readerFrom ?? 'chat');
+  }
+
+  getReader(): ReaderTarget | null {
+    return this.reader;
+  }
+
+  subscribeReader(l: ReaderListener): () => void {
+    this.readerListeners.add(l);
+    return () => {
+      this.readerListeners.delete(l);
+    };
   }
 
   getFocusId(): string | null {

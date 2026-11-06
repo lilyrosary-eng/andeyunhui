@@ -1,6 +1,6 @@
 /// <reference path="../../global.d.ts" />
 import React from 'react';
-import { ChevronLeft, ChevronRight, Sparkles, Download, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Sparkles, Download, X, Plus } from 'lucide-react';
 import {
   CloudIcon, HeartIcon, MusicIcon, PlayIcon, SearchIcon, VideoIcon,
 } from '../../_shared/icons';
@@ -9,7 +9,7 @@ import {
   searchSongs, getListenNow, getPersonalFm, getTopList, getPersonalizedPlaylists, getSongUrl, getSongWiki, isLoggedIn, logoutNetease,
   neteaseQrKey, neteaseQrCreate, neteaseQrCheck,
   NETEASE_QUALITY_OPTIONS,
-  getUserAccount, getUserPlaylists, neteaseTrackBadges, qualityLabelFromBr, likeNeteaseSong, subscribeNeteasePlaylist, isLikedPlaylist,
+  getUserAccount, getUserPlaylists, neteaseTrackBadges, qualityLabelFromBr, likeNeteaseSong, subscribeNeteasePlaylist, manipulateNeteasePlaylistTracks, isLikedPlaylist,
   getMvPlayable,
   getArtistDetail, getArtistAlbums, getArtistAllSongs, getArtistMvs, getArtistDesc, getSimilarArtists,
   getAlbumDetail, subscribeAlbum,
@@ -897,8 +897,15 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   }, [tab, extendRoam]);
 
   const [playlistId, setPlaylistId] = useState<number | null>(null);
-  const [playlistInfo, setPlaylistInfo] = useState<{ name: string; coverUrl?: string; description?: string; trackCount: number; playCount?: number } | null>(null);
+  const [playlistInfo, setPlaylistInfo] = useState<{ name: string; coverUrl?: string; description?: string; trackCount: number; playCount?: number; creatorUserId?: number; specialType?: number } | null>(null);
   const [subscribedPlaylist, setSubscribedPlaylist] = useState(false);
+  // 「编辑云歌单」面板：仅当歌单属于当前登录用户时可加/删歌曲
+  const [addPanelOpen, setAddPanelOpen] = useState(false);
+  const [addKeyword, setAddKeyword] = useState('');
+  const [addResults, setAddResults] = useState<NeteaseTrack[]>([]);
+  const [addSearching, setAddSearching] = useState(false);
+  const [addBusyId, setAddBusyId] = useState<number | null>(null);
+  const [addedIds, setAddedIds] = useState<Set<number>>(new Set());
   const [notice, setNotice] = useState<{ text: string; type?: 'success' | 'error' } | null>(null);
   useEffect(() => {
     if (!notice) return;
@@ -956,6 +963,8 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
         description: res.description,
         trackCount: res.total || res.tracks.length,
         playCount: res.playCount,
+        creatorUserId: res.creatorUserId,
+        specialType: res.specialType,
       });
       // 查询当前歌单是否已收藏（仅登录态）
       if (profile?.userId) {
@@ -975,6 +984,63 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   }, [onActivePlaylist]);
   // 保持命令式句柄始终调用最新 openPlaylist（useImperativeHandle 依赖为 []，避免 TDZ）
   openPlaylistRef.current = openPlaylist;
+
+  // 切换歌单时重置「添加歌曲」面板
+  useEffect(() => {
+    setAddPanelOpen(false);
+    setAddKeyword('');
+    setAddResults([]);
+    setAddedIds(new Set());
+  }, [playlistId]);
+
+  // 只有「我创建的普通歌单」允许增删歌曲：收藏的他人歌单、我喜欢的音乐（specialType=5）不可编辑
+  const canEditPlaylist =
+    loggedIn &&
+    playlistId != null &&
+    profile?.userId != null &&
+    playlistInfo?.creatorUserId === profile.userId &&
+    playlistInfo?.specialType !== 5;
+
+  const handleAddSearch = useCallback(async () => {
+    const kw = addKeyword.trim();
+    if (!kw || addSearching) return;
+    setAddSearching(true);
+    try {
+      const res = await searchSongs(kw, 20, 0);
+      setAddResults(res.tracks);
+    } catch (e) {
+      setNotice({ text: `搜索失败：${(e as any)?.message || String(e)}`, type: 'error' });
+    } finally {
+      setAddSearching(false);
+    }
+  }, [addKeyword, addSearching]);
+
+  const handleAddTrackToPlaylist = useCallback(async (t: NeteaseTrack) => {
+    if (playlistId == null || addBusyId != null) return;
+    setAddBusyId(t.id);
+    try {
+      await manipulateNeteasePlaylistTracks(playlistId, [t.id], 'add');
+      setAddedIds(prev => { const next = new Set(prev); next.add(t.id); return next; });
+      setNotice({ text: `已添加到「${playlistInfo?.name || '歌单'}」`, type: 'success' });
+      openPlaylistRef.current(playlistId, playlistInfo?.name);
+    } catch (e) {
+      setNotice({ text: `添加失败：${(e as any)?.message || String(e)}`, type: 'error' });
+    } finally {
+      setAddBusyId(null);
+    }
+  }, [addBusyId, playlistId, playlistInfo?.name]);
+
+  const handleRemoveTrackFromPlaylist = useCallback(async (t: NeteaseTrack) => {
+    if (playlistId == null) return;
+    if (!window.confirm(`从歌单移除「${t.name}」？`)) return;
+    try {
+      await manipulateNeteasePlaylistTracks(playlistId, [t.id], 'del');
+      setNotice({ text: `已移除「${t.name}」`, type: 'success' });
+      openPlaylistRef.current(playlistId, playlistInfo?.name);
+    } catch (e) {
+      setNotice({ text: `移除失败：${(e as any)?.message || String(e)}`, type: 'error' });
+    }
+  }, [playlistId, playlistInfo?.name]);
 
   // 加载歌单/榜单下一页（无限下拉）
   const loadMorePlaylist = useCallback(async () => {
@@ -1493,8 +1559,71 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
                           <HeartIcon size={14} fill={subscribedPlaylist ? 'currentColor' : 'none'} />
                           {subscribedPlaylist ? '已收藏' : '收藏歌单'}
                         </button>
+                        {canEditPlaylist && (
+                          <button
+                            onClick={() => setAddPanelOpen(v => !v)}
+                            className="btn-press flex items-center gap-1.5 px-4 py-1.5 rounded-full border border-neutral-300 dark:border-stone-700 text-neutral-700 dark:text-stone-200 text-sm hover:bg-neutral-100 dark:hover:bg-stone-800 transition-colors"
+                            title="向这个歌单添加歌曲"
+                          >
+                            <Plus size={14} />
+                            {addPanelOpen ? '收起添加' : '添加歌曲'}
+                          </button>
+                        )}
                       </div>
                     </div>
+                  </div>
+                )}
+                {/* 编辑云歌单：搜索并添加歌曲（仅我创建的普通歌单） */}
+                {canEditPlaylist && addPanelOpen && (
+                  <div className="mb-4 rounded-xl border border-neutral-200/70 dark:border-stone-700/60 bg-white/70 dark:bg-stone-800/50 overflow-hidden">
+                    <div className="flex items-center gap-2 px-3 py-2">
+                      <SearchIcon size={16} />
+                      <input
+                        value={addKeyword}
+                        onChange={(e) => setAddKeyword(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') void handleAddSearch(); }}
+                        placeholder="搜索要添加的歌曲"
+                        className="flex-1 bg-transparent outline-none text-sm text-neutral-800 dark:text-stone-100 placeholder:text-neutral-400 dark:placeholder:text-stone-500"
+                      />
+                      <button
+                        onClick={() => void handleAddSearch()}
+                        disabled={addSearching || !addKeyword.trim()}
+                        className="btn-press px-3 py-1 rounded-lg text-xs bg-neutral-100 dark:bg-stone-700/60 text-neutral-600 dark:text-stone-300 hover:bg-neutral-200 dark:hover:bg-stone-700 transition-colors disabled:opacity-50"
+                      >
+                        {addSearching ? '搜索中…' : '搜索'}
+                      </button>
+                    </div>
+                    {addResults.length > 0 && (
+                      <div className="max-h-72 overflow-y-auto border-t border-neutral-200/60 dark:border-stone-700/60">
+                        {addResults.map((t) => (
+                          <div key={t.id} className="flex items-center gap-2.5 px-3 py-2 hover:bg-neutral-100/70 dark:hover:bg-stone-800/60 transition-colors">
+                            {t.cover ? (
+                              <img src={t.cover} alt="" className="w-9 h-9 rounded-md object-cover shrink-0" />
+                            ) : (
+                              <span className="w-9 h-9 rounded-md bg-neutral-200/60 dark:bg-stone-800/60 flex items-center justify-center text-neutral-400 dark:text-stone-500 shrink-0">
+                                <MusicIcon size={14} />
+                              </span>
+                            )}
+                            <span className="min-w-0 flex-1">
+                              <span className="block text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</span>
+                              <span className="block text-xs text-neutral-500 dark:text-stone-400 truncate">{t.artist}</span>
+                            </span>
+                            <button
+                              onClick={() => void handleAddTrackToPlaylist(t)}
+                              disabled={addBusyId === t.id || addedIds.has(t.id)}
+                              className="btn-press shrink-0 px-2.5 py-1 rounded-lg text-xs bg-[#f44336]/10 text-[#f44336] dark:text-[#ff8a80] hover:bg-[#f44336]/20 transition-colors disabled:opacity-50"
+                            >
+                              {addedIds.has(t.id) ? '已添加' : addBusyId === t.id ? '添加中…' : '添加'}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {!addSearching && addKeyword.trim() && addResults.length === 0 && (
+                      <div className="px-3 py-4 text-center text-xs text-neutral-400 dark:text-stone-500 border-t border-neutral-200/60 dark:border-stone-700/60">
+                        没有搜索结果
+                      </div>
+                    )}
                   </div>
                 )}
                 {renderBody()}
@@ -2002,6 +2131,16 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
             >
               <HeartIcon size={15} fill={likedSongs.has(t.id) ? 'currentColor' : 'none'} />
             </button>
+            {canEditPlaylist && (
+              <button
+                data-action="remove"
+                onClick={(e) => { e.stopPropagation(); void handleRemoveTrackFromPlaylist(t); }}
+                className="btn-jelly p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-red-500 dark:hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                title="从当前歌单移除"
+              >
+                <X size={15} />
+              </button>
+            )}
           </div>
         ))}
         {/* 无限下拉：仅在支持分页的 tab（搜索 / 歌单）显示加载状态与触底哨兵 */}

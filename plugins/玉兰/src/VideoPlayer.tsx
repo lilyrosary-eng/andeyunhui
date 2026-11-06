@@ -52,9 +52,124 @@ interface VideoPlayerProps {
   onSettingsChange: (s: Partial<VideoSettings>) => void;
 }
 
-// 进度存储 key
-const PROGRESS_KEY_PREFIX = 'video_progress_';
+// 进度存储 key（导出：视频库侧栏的「继续观看」要按同一前缀扫 localStorage）
+export const PROGRESS_KEY_PREFIX = 'video_progress_';
+
+/**
+ * 读取某条视频的续播进度（秒）。
+ * 兼容两种存量格式：旧版是纯数字（无时间戳），新版是 { pos, at } JSON。
+ * 侧栏「继续观看」要按 at 排序，所以保存端统一写新格式，读端两版都认。
+ */
+export function readVideoProgress(key: string): { pos: number; at: number } {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return { pos: 0, at: 0 };
+    if (raw.startsWith('{')) {
+      const o = JSON.parse(raw) as { pos?: unknown; at?: unknown };
+      const pos = Number(o?.pos);
+      const at = Number(o?.at);
+      return {
+        pos: Number.isFinite(pos) && pos > 0 ? pos : 0,
+        at: Number.isFinite(at) ? at : 0,
+      };
+    }
+    const pos = parseFloat(raw);
+    return { pos: Number.isFinite(pos) && pos > 0 ? pos : 0, at: 0 };
+  } catch {
+    return { pos: 0, at: 0 };
+  }
+}
 const VOLUME_KEY = 'video_volume';
+/** 字幕字号偏好（localStorage） */
+const SUB_FONT_KEY = 'video_subtitle_font';
+
+interface SubtitleCue {
+  start: number;
+  end: number;
+  text: string;
+}
+
+/** `00:01:02,500` / `00:01:02.500` / `1:02.5` → 秒 */
+function parseTimestamp(s: string): number {
+  const parts = s.trim().replace(',', '.').split(':').map((x) => parseFloat(x));
+  const nums = parts.filter((n) => Number.isFinite(n));
+  if (nums.length === 3) return nums[0] * 3600 + nums[1] * 60 + nums[2];
+  if (nums.length === 2) return nums[0] * 60 + nums[1];
+  return nums[0] ?? 0;
+}
+
+/**
+ * 解析字幕文本：SRT / WebVTT / ASS 三种常见格式。
+ * ASS 只取 `[Events]` 里的 Dialogue（第 10 段起是正文），并去掉 {\...} 标签与 \N 换行。
+ */
+function parseSubtitles(raw: string): SubtitleCue[] {
+  const text = raw.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  const cues: SubtitleCue[] = [];
+
+  if (/\[Events\]/i.test(text)) {
+    for (const line of text.split('\n')) {
+      if (!line.toLowerCase().startsWith('dialogue:')) continue;
+      const body = line.slice(line.indexOf(':') + 1);
+      // Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+      const fields = body.split(',');
+      if (fields.length < 10) continue;
+      const start = parseTimestamp(fields[1]);
+      const end = parseTimestamp(fields[2]);
+      const content = fields.slice(9).join(',')
+        .replace(/\{[^}]*\}/g, '')
+        .replace(/\\N/gi, '\n')
+        .trim();
+      if (content) cues.push({ start, end, text: content });
+    }
+    return cues.sort((a, b) => a.start - b.start);
+  }
+
+  // SRT / VTT：按空行分块，块内找含 "-->" 的时间行，其余行是正文
+  for (const block of text.split(/\n{2,}/)) {
+    const lines = block.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) continue;
+    const idx = lines.findIndex((l) => l.includes('-->'));
+    if (idx < 0) continue;
+    const [from, to] = lines[idx].split('-->');
+    if (!from || !to) continue;
+    const start = parseTimestamp(from);
+    const end = parseTimestamp(to.replace(/\s+\S*$/, '')); // VTT 可能带 cue 设置，截掉
+    const content = lines.slice(idx + 1).join('\n').replace(/<[^>]+>/g, '').trim();
+    if (content && end > start) cues.push({ start, end, text: content });
+  }
+  return cues.sort((a, b) => a.start - b.start);
+}
+
+/**
+ * 找同名字幕并读回：同目录下 `<视频名>.srt / .vtt / .ass`，优先 srt。
+ * 网络流（filePath 为空）跳过；读失败一律静默返回空（字幕是增强，不该挡住播放）。
+ */
+async function loadSubtitlesFor(videoPath: string): Promise<SubtitleCue[]> {
+  if (!videoPath) return [];
+  const sep = videoPath.includes('\\') ? '\\' : '/';
+  const dir = videoPath.slice(0, videoPath.lastIndexOf(sep));
+  const base = videoPath.slice(videoPath.lastIndexOf(sep) + 1).replace(/\.\w+$/, '');
+  if (!dir || !base) return [];
+  const PREFERRED = ['srt', 'vtt', 'ass', 'ssa'];
+  try {
+    const entries = await hostApi.invoke<Array<{ name: string; path: string; is_dir: boolean }>>(
+      'list_directory',
+      { path: dir },
+    );
+    if (!Array.isArray(entries)) return [];
+    for (const ext of PREFERRED) {
+      const hit = entries.find((e) => !e.is_dir && e.name.toLowerCase() === `${base.toLowerCase()}.${ext}`);
+      if (!hit) continue;
+      const raw = await hostApi.invoke<string>('read_text_file', { path: hit.path });
+      const cues = parseSubtitles(String(raw ?? ''));
+      if (cues.length) return cues;
+    }
+  } catch {
+    /* 无权限/文件被占用：当成没有字幕 */
+  }
+  return [];
+}
+
 
 const SPEEDS = [0.5, 1, 1.25, 1.5, 2] as const;
 
@@ -160,6 +275,18 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
   const containerRef = useRef<HTMLDivElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  // ── 字幕：同目录同名 .srt/.vtt/.ass，自动加载；CC 按钮控制开关与字号 ──
+  const [subCues, setSubCues] = useState<SubtitleCue[]>([]);
+  const [activeCue, setActiveCue] = useState('');
+  const [subMenuOpen, setSubMenuOpen] = useState(false);
+  const subCuesRef = useRef<SubtitleCue[]>([]);
+  const [subFont, setSubFont] = useState<number>(() => {
+    const n = Number(localStorage.getItem(SUB_FONT_KEY));
+    return Number.isFinite(n) && n >= 12 && n <= 40 ? n : 20;
+  });
+  const subOn = subFont > 0;
+  // 截图提示（复制到剪贴板后短暂显示）
+  const [shotMsg, setShotMsg] = useState('');
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(() => {
     // 记住音量
@@ -272,14 +399,47 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
       });
   }, [file?.fileName]);
 
+  // 加载同名字幕：同目录同名 .srt/.vtt/.ass。网络流 filePath 为空 → 直接空列表。
+  useEffect(() => {
+    let cancelled = false;
+    subCuesRef.current = [];
+    setSubCues([]);
+    setActiveCue('');
+    void loadSubtitlesFor(file.filePath).then((cues) => {
+      if (cancelled) return;
+      subCuesRef.current = cues;
+      setSubCues(cues);
+    });
+    return () => { cancelled = true; };
+  }, [file.filePath]);
+
+  // 截图当前帧 → 复制到系统剪贴板（不落盘：避免在用户目录堆截图，也省掉路径管理）
+  const captureFrame = useCallback(async () => {
+    const v = videoRef.current;
+    if (!v || !v.videoWidth || !v.videoHeight) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = v.videoWidth;
+    canvas.height = v.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+    try {
+      await hostApi.invoke('clipboard_write_image', { base64Png: canvas.toDataURL('image/png') });
+      setShotMsg('已复制当前帧到剪贴板');
+    } catch (e) {
+      setShotMsg('截图失败：' + String(e).slice(0, 60));
+    }
+    setTimeout(() => setShotMsg(''), 2200);
+  }, []);
+
   // 记住进度
   useEffect(() => {
     if (!settings.rememberProgress) return;
     const savedKey = PROGRESS_KEY_PREFIX + file.filePath;
-    const savedTime = localStorage.getItem(savedKey);
+    const saved = readVideoProgress(savedKey);
     const video = videoRef.current;
-    if (savedTime && video) {
-      const t = parseFloat(savedTime);
+    if (saved.pos > 0 && video) {
+      const t = saved.pos;
       // 只有未播放完毕才续播（距结尾超过 5 秒）
       if (t > 1 && (!video.duration || video.duration - t > 5)) {
         video.currentTime = t;
@@ -293,13 +453,29 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
   // 进度自动保存
   useEffect(() => {
     if (!settings.rememberProgress) return;
+    const save = () => {
+      const video = videoRef.current;
+      if (!video || video.currentTime <= 0) return;
+      // 存 { pos, at }：at 用于「继续观看」按最近观看排序（旧版纯数字仍可读）
+      try {
+        localStorage.setItem(
+          PROGRESS_KEY_PREFIX + file.filePath,
+          JSON.stringify({ pos: video.currentTime, at: Date.now() }),
+        );
+        // 通知侧栏重算「继续观看」：写入是 interval 直接落 localStorage，不经 React 状态，
+        // 父组件不收到通知就会一直显示打开播放器之前的那几条。
+        window.dispatchEvent(new CustomEvent('andy:video-progress'));
+      } catch { /* 配额满/隐私模式：忽略 */ }
+    };
     const interval = setInterval(() => {
       const video = videoRef.current;
-      if (video && !video.paused && video.currentTime > 0) {
-        localStorage.setItem(PROGRESS_KEY_PREFIX + file.filePath, String(video.currentTime));
-      }
+      if (video && !video.paused) save();
     }, 5000);
-    return () => clearInterval(interval);
+    // 卸载（返回 / 切视频 / 关闭模块）时补存一次，避免丢失最后不到 5 秒的进度
+    return () => {
+      clearInterval(interval);
+      save();
+    };
   }, [file.filePath, settings.rememberProgress]);
 
   // 音量持久化
@@ -316,11 +492,23 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
 
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
-    const onTimeUpdate = () => setCurrentTime(video.currentTime);
+    const onTimeUpdate = () => {
+      const t = video.currentTime;
+      setCurrentTime(t);
+      // 字幕：只在有字幕轨时算当前 cue。同一句重复 setState 会被 React 短路，
+      // 不会因为 timeupdate 高频触发而重渲染。
+      if (subCuesRef.current.length) {
+        const cue = subCuesRef.current.find((c) => t >= c.start && t <= c.end);
+        setActiveCue(cue ? cue.text : '');
+      }
+    };
     const onLoadedMetadata = () => setDuration(video.duration);
     const onEnded = () => {
       // 清除续播进度：完整播放完毕不再续播
-      try { localStorage.removeItem(PROGRESS_KEY_PREFIX + file.filePath); } catch {}
+      try {
+        localStorage.removeItem(PROGRESS_KEY_PREFIX + file.filePath);
+        window.dispatchEvent(new CustomEvent('andy:video-progress'));
+      } catch {}
       // 多分片网络流：先把当前视频的所有分段播完，再轮到「下一集」
       if (segments && segIndex < segments.length - 1) {
         continuePlayRef.current = true;
@@ -680,6 +868,32 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
       style: { cursor: canHide && !showControls ? 'none' : 'default' },
     }),
 
+    // 字幕层：控制条上方居中。有字幕轨且开启（字号 > 0）才渲染
+    subOn && subCues.length > 0 && activeCue
+      ? React.createElement('div', {
+          className: 'absolute left-0 right-0 bottom-16 z-20 flex justify-center px-10 pointer-events-none',
+        },
+          React.createElement('div', {
+            className: 'max-w-[80%] text-center rounded-lg px-3 py-1.5 whitespace-pre-line',
+            style: {
+              background: 'rgba(0,0,0,0.72)',
+              color: '#fff',
+              fontSize: `${subFont}px`,
+              lineHeight: 1.4,
+              textShadow: '0 1px 2px rgba(0,0,0,0.6)',
+            },
+          }, activeCue),
+        )
+      : null,
+
+    // 截图结果提示（顶部居中，2 秒后自动消失）
+    shotMsg
+      ? React.createElement('div', {
+          className: 'absolute left-1/2 top-16 -translate-x-1/2 z-30 rounded-lg px-3 py-1.5 text-xs text-white',
+          style: { background: 'rgba(0,0,0,0.72)' },
+        }, shotMsg)
+      : null,
+
     // 顶部返回栏
     React.createElement('div', {
       className: `absolute top-0 left-0 right-0 flex items-center gap-3 px-4 py-2 bg-gradient-to-b from-black/70 to-transparent transition-opacity duration-300 ${
@@ -784,6 +998,52 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
 
           // 右侧控制组
           React.createElement('div', { className: 'flex items-center gap-1' },
+            // 截图当前帧（复制到系统剪贴板；不落盘，避免在用户目录里堆截图）
+            React.createElement('button', {
+              onClick: () => void captureFrame(),
+              title: '截图当前帧（复制到剪贴板）',
+              className: 'btn-press p-1.5 rounded-full transition-all duration-150 text-white/70 hover:text-white',
+              children: React.createElement('svg', {
+                width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+                strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
+                children: [
+                  React.createElement('path', { key: '1', d: 'M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z' }),
+                  React.createElement('circle', { key: '2', cx: '12', cy: '13', r: '3' }),
+                ],
+              }),
+            }),
+            // 字幕开关（仅当本地视频找到同名字幕时出现）
+            subCues.length > 0 && React.createElement('div', { className: 'relative' },
+              React.createElement('button', {
+                onClick: () => setSubMenuOpen((v) => !v),
+                title: '字幕',
+                className: `btn-press px-1.5 py-1 rounded-md text-xs font-semibold transition-colors ${subOn ? 'text-white' : 'text-white/40 hover:text-white/70'}`,
+              }, 'CC'),
+              subMenuOpen && React.createElement('div', {
+                className: 'absolute bottom-full left-1/2 -translate-x-1/2 mb-2 py-1 rounded-xl shadow-lg border border-white/10 z-50 min-w-[110px]',
+                style: { background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(12px)' },
+              },
+                ...[
+                  { label: '关闭字幕', value: 0 },
+                  { label: '小', value: 16 },
+                  { label: '中', value: 20 },
+                  { label: '大', value: 26 },
+                ].map((opt) =>
+                  React.createElement('button', {
+                    key: opt.label,
+                    onClick: () => {
+                      setSubFont(opt.value);
+                      try { localStorage.setItem(SUB_FONT_KEY, String(opt.value)); } catch { /* 忽略 */ }
+                      setSubMenuOpen(false);
+                    },
+                    className: `w-full text-center px-4 py-1.5 text-sm transition-colors ${
+                      subFont === opt.value ? 'text-white font-medium' : 'text-white/50 hover:text-white/80'
+                    }`,
+                    children: opt.label,
+                  }),
+                ),
+              ),
+            ),
             // 播放速度
             React.createElement('div', { className: 'relative' },
               IconButton

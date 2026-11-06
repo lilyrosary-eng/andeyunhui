@@ -18,7 +18,8 @@ import { t as T, useLang } from '../lib/i18n';
 
 const VIEWS: { id: RagView; label: string; hint: string }[] = [
   { id: 'chat', label: '对话', hint: '检索 + 带引用回答' },
-  { id: 'graph', label: '图谱', hint: '最近一次检索的命中关系' },
+  { id: 'graph', label: '命中图', hint: '最近一次检索的命中关系' },
+  { id: 'library', label: '全库图', hint: '来源之间的相似度连线' },
   { id: 'manage', label: '管理', hint: '摄取 / 重建 / 删除' },
 ];
 

@@ -4,7 +4,7 @@ import { T, useLang } from '../../_shared/pluginRuntime';
 import { ThumbImg, PageIndicator } from './ImageViewer';
 const { useState } = React;
 const hostApi = window.__HOST_API__;
-const { ModuleSidebarShell, SecondaryNavShell, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = window.__HOST_UI__ || {};
+const { ModuleSidebarShell, SecondaryNavShell, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, BarChart3 } = window.__HOST_UI__ || {};
 
 // 相册自选封面的键：两类相册共用一张表（见 index.tsx 的 STORAGE_KEY_COVERS），
 // 用前缀区分来源，避免键相互碰撞。放在这里而非 index.tsx，是为了避免
@@ -83,6 +83,10 @@ interface ImageSidebarProps {
   onSetCover?: (key: string, coverPath: string | null) => void;
   onImportImages?: () => void;
   onOpenModuleSettings?: () => void;
+  /** 打开「统计」页（文件夹/图片数量概览）；不传则不显示该入口 */
+  onOpenStats?: () => void;
+  /** 统计页是否正在显示（用于侧栏按钮高亮，与音乐/阅读模块一致） */
+  statsActive?: boolean;
   searchQuery?: string;
   onSearchChange?: (value: string) => void;
 }
@@ -320,7 +324,7 @@ function CoverPickerOverlay(props: {
   ));
 }
 
-export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, onSelectFolder, onAddRoot, onRescan, onRenameFolder, onDeleteFolder, onDeleteAlbum, albumCovers, onSetCover, onOpenModuleSettings, searchQuery, onSearchChange }: ImageSidebarProps) {
+export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, onSelectFolder, onAddRoot, onRescan, onRenameFolder, onDeleteFolder, onDeleteAlbum, albumCovers, onSetCover, onOpenModuleSettings, onOpenStats, statsActive, searchQuery, onSearchChange }: ImageSidebarProps) {
   useLang();
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState('');
@@ -563,6 +567,22 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
     },
   ];
 
+  // 侧栏底部统计按钮：与音乐/阅读模块同一模式（footer 区、icon-only、18px、激活高亮）
+  const statsButton = onOpenStats
+    ? React.createElement('button', {
+        key: 'open-stats',
+        onClick: () => onOpenStats(),
+        title: statsActive ? '关闭统计' : '统计',
+        'aria-label': statsActive ? '关闭统计' : '统计',
+        className: `p-2 rounded-lg transition-colors ${
+          statsActive
+            ? 'text-[var(--element-color-raw)] bg-black/5 dark:bg-white/5'
+            : 'text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5'
+        }`,
+        children: BarChart3 ? React.createElement(BarChart3, { size: 18, strokeWidth: 2 }) : '📊',
+      })
+    : null;
+
   // 封面选择面板：与侧栏同级渲染（fixed 覆盖层），两种布局分支都要挂上
   const coverPageCount = Math.max(1, Math.ceil(coverCandidates.length / COVER_PAGE_CANDIDATES));
   // 候选列表变化后页码可能越界（例如从 5 页的相册切到 1 页的相册），渲染前夹紧
@@ -626,6 +646,7 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
       icon: React.createElement(ImageIcon),
       title: T('image.title'),
       onOpenModuleSettings,
+      footerExtra: statsButton,
       searchQuery,
       onSearchChange,
       searchPlaceholder: T('image.sidebar.search'),

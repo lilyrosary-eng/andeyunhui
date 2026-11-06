@@ -1,7 +1,7 @@
 /// <reference path="../../../global.d.ts" />
 import React from "react";
 // 茑萝 · 加密解密主容器
-// 职责：四个 Tab（RSA / PGP / 审计 / 字典）切换 + 通用工具栏
+// 职责：五个 Tab（RSA / PGP / 审计 / 字典 / 生成器）切换 + 通用工具栏
 // 风格对齐 GongjuxiangModule / GongfangModule
 const { useState } = React;
 
@@ -9,8 +9,11 @@ import { RsaTool } from './RsaTool';
 import { PgpTool } from './PgpTool';
 import { PasswordAudit } from './PasswordAudit';
 import { DictionaryGen } from './DictionaryGen';
+// 生成器与密码托管共用同一份 CSPRNG 实现（plugins/_shared/passwordGen.ts），
+// 避免「审计说弱、生成器造出更弱」的两套判据。
+import { PasswordGenerator } from '../../../_shared/PasswordGenerator';
 
-type TabKey = 'rsa' | 'pgp' | 'audit' | 'dict';
+type TabKey = 'rsa' | 'pgp' | 'audit' | 'dict' | 'gen';
 
 const RsaIcon = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -34,6 +37,11 @@ const AuditIcon = (
 const DictIcon = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" />
+  </svg>
+);
+const GenIcon = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="m12 3 1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z" />
   </svg>
 );
 
@@ -63,6 +71,7 @@ function CryptoModule() {
         <TabButton active={tab === 'pgp'} onClick={() => setTab('pgp')} icon={PgpIcon} label="PGP 信封" />
         <TabButton active={tab === 'audit'} onClick={() => setTab('audit')} icon={AuditIcon} label="密码强度审计" />
         <TabButton active={tab === 'dict'} onClick={() => setTab('dict')} icon={DictIcon} label="字典生成" />
+        <TabButton active={tab === 'gen'} onClick={() => setTab('gen')} icon={GenIcon} label="密码生成器" />
       </div>
 
       <div className="flex-1 h-full overflow-auto">
@@ -70,6 +79,15 @@ function CryptoModule() {
         {tab === 'pgp' && <PgpTool />}
         {tab === 'audit' && <PasswordAudit />}
         {tab === 'dict' && <DictionaryGen />}
+        {tab === 'gen' && (
+          <div className="max-w-xl p-5">
+            <PasswordGenerator />
+            <p className="mt-3 text-xs text-neutral-400 dark:text-stone-500">
+              「字典生成」用于生成爆破/审计用的口令字典；这里才是给账号用的高强度密码。随机源为
+              WebCrypto CSPRNG，并按字符集大小做拒绝采样，不存在取模偏差。
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );

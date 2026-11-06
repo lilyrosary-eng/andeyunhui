@@ -20,6 +20,32 @@ declare global {
     props?: Record<string, unknown>;
   }
 
+  /** 右键菜单命中目标的纯数据描述（宿主探测 DOM 后给出，插件拿不到 DOM 节点） */
+  interface ContextMenuTargetInfo {
+    /** 命中元素（或其可交互祖先）的标签名，大写 */
+    tag: string;
+    editable: boolean;
+    readOnly: boolean;
+    linkHref: string | null;
+    imageSrc: string | null;
+    /** 当前选区文本（已 trim） */
+    selectionText: string;
+    /** 当前模块 id */
+    moduleId: string | null;
+  }
+
+  /** 插件贡献的右键菜单条目 */
+  interface ContextMenuItem {
+    label: string;
+    /** 快捷键提示，仅展示 */
+    hint?: string;
+    variant?: 'default' | 'destructive';
+    disabled?: boolean;
+    /** 与上一项之间插入分隔线 */
+    separatorBefore?: boolean;
+    run?: () => void | Promise<void>;
+  }
+
   interface Window {
     __HOST_REACT__: typeof import('react');
     __HOST_REACT_DOM__: typeof import('react-dom/client');
@@ -67,6 +93,17 @@ declare global {
        * 与 navigate 的分工：navigate 是一次性动作，深链是可持久化的文本。
        */
       buildDeepLink?: (target: NavigationTarget) => string;
+      /**
+       * 注册本模块的右键菜单条目。宿主统一决定何时弹出与排序，
+       * 不给 moduleId 时默认只在本模块激活时生效。
+       */
+      registerContextMenuProvider?: (provider: {
+        id: string;
+        moduleId?: string;
+        /** 越大越靠前 */
+        priority?: number;
+        build: (target: ContextMenuTargetInfo) => ContextMenuItem[] | Promise<ContextMenuItem[]>;
+      }) => () => void;
       /**
        * 全站唯一的模糊打分（宿主 src/lib/fuzzy.ts，Obsidian cx() 移植）。
        * 返回值 > 0 为命中（越大越靠前），< 0 为不匹配。

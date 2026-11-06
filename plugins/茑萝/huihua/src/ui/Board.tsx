@@ -3,12 +3,37 @@ import { useCallback, useEffect, useRef } from '../host';
 import { useEditorState, useEditorView } from '../hooks';
 import { editor } from '../store';
 
+/**
+ * 透明区棋盘：**位图**图案，不用 CSS 渐变。
+ *
+ * 为什么换掉渐变：conic / linear 渐变的「硬色标」在边界上仍会被抗锯齿插值出过渡像素，
+ * 平铺之后就是每隔一格一条发丝线。用户 2026-11-04 把多层混合、羽化、不透明度、选区、
+ * 以及 Windows 系统缩放全部排除后接缝仍在 —— 说明它与缩放和图层混合都无关，
+ * 是渐变自身的产物，改缩放永远治不好。
+ * 位图 tile 里只有整块 fillRect 的两种颜色，没有插值可发生；再配 `image-rendering: pixelated`，
+ * 缩放到非整数设备像素时是复制像素而不是混出新的边。
+ *
+ * 颜色与几何沿用原来的两色（#e3e1da / #efede6）、16px 一格，观感不变。
+ */
+function makeCheckerTile(): string {
+  const c = document.createElement('canvas');
+  c.width = 16;
+  c.height = 16;
+  const g = c.getContext('2d')!;
+  g.fillStyle = '#efede6';
+  g.fillRect(0, 0, 16, 16);
+  g.fillStyle = '#e3e1da';
+  g.fillRect(0, 0, 8, 8);
+  g.fillRect(8, 8, 8, 8);
+  return c.toDataURL('image/png');
+}
+
+const CHECKER_URL = makeCheckerTile();
+
 const CHECKER: CSSProperties = {
-  // 单层 conic 平铺。原先是 4 层 linear-gradient 拼棋盘：宿主整站套着 CSS zoom 包裹层，
-  // 缩放非整数时**每一层各自被重采样**，四层的对角边对不齐 → 画布上出现一格一格的
-  // 发丝矩形框（用户 2026-11-01 截图那个"像窗口的框"）。单层没有层间错位可产生。
-  backgroundImage: 'repeating-conic-gradient(#e3e1da 0% 25%, #efede6 0% 50%)',
+  backgroundImage: `url(${CHECKER_URL})`,
   backgroundSize: '16px 16px',
+  imageRendering: 'pixelated',
 };
 
 export function Board() {
@@ -153,25 +178,48 @@ export function Board() {
       strokePath(p);
     }
 
-    if (lastScreen.current.visible && s.tool !== 'fill' && s.tool !== 'pick'
-      && s.tool !== 'selectRect' && s.tool !== 'selectLasso' && s.tool !== 'move') {
-      const r = Math.max(2, (s.size * z) / 2);
+    if (lastScreen.current.visible) {
       const x = lastScreen.current.x;
       const y = lastScreen.current.y;
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(0,0,0,.55)';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(255,255,255,.95)';
-      ctx.lineWidth = 0.75;
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(x, y, 1.2, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(0,0,0,.6)';
-      ctx.fill();
+      // 深 + 浅双描边：画布底色不确定（白画布、深色图层、棋盘透明区）都要看得见。
+      const twoTone = (path: () => void, wDark = 1.5, wLight = 0.75) => {
+        ctx.lineWidth = wDark;
+        ctx.strokeStyle = 'rgba(0,0,0,.55)';
+        path();
+        ctx.lineWidth = wLight;
+        ctx.strokeStyle = 'rgba(255,255,255,.95)';
+        path();
+      };
+      const ringed = s.tool !== 'fill' && s.tool !== 'pick'
+        && s.tool !== 'selectRect' && s.tool !== 'selectLasso' && s.tool !== 'move';
+      if (ringed) {
+        const r = Math.max(2, (s.size * z) / 2);
+        twoTone(() => {
+          ctx.beginPath();
+          ctx.arc(x, y, r, 0, Math.PI * 2);
+          ctx.stroke();
+        });
+        ctx.beginPath();
+        ctx.arc(x, y, 1.2, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0,0,0,.6)';
+        ctx.fill();
+      } else if (s.tool === 'move') {
+        twoTone(() => {
+          ctx.beginPath();
+          ctx.arc(x, y, 6, 0, Math.PI * 2);
+          ctx.stroke();
+        });
+      } else {
+        // 油漆桶 / 取色 / 框选 / 套索：十字准星（系统光标已整块隐藏，必须自己画出来）
+        twoTone(() => {
+          ctx.beginPath();
+          ctx.moveTo(x - 7, y);
+          ctx.lineTo(x + 7, y);
+          ctx.moveTo(x, y - 7);
+          ctx.lineTo(x, y + 7);
+          ctx.stroke();
+        });
+      }
     }
   }, []);
 
@@ -227,18 +275,16 @@ export function Board() {
     drawOverlay();
   };
 
-  const cursor = state.tool === 'move'
-    ? 'move'
-    : state.tool === 'pick' || state.tool === 'fill'
-      || state.tool === 'selectRect' || state.tool === 'selectLasso'
-      ? 'crosshair'
-      : 'none';
+  // 画布上只显示自绘光标（用户 2026-11-04 要求）。系统光标整块隐藏，
+  // 所以 drawOverlay 里每种工具都必须画出自己的光标标记（环 / 圆 / 十字准星），
+  // 否则会「找不到指针在哪」。`cursor` 是可继承属性，加在容器上就覆盖整块画布区。
+  const cursor = 'none';
 
   return (
     <div
       ref={wrapRef}
       className="absolute inset-0 overflow-hidden"
-      style={CHECKER}
+      style={{ ...CHECKER, cursor }}
       onContextMenu={(e) => {
         e.preventDefault();
         editor.openContextMenu(e.clientX, e.clientY);

@@ -23,7 +23,17 @@ import {
   type HighlightRecord,
   type NewHighlight,
 } from './readingHighlights';
+import {
+  getReadingSettings, setReadingSettings, DEFAULT_READING_SETTINGS,
+  READING_FONT_MIN, READING_FONT_MAX, READING_LINE_MIN, READING_LINE_MAX,
+  type ReadingSettings,
+} from './readingSettings';
+import {
+  listBookmarks, addBookmark, removeBookmark, findBookmarkAt,
+  type ReadingBookmark,
+} from './readingBookmarks';
 const { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } = React;
+const hostApi = window.__HOST_API__;
 
 interface ReadingChapter {
   id: string;
@@ -64,6 +74,39 @@ const WINDOW_RADIUS = 2;
 const WINDOW_SIZE = WINDOW_RADIUS * 2 + 1;
 
 type LayoutMode = 'horizontal' | 'vertical' | 'book';
+
+/** 排版设置弹层里的一行「− 值 +」控件 */
+function TypoRow({ label, value, canDec, canInc, onDec, onInc }: {
+  label: string;
+  value: string;
+  canDec: boolean;
+  canInc: boolean;
+  onDec: () => void;
+  onInc: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between py-1">
+      <span className="text-xs text-neutral-500 dark:text-stone-400">{label}</span>
+      <div className="flex items-center gap-1">
+        <button
+          onClick={onDec}
+          disabled={!canDec}
+          className="btn-press w-6 h-6 rounded-md bg-black/5 dark:bg-white/10 text-sm leading-none disabled:opacity-30 hover:bg-black/10 dark:hover:bg-white/20"
+        >
+          −
+        </button>
+        <span className="w-12 text-center text-xs tabular-nums">{value}</span>
+        <button
+          onClick={onInc}
+          disabled={!canInc}
+          className="btn-press w-6 h-6 rounded-md bg-black/5 dark:bg-white/10 text-sm leading-none disabled:opacity-30 hover:bg-black/10 dark:hover:bg-white/20"
+        >
+          +
+        </button>
+      </div>
+    </div>
+  );
+}
 
 interface ChapterBoundary {
   index: number;
@@ -211,6 +254,12 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   const [dragging, setDragging] = useState(false);
   const [noTransition, setNoTransition] = useState(false);
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('horizontal');
+  // 排版设置（字号 / 行距）：只走 localStorage，不写书文件
+  const [readerSettings, setReaderSettingsState] = useState<ReadingSettings>(getReadingSettings);
+  const [showTypoPanel, setShowTypoPanel] = useState(false);
+  const updateReaderSettings = useCallback((patch: Partial<ReadingSettings>) => {
+    setReaderSettingsState(setReadingSettings(patch));
+  }, []);
 
   // 章节追踪
   const [chapterIndex, setChapterIndex] = useState(0);
@@ -321,6 +370,12 @@ const lockTransition = useCallback(() => {
   const highlightsRef = useRef<HighlightRecord[]>([]);
   useEffect(() => { highlightsRef.current = highlights; }, [highlights]);
   const [selToolbar, setSelToolbar] = useState<SelToolbarState | null>(null);
+  // 书签：列表 + 菜单开关（菜单里可跳转/删除，顶部星标记录当前页）
+  const [bookmarks, setBookmarks] = useState<ReadingBookmark[]>(() => listBookmarks(book.filePath));
+  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  // 划词「问 AI」：菜单开关 + 结果面板（解释/翻译/概括都落在这里）
+  const [aiMenuOpen, setAiMenuOpen] = useState(false);
+  const [aiPanel, setAiPanel] = useState<{ quote: string; text: string; loading: boolean } | null>(null);
   const [notePopover, setNotePopover] = useState<{ initial: string } | null>(null);
   const [noteText, setNoteText] = useState('');
   const extHlDeadlineRef = useRef(0);
@@ -328,6 +383,7 @@ const lockTransition = useCallback(() => {
   // 切书 → 重新加载高亮
   useEffect(() => {
     setHighlights(listHighlights(book.filePath));
+    setBookmarks(listBookmarks(book.filePath));
     setSelToolbar(null);
     setNotePopover(null);
     extHlDeadlineRef.current = 0;
@@ -413,64 +469,99 @@ const lockTransition = useCallback(() => {
     }
   }, [externalHighlightId, highlights, combinedHtml, isPaginatedMode, isBookMode, pageWidth, pageCount, pagesPerStep, book.filePath, onExternalHighlightConsumed]);
 
-  // —— 竖版选字 → 工具条（仅竖版；横版/双栏把 pointer 事件留给翻页热区）——
-  const handleVerticalMouseUp = useCallback(() => {
-    if (isPaginatedMode) return;
+  /** 当前选区 → 工具条载荷；没选出字或不在正文里给 null。mouseup 与右键菜单共用这一套计算 */
+  const selectionToolbarPayload = useCallback((): SelToolbarState | null => {
+    const sel = document.getSelection();
+    const container = isPaginatedMode ? contentRef.current : verticalRef.current;
+    const vp = viewportRef.current;
+    if (!sel || !container || !vp) return null;
+    if (sel.isCollapsed || sel.rangeCount === 0) return null;
+    const range = sel.getRangeAt(0);
+    if (!container.contains(range.commonAncestorContainer)) return null;
+    const segments = buildSelectionSegments(container, range, book.chapters);
+    if (segments.length === 0) return null;
+    const vpRect = vp.getBoundingClientRect();
+    const r = range.getBoundingClientRect();
+    return {
+      x: Math.max(60, Math.min(vpRect.width - 60, r.left + r.width / 2 - vpRect.left)),
+      y: Math.max(48, r.top - vpRect.top),
+      mode: 'selection',
+      quote: sel.toString(),
+      segments,
+    };
+  }, [isPaginatedMode, book.chapters]);
+
+  // —— 选字 → 工具条（竖版与横版/双栏同一套；容器按模式取）——
+  const handleSelectionMouseUp = useCallback(() => {
     // 延后一拍：mouseup 时 selection 可能尚未 finalize
     window.setTimeout(() => {
-      const sel = document.getSelection();
-      const container = verticalRef.current;
-      const vp = viewportRef.current;
-      if (!sel || !container || !vp) return;
-      if (sel.isCollapsed || sel.rangeCount === 0) {
-        // 无选区：可能是点击了已有高亮 → 管理工具条（复制/批注/删除）
-        const node = sel.anchorNode;
-        const markEl = (node instanceof Element
-          ? node.closest('mark[data-hl-id]')
-          : node?.parentElement?.closest('mark[data-hl-id]')) as HTMLElement | null;
-        if (markEl) {
-          const id = markEl.getAttribute('data-hl-id') || '';
-          const rec = highlightsRef.current.find((h) => h.id === id) || getHighlight(book.filePath, id);
-          if (rec) {
-            const vpRect = vp.getBoundingClientRect();
-            const r = markEl.getBoundingClientRect();
-            setNotePopover(null);
-            setSelToolbar({
-              x: Math.max(60, Math.min(vpRect.width - 60, r.left + r.width / 2 - vpRect.left)),
-              y: Math.max(48, r.top - vpRect.top),
-              mode: 'existing',
-              quote: rec.quote,
-              segments: [],
-              existingId: rec.id,
-            });
-            return;
-          }
-        }
-        setSelToolbar(null);
+      const payload = selectionToolbarPayload();
+      if (payload) {
         setNotePopover(null);
+        setSelToolbar(payload);
         return;
       }
-      const range = sel.getRangeAt(0);
-      if (!container.contains(range.commonAncestorContainer)) { setSelToolbar(null); return; }
-      const segments = buildSelectionSegments(container, range, book.chapters);
-      if (segments.length === 0) { setSelToolbar(null); return; }
-      const vpRect = vp.getBoundingClientRect();
-      const r = range.getBoundingClientRect();
+      const sel = document.getSelection();
+      const vp = viewportRef.current;
+      if (!sel || !vp) return;
+      // 无选区：可能是点击了已有高亮 → 管理工具条（复制/批注/删除）
+      const node = sel.anchorNode;
+      const markEl = (node instanceof Element
+        ? node.closest('mark[data-hl-id]')
+        : node?.parentElement?.closest('mark[data-hl-id]')) as HTMLElement | null;
+      if (markEl) {
+        const id = markEl.getAttribute('data-hl-id') || '';
+        const rec = highlightsRef.current.find((h) => h.id === id) || getHighlight(book.filePath, id);
+        if (rec) {
+          const vpRect = vp.getBoundingClientRect();
+          const r = markEl.getBoundingClientRect();
+          setNotePopover(null);
+          setSelToolbar({
+            x: Math.max(60, Math.min(vpRect.width - 60, r.left + r.width / 2 - vpRect.left)),
+            y: Math.max(48, r.top - vpRect.top),
+            mode: 'existing',
+            quote: rec.quote,
+            segments: [],
+            existingId: rec.id,
+          });
+          return;
+        }
+      }
+      setSelToolbar(null);
       setNotePopover(null);
-      setSelToolbar({
-        x: Math.max(60, Math.min(vpRect.width - 60, r.left + r.width / 2 - vpRect.left)),
-        y: Math.max(48, r.top - vpRect.top),
-        mode: 'selection',
-        quote: sel.toString(),
-        segments,
-      });
     }, 0);
-  }, [isPaginatedMode, book.chapters, book.filePath]);
+  }, [selectionToolbarPayload, book.filePath]);
+
+  // —— 划词问 AI（走后端 ai_quick_ask：单轮、非流式、不落会话）——
+  const askAiAboutSelection = useCallback(async (mode: 'explain' | 'translate' | 'summarize') => {
+    if (!selToolbar || selToolbar.mode !== 'selection') return;
+    const quote = selToolbar.quote.trim();
+    if (!quote) return;
+    const prompts: Record<typeof mode, string> = {
+      explain: `请用简洁的中文解释下面这段文字的含义；涉及术语时顺带说明。\n\n${quote}`,
+      translate: `请把下面这段文字翻译成另一种语言（中文↔英文互译）。只输出译文，不要解释。\n\n${quote}`,
+      summarize: `请用两三句话概括下面这段文字的要点。\n\n${quote}`,
+    };
+    setAiPanel({ quote, text: '', loading: true });
+    setAiMenuOpen(false);
+    setSelToolbar(null);
+    document.getSelection()?.removeAllRanges();
+    try {
+      const text = await hostApi.invoke<string>('ai_quick_ask', {
+        prompt: prompts[mode],
+        system: '你是阅读助手：回答简洁准确，不复述原文。',
+      });
+      setAiPanel({ quote, text: String(text ?? ''), loading: false });
+    } catch (e) {
+      setAiPanel({ quote, text: `⚠ ${String(e).slice(0, 160)}`, loading: false });
+    }
+  }, [selToolbar]);
 
   // —— 工具条动作 ——
   const refreshHighlights = useCallback(() => {
     setHighlights(listHighlights(book.filePath));
     setSelToolbar(null);
+    setAiMenuOpen(false);
     setNotePopover(null);
     document.getSelection()?.removeAllRanges();
   }, [book.filePath]);
@@ -534,6 +625,40 @@ const lockTransition = useCallback(() => {
     setNoteText(initial);
     setNotePopover({ initial });
   }, [selToolbar]);
+
+  // —— 右键菜单：选中正文 → 四色高亮 / 批注 / 复制原文 ——
+  // 与选字工具条走同一条链：build 时用同一个函数把选区算成 selToolbar，
+  // 条目执行时调的就是点工具条那三个动作 —— 不另开一套落盘逻辑，两边才不会哪天不同步。
+  const menuActionsRef = useRef<{
+    create: (color: HighlightColor) => void;
+    note: () => void;
+    copy: () => void;
+  }>({ create: () => {}, note: () => {}, copy: () => {} });
+  useEffect(() => {
+    menuActionsRef.current = { create: createFromSelection, note: openNotePopover, copy: copySelectionText };
+  }, [createFromSelection, openNotePopover, copySelectionText]);
+
+  useEffect(() => {
+    const register = hostApi?.registerContextMenuProvider;
+    if (typeof register !== 'function') return;
+    return register({
+      id: 'selection',
+      build: (info) => {
+        if (!String(info?.selectionText || '').trim()) return [];
+        const payload = selectionToolbarPayload();
+        // 选区不在正文里（比如右键的是侧栏列表）就别贡献条目，免得给出去高不了
+        if (!payload) return [];
+        setSelToolbar(payload);
+        const items: ContextMenuItem[] = HIGHLIGHT_COLORS.map((c) => ({
+          label: T(`reading.hl.color${c.charAt(0).toUpperCase()}${c.slice(1)}`),
+          run: () => menuActionsRef.current.create(c),
+        }));
+        items.push({ label: T('reading.hl.note'), separatorBefore: true, run: () => menuActionsRef.current.note() });
+        items.push({ label: T('reading.hl.copy'), run: () => menuActionsRef.current.copy() });
+        return items;
+      },
+    });
+  }, [selectionToolbarPayload]);
 
   // ============ 测量页数和章节边界 ============
   // 章节标记已强制 break-before: column（首章除外），故"xx章"标题恒在栏顶，
@@ -721,6 +846,43 @@ const lockTransition = useCallback(() => {
     }
     prevPaginatedRef.current = isPaginatedMode;
   }, [layoutMode, measure, isPaginatedMode, lockTransition]);
+
+  // 字号/行距变化 → 重新分页测量。
+  // measure() 按实际 DOM 的 scrollWidth 算页数与章节边界；字号不改就会沿用旧页数，
+  // 表现为「字变大了一页装不下，但翻页仍按旧页数走」。
+  useEffect(() => {
+    const id = requestAnimationFrame(() => measure());
+    return () => cancelAnimationFrame(id);
+  }, [readerSettings.fontSize, readerSettings.lineHeight, measure]);
+
+  // —— 书签：记录 / 取消当前位置，或跳回某个书签 ——
+  const toggleCurrentBookmark = useCallback(() => {
+    const ch = chapterIndexRef.current;
+    const b = boundariesRef.current.find((x) => x.index === ch);
+    const pageInChapter = Math.max(0, absolutePageRef.current - (b?.startPage ?? 0));
+    const useProgress = !isPaginatedMode;
+    const existing = findBookmarkAt(book.filePath, ch, pageInChapter, useProgress);
+    if (existing) {
+      setBookmarks(removeBookmark(book.filePath, existing.id));
+      return;
+    }
+    const title = book.chapters[ch]?.title || `第 ${ch + 1} 章`;
+    setBookmarks(addBookmark(book.filePath, {
+      chapterIndex: ch,
+      pageInChapter,
+      useProgress,
+      label: useProgress ? title : `${title} · 第 ${pageInChapter + 1} 页`,
+    }));
+  }, [book.filePath, book.chapters, isPaginatedMode]);
+
+  const jumpToBookmark = useCallback((bm: ReadingBookmark) => {
+    // 复用外部跳转同一条通道：设 pendingJump → 把窗口滑到目标章 → 下一帧 measure 消费
+    pendingJumpRef.current = { chapterIndex: bm.chapterIndex, pageInChapter: bm.pageInChapter, useProgress: bm.useProgress };
+    setWindowCenter(bm.chapterIndex);
+    setDisplayedChapter(bm.chapterIndex);
+    requestAnimationFrame(() => measure());
+    setBookmarksOpen(false);
+  }, [measure]);
 
   // 尺寸变化
   useEffect(() => {
@@ -1049,26 +1211,45 @@ const lockTransition = useCallback(() => {
   }, [windowStart, windowEnd, windowCenter, book.chapters.length]);
 
   // ============ 拖拽 ============
+  // 按下时**不能** setPointerCapture：那会把指针从浏览器的选字流程里整个抢走，
+  // 于是「拖动选字」永远变成「拖动翻页」（历史上就是这么坏的，翻页还有边缘热区/方向键/滚轮，
+  // 选字却没有任何替代入口）。现在只记起点，抬手时看「到底选出字了没有」再定这一笔归谁。
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0 || !isPaginatedMode) return;
     dragState.current = { startX: e.clientX, active: true, offset: 0 };
-    setDragging(true);
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   };
   const onPointerMove = (e: React.PointerEvent) => {
     if (!dragState.current.active) return;
-    dragState.current.offset = e.clientX - dragState.current.startX;
-    setDragOffset(dragState.current.offset);
+    const sel = document.getSelection();
+    // 已经选出字 = 这一笔是选文本，连橡皮筋动画都不做，免得看着像要翻页
+    if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+    const offset = e.clientX - dragState.current.startX;
+    dragState.current.offset = offset;
+    if (Math.abs(offset) > 8) {
+      setDragging(true);
+      setDragOffset(offset);
+    }
   };
-  const finishDrag = (e: React.PointerEvent) => {
+  const finishDrag = () => {
     if (!dragState.current.active) return;
     const offset = dragState.current.offset;
     dragState.current.active = false;
+    dragState.current.offset = 0;
     setDragging(false);
     setDragOffset(0);
-    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch {}
+    const sel = document.getSelection();
+    // 唯一判据：抬手时没有选区才翻页；选出字了就交给选字流程（工具条自己会出来）
+    if (sel && !sel.isCollapsed && sel.toString().trim()) return;
     if (offset <= -DRAG_THRESHOLD) nextPage();
     else if (offset >= DRAG_THRESHOLD) prevPage();
+  };
+  // 指针离开阅读区（含拖到窗口外松手，pointerup 收不到）：只复位动画，不翻页
+  const onPointerLeave = () => {
+    if (!dragState.current.active) return;
+    dragState.current.active = false;
+    dragState.current.offset = 0;
+    setDragging(false);
+    setDragOffset(0);
   };
 
   // ============ 渲染 ============
@@ -1086,6 +1267,9 @@ const lockTransition = useCallback(() => {
   const renderChapterIndex = currentBoundary ? currentBoundary.index : chapterIndex;
   const chapterPageCount = currentBoundary ? currentBoundary.endPage - currentBoundary.startPage + 1 : 1;
   const pageInChapterDisplay = currentBoundary ? absolutePage - currentBoundary.startPage + 1 : 1;
+  // 当前位置是否已有书签（顶部星标据此点亮）
+  const bookmarkPage = Math.max(0, absolutePage - (currentBoundary?.startPage ?? 0));
+  const atBookmark = !!findBookmarkAt(book.filePath, chapterIndex, bookmarkPage, !isPaginatedMode);
 
   if (book.chapters.length === 0) {
     return (
@@ -1099,7 +1283,7 @@ const lockTransition = useCallback(() => {
   }
 
   return (
-    <div className="h-full flex flex-col bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top">
+    <div className="h-full flex flex-col relative bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top">
       {/* 顶部栏 */}
       <div className="shrink-0 px-6 py-3 border-b border-neutral-200/60 dark:border-stone-700/50 flex items-center gap-3">
         <button onClick={onBack}
@@ -1129,7 +1313,137 @@ const lockTransition = useCallback(() => {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
           </button>
         </div>
+        {/* 排版设置：字号 / 行距。此前字号写死在组件内联样式里，读者无法调节 */}
+        <button
+          onClick={() => setShowTypoPanel((v) => !v)}
+          className={`btn-press w-8 h-8 flex items-center justify-center rounded-lg text-xs font-semibold transition-colors flex-shrink-0 ${showTypoPanel ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm' : 'bg-black/5 dark:bg-white/10 text-neutral-500 dark:text-stone-400 hover:text-neutral-700 dark:hover:text-stone-200'}`}
+          title="字号与行距"
+        >
+          Aa
+        </button>
+        {/* 书签：星标记录/取消当前位置；旁边的按钮展开已存书签列表 */}
+        <button
+          onClick={toggleCurrentBookmark}
+          className={`btn-press w-8 h-8 flex items-center justify-center rounded-lg transition-colors flex-shrink-0 ${
+            atBookmark
+              ? 'text-amber-500 bg-amber-50 dark:bg-amber-900/30'
+              : 'bg-black/5 dark:bg-white/10 text-neutral-500 dark:text-stone-400 hover:text-amber-500'
+          }`}
+          title={atBookmark ? '取消当前页书签' : '收藏当前页'}
+          aria-pressed={atBookmark}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill={atBookmark ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2l2.9 6.6 7.1.6-5.4 4.7 1.6 7-6.2-3.7-6.2 3.7 1.6-7L2 9.2l7.1-.6z" />
+          </svg>
+        </button>
+        <button
+          onClick={() => setBookmarksOpen((v) => !v)}
+          className={`btn-press h-8 px-2 flex items-center gap-1 rounded-lg text-[11px] transition-colors flex-shrink-0 ${
+            bookmarksOpen
+              ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm'
+              : 'bg-black/5 dark:bg-white/10 text-neutral-500 dark:text-stone-400 hover:text-neutral-700 dark:hover:text-stone-200'
+          }`}
+          title="书签列表"
+        >
+          {bookmarks.length}
+        </button>
       </div>
+
+      {/* 书签列表弹层：跳转 / 删除 */}
+      {bookmarksOpen && (
+        <div className="absolute right-6 top-16 z-40 w-72 max-h-[50vh] overflow-y-auto rounded-2xl bg-white dark:bg-stone-800 shadow-xl border border-black/10 dark:border-white/10 p-2">
+          <div className="flex items-center justify-between px-1 pb-1">
+            <span className="text-xs font-semibold text-neutral-700 dark:text-stone-200">书签</span>
+            <button
+              onClick={() => setBookmarksOpen(false)}
+              className="text-[11px] text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-300"
+            >
+              关闭
+            </button>
+          </div>
+          {bookmarks.length === 0 ? (
+            <p className="px-1 py-2 text-[11px] text-neutral-400 dark:text-stone-500">还没有书签：点顶部星标记录当前页。</p>
+          ) : bookmarks.map((bm) => (
+            <div key={bm.id} className="flex items-center gap-1 rounded-lg px-1 py-1 hover:bg-black/5 dark:hover:bg-white/10">
+              <button
+                onClick={() => jumpToBookmark(bm)}
+                className="min-w-0 flex-1 truncate text-left text-xs text-neutral-600 dark:text-stone-300"
+                title={bm.label}
+              >
+                {bm.label}
+              </button>
+              <button
+                onClick={() => setBookmarks(removeBookmark(book.filePath, bm.id))}
+                className="shrink-0 text-[11px] text-neutral-400 hover:text-rose-500"
+                title="删除书签"
+              >
+                删除
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 排版设置弹层：改字号/行距后重新分页（见 measure 相关 effect） */}
+      {showTypoPanel && (
+        <div className="absolute right-6 top-16 z-40 w-64 rounded-2xl bg-white dark:bg-stone-800 shadow-xl border border-black/10 dark:border-white/10 p-3 text-neutral-700 dark:text-stone-200">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-semibold">排版</span>
+            <button onClick={() => setShowTypoPanel(false)} className="text-[11px] text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-300">关闭</button>
+          </div>
+          <TypoRow
+            label="字号"
+            value={`${readerSettings.fontSize}px`}
+            canDec={readerSettings.fontSize > READING_FONT_MIN}
+            canInc={readerSettings.fontSize < READING_FONT_MAX}
+            onDec={() => updateReaderSettings({ fontSize: readerSettings.fontSize - 1 })}
+            onInc={() => updateReaderSettings({ fontSize: readerSettings.fontSize + 1 })}
+          />
+          <TypoRow
+            label="行距"
+            value={readerSettings.lineHeight.toFixed(2)}
+            canDec={readerSettings.lineHeight > READING_LINE_MIN + 0.001}
+            canInc={readerSettings.lineHeight < READING_LINE_MAX - 0.001}
+            onDec={() => updateReaderSettings({ lineHeight: Number((readerSettings.lineHeight - 0.05).toFixed(2)) })}
+            onInc={() => updateReaderSettings({ lineHeight: Number((readerSettings.lineHeight + 0.05).toFixed(2)) })}
+          />
+          <button
+            onClick={() => updateReaderSettings(DEFAULT_READING_SETTINGS)}
+            className="btn-press mt-2 w-full rounded-lg bg-black/5 dark:bg-white/10 py-1.5 text-xs hover:bg-black/10 dark:hover:bg-white/20 transition-colors"
+          >
+            恢复默认
+          </button>
+        </div>
+      )}
+
+      {/* 划词问 AI 的结果面板：固定右下角，可复制/关闭 */}
+      {aiPanel && (
+        <div className="absolute right-6 bottom-6 z-40 w-80 max-h-[45vh] overflow-y-auto rounded-2xl bg-white dark:bg-stone-800 shadow-xl border border-black/10 dark:border-white/10 p-3">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs font-semibold text-neutral-700 dark:text-stone-200">AI</span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => { try { void navigator.clipboard?.writeText(aiPanel.text); } catch { /* 忽略 */ } }}
+                className="text-[11px] text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-300"
+              >
+                复制
+              </button>
+              <button
+                onClick={() => setAiPanel(null)}
+                className="text-[11px] text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-300"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+          <div className="mb-2 max-h-24 overflow-y-auto rounded-lg bg-black/5 dark:bg-white/10 px-2 py-1 text-[11px] whitespace-pre-wrap text-neutral-500 dark:text-stone-400">
+            {aiPanel.quote}
+          </div>
+          <div className="text-xs leading-relaxed whitespace-pre-wrap text-neutral-700 dark:text-stone-200">
+            {aiPanel.loading ? '思考中…' : aiPanel.text}
+          </div>
+        </div>
+      )}
 
       {/* 阅读区 */}
       <div
@@ -1141,6 +1455,8 @@ const lockTransition = useCallback(() => {
         onPointerMove={onPointerMove}
         onPointerUp={finishDrag}
         onPointerCancel={finishDrag}
+        onPointerLeave={onPointerLeave}
+        onMouseUp={handleSelectionMouseUp}
       >
         {isPaginatedMode ? (
           <>
@@ -1167,7 +1483,8 @@ const lockTransition = useCallback(() => {
                     padding: `24px ${PAD}px`,
                     transform: `translateX(${translate}px)`,
                     transition: dragging || noTransition ? 'none' : 'transform 0.28s ease',
-                    '--reader-font-size': '16px',
+                    '--reader-font-size': `${readerSettings.fontSize}px`,
+                    '--reader-line-height': String(readerSettings.lineHeight),
                   } as Record<string, string | number>}
                   dangerouslySetInnerHTML={{ __html: combinedHtml }}
                 />
@@ -1191,7 +1508,8 @@ const lockTransition = useCallback(() => {
                   padding: `24px ${PAD}px`,
                   transform: `translateX(${translate}px)`,
                   transition: dragging || noTransition ? 'none' : 'transform 0.28s ease',
-                  '--reader-font-size': '17px',
+                  '--reader-font-size': `${readerSettings.fontSize}px`,
+                  '--reader-line-height': String(readerSettings.lineHeight),
                 } as Record<string, string | number>}
                 dangerouslySetInnerHTML={{ __html: combinedHtml }}
               />
@@ -1205,12 +1523,13 @@ const lockTransition = useCallback(() => {
           </>
         ) : (
           /* 竖版：多章拼接滚动（与横板共用 combinedHtml，切换模式不闪烁）*/
-          <div ref={verticalRef} className="h-full overflow-y-auto relative" onScroll={onVerticalScroll} onMouseUp={handleVerticalMouseUp}>
+          <div ref={verticalRef} className="h-full overflow-y-auto relative" onScroll={onVerticalScroll}>
             <div
               className="reader-vertical max-w-2xl mx-auto"
               style={{
                 padding: `24px ${PAD}px`,
-                '--reader-font-size': '17px',
+                '--reader-font-size': `${readerSettings.fontSize}px`,
+                '--reader-line-height': String(readerSettings.lineHeight),
               } as Record<string, string | number>}
               dangerouslySetInnerHTML={{ __html: combinedHtml }}
             />
@@ -1237,6 +1556,35 @@ const lockTransition = useCallback(() => {
                 />
               ))}
               {selToolbar.mode === 'selection' && <div className="w-px h-4 bg-black/10 dark:bg-white/10 mx-0.5" />}
+              {/* AI：选中段落解释 / 翻译 / 概括。菜单小，避免直接误触发一次模型调用 */}
+              {selToolbar.mode === 'selection' && (
+                <div className="relative">
+                  <button
+                    onClick={() => setAiMenuOpen((v) => !v)}
+                    title="问 AI"
+                    className="w-6 h-6 flex items-center justify-center rounded-md text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/10 transition-colors text-[11px] font-semibold"
+                  >
+                    AI
+                  </button>
+                  {aiMenuOpen && (
+                    <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 z-40 w-28 rounded-lg bg-white dark:bg-stone-800 shadow-lg border border-black/10 dark:border-white/10 py-1">
+                      {([
+                        ['explain', '解释'],
+                        ['translate', '翻译'],
+                        ['summarize', '概括'],
+                      ] as const).map(([mode, label]) => (
+                        <button
+                          key={mode}
+                          onClick={() => void askAiAboutSelection(mode)}
+                          className="block w-full px-3 py-1.5 text-left text-xs text-neutral-600 dark:text-stone-300 hover:bg-black/5 dark:hover:bg-white/10"
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               <button onClick={openNotePopover} title={T('reading.hl.note')}
                 className="w-6 h-6 flex items-center justify-center rounded-md text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/10 transition-colors">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

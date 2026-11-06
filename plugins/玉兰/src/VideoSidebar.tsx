@@ -4,8 +4,9 @@
 const React = window.__HOST_REACT__;
 import { T, useLang } from '../../_shared/pluginRuntime';
 const { useMemo, useCallback } = React;
-const { ModuleSidebarShell, ContextMenuItem, ContextMenuSeparator } = window.__HOST_UI__ || {};
+const { ModuleSidebarShell, ContextMenuItem, ContextMenuSeparator, BarChart3 } = window.__HOST_UI__ || {};
 import { DrillDownSidebarList, type DrillDownItem } from '../../_shared/DrillDownSidebarList';
+import { formatTime } from '../../_shared/utils';
 
 interface VideoFolder {
   folderPath: string;
@@ -34,6 +35,13 @@ interface VideoSidebarProps {
   onOpenSettings: () => void;
   rootPaths: string[];
   onOpenCloud: () => void;
+  /** 有续播进度的视频（按最近观看倒序）；为空则不显示「继续观看」区块 */
+  resumeItems?: Array<{ filePath: string; fileName: string; position: number }>;
+  onResume?: (filePath: string) => void;
+  /** 打开「统计」页（本地视频库概览）；不传则不显示该入口 */
+  onOpenStats?: () => void;
+  /** 统计页是否正在显示（侧栏按钮高亮，与音乐/阅读/图片一致） */
+  statsActive?: boolean;
 }
 
 // 云形图标（切换按钮 logo）
@@ -93,6 +101,7 @@ export function VideoSidebar(props: VideoSidebarProps) {
     onFolderClick, onVideoClick, onBackToFolders,
     onChangeRoot, onRescan,   onOpenSettings,
   onOpenCloud,
+  resumeItems = [], onResume, onOpenStats, statsActive,
   } = props;
 
   const isStateB = selectedFolder !== null;
@@ -151,6 +160,53 @@ export function VideoSidebar(props: VideoSidebarProps) {
       secondaryEmptyText: T('video.sidebar.noVideos'),
   });
 
+  // 「继续观看」：只在文件夹列表（状态 A）显示，最多 5 条。
+  // 数据来自播放器的续播进度（localStorage），点一下直接进播放器接着看。
+  const resumeBlock = !isStateB && resumeItems.length > 0
+    ? React.createElement('div', { className: 'px-1 pb-2' },
+        React.createElement('div', {
+          className: 'text-[10px] font-semibold uppercase tracking-wider text-neutral-400 dark:text-stone-500 px-2 py-1',
+        }, '继续观看'),
+        resumeItems.slice(0, 5).map((item) => React.createElement('button', {
+          key: item.filePath,
+          onClick: () => onResume?.(item.filePath),
+          className: 'btn-press w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-black/5 dark:hover:bg-white/10 transition-colors',
+          title: item.filePath,
+        },
+          React.createElement('span', {
+            className: 'w-1.5 h-1.5 rounded-full flex-shrink-0',
+            style: { background: 'var(--element-bg)' },
+          }),
+          React.createElement('span', {
+            className: 'min-w-0 flex-1 truncate text-xs text-neutral-600 dark:text-stone-300',
+          }, item.fileName),
+          React.createElement('span', {
+            className: 'shrink-0 text-[10px] tabular-nums text-neutral-400 dark:text-stone-500',
+          }, formatTime(item.position)),
+        ))
+      )
+    : null;
+
+  const childrenWithResume = resumeBlock
+    ? React.createElement(React.Fragment, null, resumeBlock, listContent)
+    : listContent;
+
+  // 侧栏底部统计按钮：与音乐/阅读/图片模块同一模式（footer 区、icon-only、18px、激活高亮）
+  const statsButton = onOpenStats
+    ? React.createElement('button', {
+        key: 'open-stats',
+        onClick: () => onOpenStats(),
+        title: statsActive ? '关闭统计' : '统计',
+        'aria-label': statsActive ? '关闭统计' : '统计',
+        className: `p-2 rounded-lg transition-colors ${
+          statsActive
+            ? 'text-[var(--element-color-raw)] bg-black/5 dark:bg-white/5'
+            : 'text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5'
+        }`,
+        children: BarChart3 ? React.createElement(BarChart3, { size: 18, strokeWidth: 2 }) : '📊',
+      })
+    : null;
+
   return ModuleSidebarShell
     ? React.createElement(ModuleSidebarShell, {
         moduleId: 'video',
@@ -159,6 +215,7 @@ export function VideoSidebar(props: VideoSidebarProps) {
         icon: React.createElement(VideoIcon),
         title: T('video.title'),
         onOpenModuleSettings: onOpenSettings,
+        footerExtra: statsButton,
         searchQuery,
         onSearchChange,
         searchPlaceholder: isStateB ? T('video.sidebar.searchVideos') : T('video.sidebar.searchFolders'),
@@ -179,7 +236,7 @@ export function VideoSidebar(props: VideoSidebarProps) {
             onClick: onRescan,
           },
         ],
-        children: listContent,
+        children: childrenWithResume,
       })
     : null;
 }

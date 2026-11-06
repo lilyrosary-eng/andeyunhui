@@ -150,10 +150,20 @@ export function IngestDialog({ onIngested }: IngestDialogProps) {
 
       <button
         onClick={doIngest}
-        disabled={busy}
+        // 没选文件/没粘贴就按下只会得到「请先选择文件」，看起来像接线坏了（2026-11-05 实测踩过）。
+        // 直接把按钮置灰并说明缺什么，错误就没有机会被误读成故障。
+        disabled={busy || (mode === 'file' ? !filePath.trim() : !pasted.trim())}
         className="btn-press px-4 py-2 rounded-lg bg-[var(--element-bg)] text-white text-sm disabled:opacity-50"
       >
-        {busy ? '摄取中…' : '摄取到知识库'}
+        {busy
+          ? '摄取中…'
+          : mode === 'file'
+            ? filePath.trim()
+              ? '摄取到知识库'
+              : '请先选择文件'
+            : pasted.trim()
+              ? '摄取到知识库'
+              : '请先粘贴文本'}
       </button>
 
       {msg && (

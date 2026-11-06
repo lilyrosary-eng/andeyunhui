@@ -25,7 +25,7 @@ function SliderRow(props: {
         step={step}
         value={value}
         onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="flex-1 accent-emerald-500"
+        className="flex-1 accent-[var(--element-bg)]"
       />
       <span className="w-8 text-right text-[10px] tabular-nums text-neutral-400 dark:text-stone-500">{display}</span>
     </div>

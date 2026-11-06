@@ -1,7 +1,8 @@
 /// <reference path="../../global.d.ts" />
 // 视频插件入口
-import { VideoPlayer } from './VideoPlayer';
+import { VideoPlayer, PROGRESS_KEY_PREFIX, readVideoProgress } from './VideoPlayer';
 import { VideoSidebar } from './VideoSidebar';
+import { LocalVideoStats } from './LocalVideoStats';
 import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 
@@ -342,6 +343,8 @@ function VideoModule() {
   const [showSettings, setShowSettings] = useState(false);
   const [rescanCounter, setRescanCounter] = useState(0);
   const [playingFile, setPlayingFile] = useState<VideoFile | null>(null);
+  // 本地视频库统计页（覆盖主内容区；与网络视频那份统计相互独立）
+  const [showLibStats, setShowLibStats] = useState(false);
   // 铃兰传来的临时 MV 列表（纯内存，不持久化、关闭软件即销毁）。
   const [mvTemp, setMvTemp] = useState<VideoFile[]>([]);
   const [settings, setSettings] = useState<VideoSettings>(loadSettings);
@@ -463,8 +466,42 @@ function VideoModule() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 「继续观看」的刷新信号：播放器把进度直接写 localStorage（不经 React state），
+  // 所以它写完后派发 andy:video-progress，这里 bump 一个计数器触发重新扫描。
+  const [progressTick, setProgressTick] = useState(0);
+  useEffect(() => {
+    const onProgress = () => setProgressTick((n) => n + 1);
+    window.addEventListener('andy:video-progress', onProgress);
+    return () => window.removeEventListener('andy:video-progress', onProgress);
+  }, []);
+
+  // 「继续观看」：扫 localStorage 的续播进度（key = 前缀 + 文件绝对路径）。
+  // 只列播放超过 3 秒的条目，按最近观看时间倒序；依赖 playingFile + progressTick。
+  const resumeItems = useMemo(() => {
+    const out: Array<{ filePath: string; fileName: string; position: number; at: number }> = [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key || !key.startsWith(PROGRESS_KEY_PREFIX)) continue;
+        const { pos, at } = readVideoProgress(key);
+        if (pos < 3) continue;
+        const filePath = key.slice(PROGRESS_KEY_PREFIX.length);
+        out.push({ filePath, fileName: filePath.split(/[\\/]/).pop() || filePath, position: pos, at });
+      }
+    } catch { /* 隐私模式/配额异常：静默降级为空 */ }
+    return out.sort((a, b) => b.at - a.at).slice(0, 8);
+  }, [playingFile, progressTick]);
+
+  // 点击「继续观看」→ 直接进播放器。本地文件按路径构造最小 VideoFile（sizeBytes 0 = 未知）。
+  const handleResume = useCallback((filePath: string) => {
+    const fileName = filePath.split(/[\\/]/).pop() || filePath;
+    setShowLibStats(false);
+    setPlayingFile({ filePath, fileName, sizeBytes: 0 });
+  }, []);
+
   // 点击视频文件 → 播放（状态 B → 播放器）
   const handleVideoClick = useCallback((file: VideoFile) => {
+    setShowLibStats(false);
     setPlayingFile(file);
   }, []);
 
@@ -650,6 +687,15 @@ function VideoModule() {
       });
     }
 
+    // 本地视频库统计（覆盖主内容区；点文件夹/视频会自动关闭）
+    if (showLibStats) {
+      return React.createElement(LocalVideoStats, {
+        folders: visibleFolders,
+        resumeCount: resumeItems.length,
+        onClose: () => setShowLibStats(false),
+      });
+    }
+
     // 网络视频在线视图（优先级高于本地浏览/播放，覆盖主内容区；播放时由 handleOnlinePlay 退出）
     if (onlinePlatformId) {
       return React.createElement(OnlineVideoView, {
@@ -727,6 +773,10 @@ function VideoModule() {
         onOpenSettings: handleOpenModuleSettings,
         rootPaths,
         onOpenCloud: () => setShowCloudDrawer(true),
+        resumeItems,
+        onResume: handleResume,
+        onOpenStats: () => setShowLibStats((v) => !v),
+        statsActive: showLibStats,
       })}
       <div className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917]">
         {renderContent()}
