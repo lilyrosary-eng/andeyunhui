@@ -57,9 +57,6 @@ React + Rust，基于 Tauri v2 构建，同一套代码同时产出 Windows 桌�
 
 ## 截图 / 演示
 
-> 仓库内暂未提交截图资源（`docs/screenshots/` 历史上被 `.gitignore` 排除，导致这里引用的
-> 五张图在 GitHub 上全是裂图）。已改为**按约定路径占位**：把截图放到下表路径并提交，
-> 本节即自动生效，无需再改 README。
 >
 > | 内容 | 约定路径 |
 > | --- | --- |
@@ -70,8 +67,6 @@ React + Rust，基于 Tauri v2 构建，同一套代码同时产出 Windows 桌�
 > | 桌宠互动 | `docs/screenshots/deskpet.gif` |
 > | 莲花启动动画（浅色 / 深色） | `docs/screenshots/boot-light.gif` / `docs/screenshots/boot.gif` |
 >
-> 想要最快看到实际效果：`pnpm tauri dev` 后按 `Ctrl+Shift+S` 试全局截图，在设置里开启桌宠与悬浮歌词。
-> （另可运行 `pnpm test` 与 `cargo test`，CI 已覆盖两条链路。）
 
 ## 技术栈
 
