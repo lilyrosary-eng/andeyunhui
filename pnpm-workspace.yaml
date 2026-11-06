@@ -3,3 +3,16 @@ packages:
 allowBuilds:
   esbuild: true
   protobufjs: true
+
+# 跨系统共存（2026-11-06）：这个仓库在 Windows 盘上被 Windows / Linux 两端共用，
+# Windows 端 pnpm install 时按当前平台裁剪，会把 Linux 的原生包
+# （@rollup/rollup-linux-x64-gnu、@esbuild/linux-x64、@tauri-apps/cli-linux-x64-gnu）
+# 全部删掉，导致 Linux 侧 vite 启动即崩（MODULE_NOT_FOUND / "installed for another platform"）。
+# 加上下面的断言后，任何一端 install 都会把另一端的平台包一并保留。
+supportedArchitectures:
+  os:
+    - current
+    - linux
+  cpu:
+    - current
+    - x64
