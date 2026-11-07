@@ -718,10 +718,14 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
   return (
     <div className={`flex-1 flex flex-col h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top image-viewer-root${viewMode === 'full' && chromeHidden ? ' image-viewer-full-bleed' : ''}`}>
       {/* 顶部工具栏（完整模式可点击图片中心隐藏，沉浸阅读） */}
+      {/* 三段布局：左(标题) / 中(模式切换，真正居中) / 右(收藏·信息·缩放·页码)。
+          原先用 justify-between + 右侧无容器 ⇒ 收藏/信息/缩放/页码各自成为一个
+          flex item，justify-between 把空间摊到它们之间 ⇒ 按钮彼此被撑得很远。
+          改成左右各占 flex-1，中间自然居中，且右侧按钮聚在一处。 */}
       {!(viewMode === 'full' && chromeHidden) && (
-      <div className="relative flex items-center justify-between px-4 py-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-sm">
+      <div className="flex items-center px-4 py-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-sm">
         {/* 左侧：返回 + 标题 */}
-        <div className="flex items-center gap-3">
+        <div className="flex flex-1 items-center gap-3 min-w-0">
           <button onClick={onBack} className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <polyline points="15 18 9 12 15 6" />
@@ -732,10 +736,8 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
           </div>
         </div>
 
-        {/* 中间：模式切换 + 随机 + 幻灯片。
-            绝对居中：原先放在 justify-between 的三段里，块的位置虽在中间，
-            但块内内容左对齐（flex items-center 没有 justify-center），视觉上偏左。 */}
-        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-0.5">
+        {/* 中间：模式切换 + 随机 + 幻灯片（左右各占 flex-1 ⇒ 这里自然居中） */}
+        <div className="flex items-center gap-0.5 flex-shrink-0">
           <div className="flex items-center gap-0.5 bg-black/5 dark:bg-white/5 rounded-lg p-0.5">
             {MODES.map(mode => (
               <button
@@ -836,7 +838,8 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
           </select>
         </div>
 
-        {/* 右侧：信息 + 缩放比例（点击复位）+ 序号（点击可输入页码跳转） */}
+        {/* 右侧：收藏 + 信息 + 缩放比例（点击复位）+ 序号（点击可输入页码跳转） */}
+        <div className="flex flex-1 items-center justify-end gap-0.5 min-w-0">
         {/* 收藏当前图片：实心=已收藏，空心=未收藏 */}
         {onToggleFavorite && currentPath && (
           <button
@@ -888,6 +891,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
         {viewMode === 'full' && (
           <PageIndicator index={currentIndex} total={shuffledImages.length} onJump={(i) => setCurrentIndex(i)} />
         )}
+        </div>
       </div>
       )}
 
