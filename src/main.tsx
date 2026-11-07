@@ -223,3 +223,34 @@ async function bootstrap() {
 }
 
 bootstrap();
+
+// ===== 临时性能探针（2026-11-07）=====
+// 目的：量化 Linux 上主窗的实际帧率与长任务，判断"卡"是掉帧还是主线程阻塞。
+// 排查结束后删除。日志前缀 MAIN-FPS-PROBE。
+if (typeof window !== 'undefined' && !window.location.search.includes('floating=')) {
+  let frames = 0;
+  let last = performance.now();
+  let longTasks = 0;
+  try {
+    const po = new PerformanceObserver((list) => {
+      longTasks += list.getEntries().length;
+    });
+    po.observe({ entryTypes: ['longtask'] });
+  } catch {
+    /* 部分引擎不支持 longtask */
+  }
+  const tick = () => {
+    frames += 1;
+    const now = performance.now();
+    if (now - last >= 2000) {
+      const fps = Math.round((frames * 1000) / (now - last));
+      // eslint-disable-next-line no-console
+      console.warn(`[MAIN-FPS-PROBE] fps=${fps} longtask=${longTasks}`);
+      frames = 0;
+      longTasks = 0;
+      last = now;
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}

@@ -973,6 +973,21 @@ fn main() {
         })
         .setup(|app| {
             app.manage(PendingOpenFiles(Default::default()));
+            // 透明窗口在 Wayland 下的已知问题：窗口失焦/被遮挡后合成器丢弃 buffer，
+            // 回来时 WebKit 不主动重绘 ⇒ 用户看到"没内容了"（2026-11-07 实测）。
+            // 这里在焦点回来、以及从完全遮挡状态恢复时强制重绘一次。
+            #[cfg(target_os = "linux")]
+            {
+                if let Some(w) = app.get_webview_window("main") {
+                    if let Ok(gtk_win) = w.gtk_window() {
+                        use gtk::prelude::*;
+                        gtk_win.connect_focus_in_event(|win, _| {
+                            win.queue_draw();
+                            gtk::glib::Propagation::Proceed
+                        });
+                    }
+                }
+            }
             // 数据根（可配置存放位置）：必须在任意 app_data 子路径被使用前维护 junction / 执行 pending 迁移
             andeyunhui_lib::data_location::prepare_data_root(&app.handle().clone());
             // 容量兜底表：优先用数据目录下的覆盖文件（可不必改代码就更新），没有则用编译期内嵌默认。
@@ -1723,6 +1738,8 @@ fn main() {
             // ========== 核心：笔记 CRUD ==========
             get_all_notes,
             search_notes_content,
+            // 笔记「网络」：arXiv / HuggingFace / GitHub / Semantic Scholar 官方接口
+            note_web_search,
             get_note_content,
             save_note,
             // 一期 AIWork / AIWorkflow 后端编排命令
@@ -1924,6 +1941,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             andeyunhui_lib::embedded_browser::browser_navigate,
             andeyunhui_lib::embedded_browser::browser_sniff,
             andeyunhui_lib::embedded_browser::browser_current_url,
+            andeyunhui_lib::embedded_browser::browser_focus,
             andeyunhui_lib::embedded_browser::browser_close,
             // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========
             smtc_update,
@@ -2299,6 +2317,8 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             vault_commands::vault_create,
             vault_commands::vault_unlock,
             vault_commands::vault_unlock_device,
+            vault_commands::vault_unlock_biometric,
+            vault_commands::vault_set_biometric_required,
             vault_commands::vault_lock,
             vault_commands::vault_change_password,
             vault_commands::vault_rotate_recovery_codes,
@@ -2311,6 +2331,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             vault_commands::vault_empty_trash,
             vault_commands::vault_mark_used,
             vault_commands::vault_set_auto_lock,
+            vault_commands::vault_destroy,
             vault_commands::vault_audit_log,
             vault_commands::vault_export_json,
             vault_commands::vault_import_items,
