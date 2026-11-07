@@ -72,6 +72,27 @@ void main() {
   outColor = vec4(c.rgb, c.a * u_alpha);
 }`;
 
+/**
+ * 只读图片头部拿尺寸：`onload` 在元数据就绪时即可触发，不必等整像素解码。
+ * 返回 null 表示读取失败（调用方回退到解码后取尺寸）。
+ */
+function readImageHeaderSize(blob: Blob): Promise<{ width: number; height: number } | null> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    const done = (v: { width: number; height: number } | null) => {
+      img.onload = null;
+      img.onerror = null;
+      URL.revokeObjectURL(url);
+      resolve(v);
+    };
+    img.onload = () =>
+      done(img.naturalWidth > 0 ? { width: img.naturalWidth, height: img.naturalHeight } : null);
+    img.onerror = () => done(null);
+    img.src = url;
+  });
+}
+
 export class WebglImageCanvas {
   private gl: WebGL2RenderingContext | null = null;
   private program: WebGLProgram | null = null;
@@ -237,24 +258,31 @@ export class WebglImageCanvas {
       if (typeof src === 'string' || src instanceof Blob) {
         const blob = typeof src === 'string' ? await (await fetch(src)).blob() : src;
         if (resizeOpts.resizeWidth) {
-          const probe = await createImageBitmap(blob);
-          this.srcWidth = probe.width;
-          this.srcHeight = probe.height;
-          const ratio = Math.min(
-            resizeOpts.resizeWidth / probe.width,
-            resizeOpts.resizeHeight! / probe.height,
-            1, // 不放大
-          );
-          const target: ImageBitmapOptions =
-            ratio < 1
-              ? {
-                  resizeWidth: Math.max(1, Math.round(probe.width * ratio)),
-                  resizeHeight: Math.max(1, Math.round(probe.height * ratio)),
-                  resizeQuality: 'high',
-                }
-              : {};
-          probe.close?.();
-          bitmap = await createImageBitmap(blob, target);
+          // 只读**头部**拿原始尺寸（onload 即可，不必 decode()），
+          // 之前用 createImageBitmap(blob) 探尺寸等于整图解码一次、再解码一次，
+          // 加载耗时直接翻倍。
+          const dim = await readImageHeaderSize(blob);
+          if (dim) {
+            this.srcWidth = dim.width;
+            this.srcHeight = dim.height;
+            const ratio = Math.min(
+              resizeOpts.resizeWidth / dim.width,
+              resizeOpts.resizeHeight! / dim.height,
+              1, // 不放大
+            );
+            bitmap =
+              ratio < 1
+                ? await createImageBitmap(blob, {
+                    resizeWidth: Math.max(1, Math.round(dim.width * ratio)),
+                    resizeHeight: Math.max(1, Math.round(dim.height * ratio)),
+                    resizeQuality: 'high',
+                  })
+                : await createImageBitmap(blob);
+          } else {
+            bitmap = await createImageBitmap(blob);
+            this.srcWidth = bitmap.width;
+            this.srcHeight = bitmap.height;
+          }
         } else {
           bitmap = await createImageBitmap(blob);
           this.srcWidth = bitmap.width;
@@ -262,6 +290,8 @@ export class WebglImageCanvas {
         }
       } else {
         bitmap = src;
+        this.srcWidth = bitmap.width;
+        this.srcHeight = bitmap.height;
       }
     } catch (err) {
       console.error('[webgl] 解码失败：', err);

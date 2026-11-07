@@ -50,6 +50,13 @@ export const ZOOM_NOTCH = 1.15;
 /** 浏览器滚轮一档大约 100px；用于把 deltaY 换算成档数。 */
 /** 多少像素算「一档」；调小 = 更灵敏。100 → 70（同批调整） */
 export const ZOOM_NOTCH_PX = 70;
+
+/**
+ * 连续滚轮时「一档」走完的时长（毫秒）。
+ * 越小越跟手、越大越平滑。改为固定值而非按事件间隔推算（2026-11-07，
+ * 原推算方式在慢速滚动时会让动画明显滞后，用户反馈"黏滞"）。
+ */
+export const ZOOM_FOLLOW_MS = 55;
 /** 单档缓动的基准时长（ms）。 */
 const ZOOM_ANIM_MS = 110;
 /** 落后越多（连续滚轮把目标推得很远）时长越短，最先追回来。 */
@@ -268,10 +275,12 @@ export function useZoomPan(
     if (gapMs != null && gapMs > 0 && gapMs <= ZOOM_FOLLOW_GAP_MS) {
       const prevTarget = currentTarget > 0 ? currentTarget : 1;
       const logInc = Math.abs(Math.log(toScale / prevTarget));
-      const prevRate = animRef.current?.mode === 'follow' ? animRef.current.rate : 0;
-      const raw = logInc > 1e-6 ? logInc / gapMs : prevRate;
-      // 速度做一点平滑，滚轮间隔抖动时不会一档快一档慢。
-      const rate = prevRate > 0 ? prevRate * 0.4 + raw * 0.6 : raw;
+      // 速度**固定**为一档 / ZOOM_FOLLOW_MS，不再按「变化量 ÷ 事件间隔」推算。
+      // 原做法的问题：滚得慢 ⇒ gapMs 大 ⇒ rate 小 ⇒ 动画拖后腿，手感"黏"。
+      // 固定速度后，无论滚快滚慢，每档都在同样的时间里走完，像 Loupe 那样跟手。
+      const rate = Math.log(ZOOM_NOTCH) / ZOOM_FOLLOW_MS;
+      void logInc;
+      void gapMs;
       const now = performance.now();
       const prev = animRef.current;
       // 跟随动画已在跑：原地换目标/锚点，不重置时钟 —— 否则每来一档都重开一帧的
