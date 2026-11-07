@@ -287,7 +287,8 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
           return src;
         })
         .catch(() => null);
-    setDisplaySrc('');
+    // **不要清空 displaySrc**：清空会让 <img> 短暂无图 → 表现为「滚动时重新加载」
+    // 的闪烁。保留上一张直到新显示层到达即可（key 变化会重挂载，肉眼无感）。
     // 直接要 2560px 显示层。之前试过"先 200px 再按需换高清"：
     // 既没缓解卡顿（根因是整图解码，与缩略图尺寸无关），又让画面长期停在低清，
     // 体验反而更差 —— 已回退。
