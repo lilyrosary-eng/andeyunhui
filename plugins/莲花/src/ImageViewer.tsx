@@ -120,13 +120,11 @@ interface TilesInfo {
  */
 function TileImage({
   imagePath,
-  baseWidth,
   zoomScale,
   zoomStyle,
   onImageLoaded,
 }: {
   imagePath: string;
-  baseWidth: number;
   /** 当前缩放倍率（用来选层） */
   zoomScale: number;
   /** 与底层 <img> 完全相同的 transform，保证两层对齐 */
@@ -154,16 +152,27 @@ function TileImage({
     };
   }, [imagePath]);
 
-  // 按当前缩放级别选层：取「宽度 ≥ 屏幕显示像素宽」的最小层
+  // 按当前缩放级别选层：取「分辨率 ≥ 屏幕实际需要像素」的最小层。
+  //
+  // 关键：需要的像素 = **适配时的 CSS 显示宽 × zoomScale × devicePixelRatio**。
+  //   · 适配时的 CSS 显示宽由**原图**与视口算出（fit = contain）
+  //   · zoomScale 是相对"适配"的倍率
+  //   · DPR 必须计入，否则在 Retina/4K 屏上会选到过低的层 → 放大后发糊
+  //   （之前误用显示层的像素宽做基准，导致目标系统性偏小 ⇒ 清晰度差一截）
   const levelIdx = useMemo(() => {
     if (!info || info.levels.length === 0) return -1;
-    const targetPx = Math.max(1, baseWidth * zoomScale);
+    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1920;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 1080;
+    const fit = Math.min(1, vw / info.width, vh / info.height);
+    const cssWidth = info.width * fit; // 适配时的 CSS 显示宽
+    const targetPx = Math.max(1, cssWidth * zoomScale * dpr);
     // 从大到小找第一个满足的（levels 是从小到大）
     for (let i = info.levels.length - 1; i >= 0; i--) {
       if (info.levels[i].width >= targetPx) return i;
     }
     return 0;
-  }, [info, baseWidth, zoomScale]);
+  }, [info, zoomScale]);
 
   // 瓦片 URL 列表
   const tiles = useMemo(() => {
@@ -204,6 +213,9 @@ function TileImage({
         width: lv.width,
         height: lv.height,
         overflow: 'hidden',
+        // 提升为独立合成层：缩放时浏览器只重合成这一层，
+        // 而不是每次重新合成整张 8192² 图层（否则缩放巨卡）
+        willChange: 'transform',
       }}
     >
       <TileGrid tiles={tiles} tileSize={info.tile_size} />
@@ -1479,7 +1491,6 @@ function FullView({
         {!isCurrentGif && currentPath && (
           <TileImage
             imagePath={currentPath}
-            baseWidth={baseWidth}
             zoomScale={zoomScale}
             zoomStyle={zoomStyle}
           />
