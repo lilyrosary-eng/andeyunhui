@@ -224,10 +224,39 @@ async function bootstrap() {
 
 bootstrap();
 
+// ===== 输入延迟探针（2026-11-07）=====
+// 记录「输入事件 → 下一帧绘制」的间隔。这是"卡"最直接的量化指标：
+// 帧率 144 但延迟 150ms，体感就是"拖不动"。排查结束后删除。
+if (typeof window !== 'undefined' && !window.location.search.includes('floating=') && localStorage.getItem('perf.probe') === '1') {
+  let pendingSince = 0;
+  let worst = 0;
+  let samples = 0;
+  const mark = () => { pendingSince = performance.now(); };
+  window.addEventListener('pointerdown', mark, { capture: true, passive: true });
+  window.addEventListener('wheel', mark, { capture: true, passive: true });
+  window.addEventListener('keydown', mark, { capture: true, passive: true });
+  const raf = () => {
+    if (pendingSince) {
+      const d = performance.now() - pendingSince;
+      worst = Math.max(worst, d);
+      samples += 1;
+      pendingSince = 0;
+    }
+    if (samples >= 8) {
+      // eslint-disable-next-line no-console
+      console.warn(`[INPUT-LATENCY] worst=${worst.toFixed(1)}ms over ${samples}`);
+      worst = 0;
+      samples = 0;
+    }
+    requestAnimationFrame(raf);
+  };
+  requestAnimationFrame(raf);
+}
+
 // ===== 临时性能探针（2026-11-07）=====
 // 目的：量化 Linux 上主窗的实际帧率与长任务，判断"卡"是掉帧还是主线程阻塞。
 // 排查结束后删除。日志前缀 MAIN-FPS-PROBE。
-if (typeof window !== 'undefined' && !window.location.search.includes('floating=')) {
+if (typeof window !== 'undefined' && !window.location.search.includes('floating=') && localStorage.getItem('perf.probe') === '1') {
   let frames = 0;
   let last = performance.now();
   let longTasks = 0;
