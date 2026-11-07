@@ -90,17 +90,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
   const [images, setImages] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>('full');
-  const [currentIndex, setCurrentIndexRaw] = useState(0);
-  // 临时探针：任何翻页都打印调用栈，用于定位"左右点击仍翻页"的真实来源。
-  // 排查完删除（搜索 PAGE-CHANGE）。
-  const setCurrentIndex = useCallback((v: React.SetStateAction<number>) => {
-    // eslint-disable-next-line no-console
-    console.warn(
-      '[PAGE-CHANGE]',
-      new Error().stack?.split('\n').slice(1, 4).map((l) => l.trim()).join(' <- '),
-    );
-    setCurrentIndexRaw(v);
-  }, []);
+  const [currentIndex, setCurrentIndex] = useState(0);
   // ===== 中心点击（full=沉浸切换上下条框；滚动模式=唤出跳转菜单）=====
   const [menuOpen, setMenuOpen] = useState(false);
   // 完整模式沉浸：隐藏顶部工具栏与缩略图条（点击中心切换）
@@ -1109,13 +1099,6 @@ function FullView({
   const dragRef = useRef<{ x: number; y: number; button: number } | null>(null);
   const [dragging, setDragging] = useState(false);
   const [imgError, setImgError] = useState(false);
-  /**
-   * 查看器实际显示的图源。
-   * 不再直接把原图喂给 <img>：8000×6000 的原图会让 WebKit 渲染进程解码整张
-   * （约 192MB），偶发把 WebProcess 顶崩（页面白屏 / 整个进程消失）。
-   * 改为「先 200px 秒开 → 后台生成 3072px 替换」，既不清真也不崩。
-   */
-  const [previewSrc, setPreviewSrc] = useState<string>('');
   // 结束拖动必须幂等且不依赖 pointerup 一定落在覆盖层上：
   // WebView2 里右键/中键的 pointerup 偶尔会被系统吞掉，只清状态不够，会在松开后继续拖。
   const endDrag = useCallback(() => {
@@ -1140,31 +1123,6 @@ function FullView({
   const currentUrl = imgUrls[currentIndex];
   const currentPath = imgPaths[currentIndex];
   const isCurrentGif = isGif(currentUrl);
-
-  // 渐进加载：200px 秒开 → 3072px 后台替换（GIF 走原逻辑，不能换成静态帧）
-  useEffect(() => {
-    if (isCurrentGif) return;
-    const path = imgPaths[currentIndex];
-    if (!path) {
-      setPreviewSrc('');
-      return;
-    }
-    let alive = true;
-    const load = (width: number) =>
-      hostApi
-        .invoke<string>('generate_thumbnail', { imagePath: path, width })
-        .then((src) => {
-          if (alive && src) setPreviewSrc(src);
-          return src;
-        })
-        .catch(() => null);
-    setPreviewSrc('');
-    void load(200);
-    void load(3072);
-    return () => {
-      alive = false;
-    };
-  }, [currentIndex, isCurrentGif, imgPaths]);
 
   useEffect(() => {
     setImgError(false);
@@ -1232,15 +1190,10 @@ function FullView({
           ref={canvasRef}
           className="absolute inset-0 w-full h-full select-none"
         />
-      ) : !previewSrc ? (
-        // 缩略图还没就绪：**不渲染 <img>**。
-        // 渲染 src="" 会立刻触发 onError，直接落进"加载失败"态（2026-11-07 实测）。
-        <div className="text-neutral-300 dark:text-stone-600 text-sm">{T('image.viewer.loading')}</div>
       ) : (
         <img
           ref={imgRef}
-          // 注意：**不做「回退原图」兜底**。原图正是崩溃源，宁可空 200ms 等缩略图。
-          src={isCurrentGif ? gifDataUrl || currentUrl : previewSrc}
+          src={isCurrentGif ? gifDataUrl || currentUrl : currentUrl}
           alt={`${currentIndex + 1}/${imgUrls.length}`}
           key={currentIndex}
           onError={() => setImgError(true)}
