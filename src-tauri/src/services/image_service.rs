@@ -386,6 +386,53 @@ pub fn get_folder_images(folder_path: &str) -> Result<Vec<String>, String> {
 // 查看器显示层（width ≥ 1024）的解码很重：串行化，避免快速翻页时多个大图同时解码抢 CPU。
 static BIG_THUMB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// **解码并发上限**（信号量）。
+///
+/// 背景（2026-11-07 用户实测）：打开图片模块时整个软件卡到「点最小化都要等几秒」。
+/// 原因是缩略图解码**没有并发上限**：
+///   · 大图（width>=1024）有 BIG_THUMB_LOCK 互斥，串行；
+///   · 但列表的 200px 缩略图**完全不受限** —— 滚动一次列表会同时发起几十个
+///     `image::open`（每个都要把原图完整解码进内存，8000×6000 ≈ 192MB）。
+///     几十个并发 ⇒ 瞬时内存尖峰 + CPU 打满 ⇒ 整机卡顿（不止本应用）。
+///
+/// 用信号量把**所有**宽度的解码都限制在少数几个并发。
+/// 常量 2：既能利用多核，又不会把内存打爆。
+/// (当前占用数, 条件变量) —— 手工实现的信号量。
+/// 不用 tokio::sync::Semaphore：它的 new() 不是 const（不能放 static），
+/// 且本工程 Rust 版本上没有 blocking_acquire。std::sync::Semaphore 也还没有。
+static DECODE_SLOTS: (std::sync::Mutex<usize>, std::sync::Condvar) =
+    (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+/// 解码并发上限。
+const DECODE_MAX: usize = 2;
+
+/// 取一个解码许可（RAII，作用域结束自动归还）。
+fn acquire_decode_permit() -> DecodePermit<'static> {
+    let (lock, cvar) = &DECODE_SLOTS;
+    let mut n = lock.lock().unwrap_or_else(|e| e.into_inner());
+    while *n >= DECODE_MAX {
+        n = cvar.wait(n).unwrap_or_else(|e| e.into_inner());
+    }
+    *n += 1;
+    drop(n); // 释放锁，不阻塞别人进来看计数
+    DecodePermit { lock, cvar }
+}
+
+/// 许可守卫：离开作用域自动归还名额并唤醒等待者。
+struct DecodePermit<'a> {
+    lock: &'a std::sync::Mutex<usize>,
+    cvar: &'a std::sync::Condvar,
+}
+
+impl Drop for DecodePermit<'_> {
+    fn drop(&mut self) {
+        let mut n = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        *n = n.saturating_sub(1);
+        drop(n);
+        self.cvar.notify_one();
+    }
+}
+
 /// 快速 PNG 编码：默认压缩在 debug 构建里会把 3072² 显示层拖到数秒；
 /// Fast 压缩体积略大但生成快一个数量级。
 fn save_png_fast(img: &image::DynamicImage, path: &std::path::Path) -> Result<(), String> {
@@ -445,6 +492,8 @@ pub fn generate_thumbnail(app: &tauri::AppHandle, image_path: &str, width: u32) 
         return Ok(png_path.to_string_lossy().to_string());
     }
 
+    // 限流：解码（含整图读入内存）是本进程最吃资源的动作，必须限并发。
+    let _permit = acquire_decode_permit();
     let img = image::open(&image_path)
         .map_err(|e| format!("打开图片失败: {}", e))?;
     let has_alpha = img.color().has_alpha();

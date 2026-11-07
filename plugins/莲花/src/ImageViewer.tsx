@@ -193,6 +193,18 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
   const [webglReady, setWebglReady] = useState(false);
   // 只跟踪"是否已放大"这个布尔，避免每帧 setState 把 React 拖回重渲染
   const [webglZoomed, setWebglZoomed] = useState(false);
+  /**
+   * **显示层图片路径**（隔离方案，2026-11-07）。
+   *
+   * 之前完整模式直接用原图 URL：<img src=原图> / WebGL setImage(原图)，
+   * 于是**原图由 WebView 解码** —— 一张 8000×6000 约 192MB，
+   * 表现是「打开大图时整个软件卡到点最小化都要等几秒」，且偶发把 WebProcess 顶崩。
+   *
+   * 现在：解码在 **Rust 侧**做（受 DECODE_MAX 限流保护），
+   * 前端只拿一份**已降采样**的显示层，WebView 永远不碰原图。
+   * 200px 秒开 → 2560px 替换（够 4K 屏）。
+   */
+  const [displaySrc, setDisplaySrc] = useState('');
 
   // camera 变化 → 直接重绘，不经过 React
   const handleCameraChange = useCallback((cam: { scale: number; x: number; y: number }) => {
@@ -249,6 +261,31 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
     }
     return arr;
   }, [images, isRandomMode]);
+
+  // 取显示层：200px 秒开 → 2560px 替换。解码在 Rust 侧限流完成，前端只管贴。
+  useEffect(() => {
+    const path = shuffledImages[currentIndex];
+    if (!path) {
+      setDisplaySrc('');
+      return;
+    }
+    let alive = true;
+    const load = (width: number) =>
+      hostApi
+        .invoke<string>('generate_thumbnail', { imagePath: path, width })
+        .then((src) => {
+          if (alive && src) setDisplaySrc(src);
+          return src;
+        })
+        .catch(() => null);
+    setDisplaySrc('');
+    void load(200);
+    void load(2560);
+    return () => {
+      alive = false;
+    };
+  }, [currentIndex, shuffledImages]);
+
   // 翻页卡顿主要来自“下一张图首次解码”。提前在后台给相邻图片做 decode，
   // 用户翻过去时浏览器直接命中已解码缓存；保持少量引用，避免被立刻回收。
   const preloadedRef = useRef<Map<string, HTMLImageElement>>(new Map());
@@ -655,7 +692,8 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
   useEffect(() => {
     if (!IMAGE_WEBGL_ENABLED) { setWebglReady(false); return; }
     if (viewMode !== 'full') return;
-    const url = imgUrls[currentIndex] || '';
+    // 用显示层（Rust 侧限流解码好的），不要原图 —— 原图解码会把 WebView 拖垮
+    const url = displaySrc || '';
     const isVectorOrAnimated = /\.svg($|\?)/i.test(url) || isGif(url);
     if (isVectorOrAnimated) {
       setWebglReady(false);
@@ -913,6 +951,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
             onImageLoaded={(size) => setLoadedSize(size)}
             canvasRef={canvasRef}
             useWebgl={webglReady}
+            displaySrc={displaySrc}
           />
         )}
         {viewMode === 'vertical' && (
@@ -1003,6 +1042,10 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
                     onClick={() => setInfoOpen(false)}
                     className="shrink-0 p-1 rounded-md cursor-pointer text-neutral-400 hover:bg-black/5 hover:text-neutral-700 dark:text-stone-500 dark:hover:bg-white/5 dark:hover:text-stone-200"
                     title={T('common.close')}
+                    // 标题行是拖拽把手（onPointerDown → startInfoDrag 会 setInfoPos 重新定位卡片）。
+                    // 不拦住冒泡的话，按下 X 的瞬间卡片就跳位，指针与按钮错位，
+                    // pointerup 落在别处 ⇒ click 丢失 ⇒ X 点不动（2026-11-07 实测）。
+                    onPointerDown={(e) => e.stopPropagation()}
                     aria-label={T('common.close')}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
@@ -1089,6 +1132,7 @@ function FullView({
   onImageLoaded,
   canvasRef,
   useWebgl,
+  displaySrc,
 }: {
   imgUrls: string[];
   imgPaths: string[];
@@ -1105,6 +1149,8 @@ function FullView({
   /** WebGL 渲染目标；useWebgl 为 true 时由它绘制 */
   canvasRef: React.RefObject<HTMLCanvasElement>;
   useWebgl: boolean;
+  /** 显示层图片路径（Rust 侧解码好的降采样图）；为空则回退原图 */
+  displaySrc: string;
 }) {
   const dragRef = useRef<{ x: number; y: number; button: number } | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -1203,7 +1249,8 @@ function FullView({
       ) : (
         <img
           ref={imgRef}
-          src={isCurrentGif ? gifDataUrl || currentUrl : currentUrl}
+          // 显示层优先（Rust 侧限流解码）；拿不到时才回退原图。
+          src={isCurrentGif ? gifDataUrl || currentUrl : displaySrc || currentUrl}
           alt={`${currentIndex + 1}/${imgUrls.length}`}
           key={currentIndex}
           onError={() => setImgError(true)}
