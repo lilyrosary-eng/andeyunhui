@@ -53,6 +53,25 @@ pub async fn vault_unlock_device(app: AppHandle) -> Result<VaultStatus, String> 
 }
 
 #[tauri::command]
+pub async fn vault_unlock_biometric(app: AppHandle) -> Result<VaultStatus, String> {
+    blocking("vault_unlock_biometric", move || {
+        svc::unlock_biometric(&app)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn vault_set_biometric_required(
+    app: AppHandle,
+    required: bool,
+) -> Result<VaultStatus, String> {
+    blocking("vault_set_biometric_required", move || {
+        svc::set_biometric_required(&app, required)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn vault_lock(app: AppHandle) -> Result<VaultStatus, String> {
     blocking("vault_lock", move || svc::lock(&app)).await
 }
@@ -125,6 +144,11 @@ pub async fn vault_empty_trash(app: AppHandle) -> Result<usize, String> {
 #[tauri::command]
 pub async fn vault_mark_used(app: AppHandle, id: String) -> Result<(), String> {
     blocking("vault_mark_used", move || svc::mark_used(&app, &id)).await
+}
+
+#[tauri::command]
+pub async fn vault_destroy(app: AppHandle, password: String) -> Result<(), String> {
+    blocking("vault_destroy", move || svc::destroy(&app, &password)).await
 }
 
 #[tauri::command]

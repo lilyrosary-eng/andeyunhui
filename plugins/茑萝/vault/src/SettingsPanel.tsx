@@ -4,7 +4,7 @@
 const React = window.__HOST_REACT__;
 const { useMemo, useState } = React;
 
-import { vaultApi, type VaultItem, type VaultStatus } from './api';
+import { datedFileName, vaultApi, type VaultItem, type VaultStatus } from './api';
 import type { VaultHook } from './useVault';
 import { RecoveryCodesDialog } from './UnlockScreen';
 import { parseImport, toBitwardenCsv, toChromeCsv } from './importExport';
@@ -80,6 +80,19 @@ function ImportDialog({
   const [mode, setMode] = useState<'merge' | 'replace'>('merge');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [fileName, setFileName] = useState<string | null>(null);
+
+  const pickFile = async () => {
+    setError(null);
+    try {
+      const picked = await vaultApi.pickImportFile();
+      if (!picked) return;
+      setText(picked.content);
+      setFileName(picked.path);
+    } catch (e) {
+      setError(typeof e === 'string' ? e : String(e));
+    }
+  };
 
   const parsed = useMemo(() => {
     if (!text.trim()) return null;
@@ -109,8 +122,16 @@ function ImportDialog({
       <div className="w-full max-w-2xl rounded-2xl bg-[#f5f0e8] dark:bg-[#1c1917] p-5 shadow-2xl flex flex-col max-h-[85vh]">
         <div className="text-sm font-semibold">导入 CSV / JSON</div>
         <p className="mt-1 text-xs text-neutral-500 dark:text-stone-400">
-          支持 Bitwarden、1Password、Chrome/Edge、KeePass 的导出文件，按表头自动识别。把文件内容整段粘贴进来即可。
+          支持 Bitwarden、1Password、Chrome/Edge、KeePass 的导出文件，按表头自动识别。可直接选择文件，或把内容粘贴进来。
         </p>
+        <div className="mt-2 flex items-center gap-2">
+          <button onClick={pickFile} className={ghostBtn}>
+            选择文件…
+          </button>
+          <span className="text-[11px] text-neutral-400 dark:text-stone-500 truncate">
+            {fileName ?? '未选择文件（也可直接粘贴）'}
+          </span>
+        </div>
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -179,6 +200,9 @@ export function SettingsPanel({
   const [importOpen, setImportOpen] = useState(false);
   const [ioNotice, setIoNotice] = useState<string | null>(null);
   const [rotateConfirm, setRotateConfirm] = useState(false);
+  const [destroyPwd, setDestroyPwd] = useState('');
+  const [destroyAck, setDestroyAck] = useState(false);
+  const [destroyError, setDestroyError] = useState<string | null>(null);
 
   const copyCsv = async (kind: 'bitwarden' | 'chrome') => {
     setIoNotice(null);
@@ -186,16 +210,45 @@ export function SettingsPanel({
       const items: VaultItem[] = await vaultApi.list();
       const csv = kind === 'bitwarden' ? toBitwardenCsv(items) : toChromeCsv(items);
       await navigator.clipboard.writeText(csv);
-      setIoNotice(`已复制 ${kind === 'bitwarden' ? 'Bitwarden' : 'Chrome'} CSV（${items.length} 条），请粘贴到文件保存。`);
+      setIoNotice(`已复制 ${kind === 'bitwarden' ? 'Bitwarden' : 'Chrome'} CSV（${items.length} 条）。`);
     } catch (e) {
       setIoNotice(`复制失败：${typeof e === 'string' ? e : String(e)}`);
+    }
+  };
+
+  const saveCsvFile = async (kind: 'bitwarden' | 'chrome') => {
+    setIoNotice(null);
+    try {
+      const items: VaultItem[] = await vaultApi.list();
+      const csv = kind === 'bitwarden' ? toBitwardenCsv(items) : toChromeCsv(items);
+      const path = await vaultApi.pickSavePath(
+        datedFileName(kind === 'bitwarden' ? 'vault-bitwarden' : 'vault-chrome', 'csv'),
+      );
+      if (!path) return;
+      await vaultApi.writeTextFile(path, csv);
+      setIoNotice(`已保存 ${items.length} 条到：${path}`);
+    } catch (e) {
+      setIoNotice(`保存失败：${typeof e === 'string' ? e : String(e)}`);
+    }
+  };
+
+  const saveJsonFile = async () => {
+    setIoNotice(null);
+    try {
+      const json = await vaultApi.exportJson();
+      const path = await vaultApi.pickSavePath(datedFileName('vault-export', 'json'));
+      if (!path) return;
+      await vaultApi.writeTextFile(path, json);
+      setIoNotice(`已保存明文 JSON 到：${path}`);
+    } catch (e) {
+      setIoNotice(`保存失败：${typeof e === 'string' ? e : String(e)}`);
     }
   };
 
   const changePassword = async () => {
     setPwdError(null);
     setPwdNotice(null);
-    if (next.length < 8) return setPwdError('新主密码至少 8 位');
+    if (next.length < status.minPasswordChars) return setPwdError(`新主密码至少 ${status.minPasswordChars} 位`);
     if (next !== confirm) return setPwdError('两次输入的新主密码不一致');
     const ok = await run(() => vaultApi.changePassword(current, next));
     if (ok) {
@@ -218,7 +271,7 @@ export function SettingsPanel({
   };
 
   return (
-    <div className="h-full overflow-auto p-4 flex flex-col gap-3">
+    <div className="flex flex-col gap-4">
       <div className={sectionCls}>
         <div className="text-sm font-medium">自动锁定</div>
         <p className="mt-1 text-xs text-neutral-500 dark:text-stone-400">
@@ -260,7 +313,7 @@ export function SettingsPanel({
             type="password"
             value={next}
             onChange={(e) => setNext(e.target.value)}
-            placeholder="新主密码（≥ 8 位）"
+            placeholder={`新主密码（≥ ${status.minPasswordChars} 位）`}
             className={inputCls}
           />
           <input
@@ -299,8 +352,19 @@ export function SettingsPanel({
         </p>
         <div className="mt-2 flex flex-wrap gap-2">
           <button onClick={() => setImportOpen(true)} disabled={busy} className={ghostBtn}>
-            导入 CSV / JSON
+            导入文件 / 粘贴…
           </button>
+          <button onClick={() => void saveCsvFile('bitwarden')} disabled={busy} className={ghostBtn}>
+            保存 Bitwarden CSV
+          </button>
+          <button onClick={() => void saveCsvFile('chrome')} disabled={busy} className={ghostBtn}>
+            保存 Chrome CSV
+          </button>
+          <button onClick={() => void saveJsonFile()} disabled={busy} className={ghostBtn}>
+            保存明文 JSON
+          </button>
+        </div>
+        <div className="mt-2 flex flex-wrap gap-2">
           <button onClick={() => void copyCsv('bitwarden')} disabled={busy} className={ghostBtn}>
             复制 Bitwarden CSV
           </button>
@@ -308,7 +372,7 @@ export function SettingsPanel({
             复制 Chrome CSV
           </button>
           <button onClick={() => setExportOpen(true)} disabled={busy} className={ghostBtn}>
-            导出明文 JSON
+            查看明文 JSON
           </button>
         </div>
         {ioNotice && <div className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">{ioNotice}</div>}
@@ -321,6 +385,90 @@ export function SettingsPanel({
           <div>本机免密解锁：{status.hasDeviceSlot ? '已启用' : '未启用'}</div>
           <div>文件位置：应用数据目录 vault/vault.json，内容变更前自动保留最近 5 份备份。</div>
         </div>
+      </div>
+
+      <div className={sectionCls}>
+        <div className="text-sm font-medium">生物识别（Windows Hello）</div>
+        <p className="mt-1 text-xs text-neutral-500 dark:text-stone-400">{status.biometricDetail}</p>
+        <p className="mt-1 text-[11px] text-neutral-400 dark:text-stone-500">
+          状态每 30 秒自动重测：在系统「设置 → 账户 → 登录选项」里注册指纹/人脸后，无需重启应用。
+        </p>
+        <p className="mt-1 text-xs text-neutral-500 dark:text-stone-400">
+          开启后「本机免密解锁」会被禁用，必须通过 Windows Hello（指纹 / 人脸 / PIN）或主密码解锁。
+          生物识别只作为本机槽位的门闸，不参与密钥派生。
+        </p>
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            disabled={
+              busy ||
+              !status.hasDeviceSlot ||
+              (!status.biometricSupported && !status.biometricRequired)
+            }
+            onClick={() => void run(() => vaultApi.setBiometricRequired(!status.biometricRequired))}
+            className={status.biometricRequired ? ghostBtn : primaryBtn}
+          >
+            {status.biometricRequired ? '关闭生物识别要求' : '开启：本机解锁须生物识别'}
+          </button>
+          {!status.hasDeviceSlot && (
+            <span className="text-[11px] text-neutral-400 dark:text-stone-500">
+              需先启用本机免密解锁
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="rounded-xl bg-red-500/5 dark:bg-red-500/10 p-4 border border-red-500/20">
+        <div className="text-sm font-medium text-red-600 dark:text-red-400">移除密码库</div>
+        <p className="mt-1 text-xs text-neutral-500 dark:text-stone-400">
+          删除 vault.json 与全部滚动备份，不可恢复。需要再次输入主密码确认。
+        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <input
+            type="password"
+            value={destroyPwd}
+            onChange={(e) => {
+              setDestroyPwd(e.target.value);
+              setDestroyError(null);
+            }}
+            placeholder="主密码"
+            className={`${inputCls} max-w-xs`}
+          />
+          <button
+            onClick={async () => {
+              setDestroyError(null);
+              if (!destroyPwd) {
+                setDestroyError('请输入主密码');
+                return;
+              }
+              if (!destroyAck) {
+                setDestroyError('请先勾选下方确认项');
+                return;
+              }
+              try {
+                await vaultApi.destroy(destroyPwd);
+                setDestroyPwd('');
+                setDestroyAck(false);
+                await run(async () => undefined);
+              } catch (e) {
+                setDestroyError(typeof e === 'string' ? e : String(e));
+              }
+            }}
+            disabled={busy || !destroyPwd || !destroyAck}
+            className="px-3 py-1.5 rounded-md text-xs font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+          >
+            移除密码库
+          </button>
+        </div>
+        <label className="mt-2 flex items-start gap-2 text-xs text-neutral-600 dark:text-stone-300">
+          <input
+            type="checkbox"
+            checked={destroyAck}
+            onChange={(e) => setDestroyAck(e.target.checked)}
+            className="mt-0.5"
+          />
+          <span>我了解：库文件与全部滚动备份都会被删除，且无法恢复。</span>
+        </label>
+        {destroyError && <div className="mt-2 text-xs text-red-600 dark:text-red-400">{destroyError}</div>}
       </div>
 
       {error && <div className="text-xs text-red-600 dark:text-red-400">{error}</div>}

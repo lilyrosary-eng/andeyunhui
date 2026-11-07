@@ -701,6 +701,40 @@ input[type="range"]:active::-moz-range-thumb {
   .logo-mark, .logo-mark-rot { transform: none !important; transition-property: color !important; }
 }
 
+/* ========== 液态玻璃（设置 → 主题 → 材质效果） ==========
+   折射层由 core/theme/liquidGlass.ts 逐元素生成 SVG 位移图，以内联
+   backdrop-filter: url(#lg-N) !important 附着（仅 Chromium 内核）。
+   这里负责所有引擎都有的光照层：菲涅耳边缘高光、玻璃厚度感与悬浮投影。
+   选择器与 manager 的 GLASS_SELECTOR 保持一致：.glass-panel / backdrop-blur 类 /
+   内联 backdrop-filter（TrayMenu、胶囊等直写内联样式的浮层）。 */
+html.liquid-glass .glass-panel,
+html.liquid-glass .glass-bg,
+html.liquid-glass [class*="backdrop-blur"],
+html.liquid-glass [style*="backdrop-filter"] {
+  border-color: rgb(255 255 255 / 0.55);
+  box-shadow:
+    inset 0 1px 0 0 rgb(255 255 255 / 0.55),
+    inset 0 -1px 0 0 rgb(255 255 255 / 0.10),
+    inset 1px 0 0 0 rgb(255 255 255 / 0.22),
+    inset -1px 0 0 0 rgb(255 255 255 / 0.22),
+    0 2px 6px rgb(0 0 0 / 0.08),
+    0 10px 28px rgb(0 0 0 / 0.14);
+}
+
+html.liquid-glass.dark .glass-panel,
+html.liquid-glass.dark .glass-bg,
+html.liquid-glass.dark [class*="backdrop-blur"],
+html.liquid-glass.dark [style*="backdrop-filter"] {
+  border-color: rgb(255 255 255 / 0.18);
+  box-shadow:
+    inset 0 1px 0 0 rgb(255 255 255 / 0.28),
+    inset 0 -1px 0 0 rgb(255 255 255 / 0.05),
+    inset 1px 0 0 0 rgb(255 255 255 / 0.12),
+    inset -1px 0 0 0 rgb(255 255 255 / 0.12),
+    0 2px 8px rgb(0 0 0 / 0.35),
+    0 12px 32px rgb(0 0 0 / 0.40);
+}
+
 /* ========== 跨平台降级处理 ========== */
 
 /* ★ Linux 桌面（WebKitGTK）：全局关闭 backdrop-filter。

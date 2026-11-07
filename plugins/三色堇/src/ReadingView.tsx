@@ -356,7 +356,7 @@ const lockTransition = useCallback(() => {
   // ============ 高亮 / 批注 ============
   // 存储是唯一事实源（readingHighlights 分片）；本视图负责：
   // 1) combinedHtml / 布局 / 数据变化后，在当前窗口 DOM 上重放着色（含 quote 漂移校验与回写）；
-  // 2) 竖版选字工具条（横版/双栏有拖拽翻页热区，不接管选择事件）；
+  // 2) 选字工具条（竖版 / 横版 / 双栏同一套；翻页只走滚轮与键盘，不再抢选择事件）；
   // 3) 外部高亮跳转（一次性 externalHighlightId）。
   interface SelToolbarState {
     x: number;
@@ -1210,46 +1210,31 @@ const lockTransition = useCallback(() => {
     }
   }, [windowStart, windowEnd, windowCenter, book.chapters.length]);
 
-  // ============ 拖拽 ============
-  // 按下时**不能** setPointerCapture：那会把指针从浏览器的选字流程里整个抢走，
-  // 于是「拖动选字」永远变成「拖动翻页」（历史上就是这么坏的，翻页还有边缘热区/方向键/滚轮，
-  // 选字却没有任何替代入口）。现在只记起点，抬手时看「到底选出字了没有」再定这一笔归谁。
+  // ============ 拖拽（只留给触摸）============
+  // 桌面端**不再有拖动翻页**：按下就 setPointerCapture 会把指针从浏览器的选字流程里整个抢走，
+  // 于是「拖动选字」必然变成「拖动翻页」。翻页改由滚轮（横版/双栏）与键盘负责，三个模式行为一致。
+  // 触摸端仍要能划：Android 上没有滚轮，而 touchAction:none 又关掉了原生滚动，
+  // 所以这里按 pointerType 只放行触摸手势。
   const onPointerDown = (e: React.PointerEvent) => {
-    if (e.button !== 0 || !isPaginatedMode) return;
+    if (e.button !== 0 || !isPaginatedMode || e.pointerType === 'mouse') return;
     dragState.current = { startX: e.clientX, active: true, offset: 0 };
+    setDragging(true);
+    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 忽略 */ }
   };
   const onPointerMove = (e: React.PointerEvent) => {
     if (!dragState.current.active) return;
-    const sel = document.getSelection();
-    // 已经选出字 = 这一笔是选文本，连橡皮筋动画都不做，免得看着像要翻页
-    if (sel && !sel.isCollapsed && sel.toString().trim()) return;
-    const offset = e.clientX - dragState.current.startX;
-    dragState.current.offset = offset;
-    if (Math.abs(offset) > 8) {
-      setDragging(true);
-      setDragOffset(offset);
-    }
+    dragState.current.offset = e.clientX - dragState.current.startX;
+    setDragOffset(dragState.current.offset);
   };
-  const finishDrag = () => {
+  const finishDrag = (e: React.PointerEvent) => {
     if (!dragState.current.active) return;
     const offset = dragState.current.offset;
     dragState.current.active = false;
-    dragState.current.offset = 0;
     setDragging(false);
     setDragOffset(0);
-    const sel = document.getSelection();
-    // 唯一判据：抬手时没有选区才翻页；选出字了就交给选字流程（工具条自己会出来）
-    if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* 忽略 */ }
     if (offset <= -DRAG_THRESHOLD) nextPage();
     else if (offset >= DRAG_THRESHOLD) prevPage();
-  };
-  // 指针离开阅读区（含拖到窗口外松手，pointerup 收不到）：只复位动画，不翻页
-  const onPointerLeave = () => {
-    if (!dragState.current.active) return;
-    dragState.current.active = false;
-    dragState.current.offset = 0;
-    setDragging(false);
-    setDragOffset(0);
   };
 
   // ============ 渲染 ============
@@ -1455,7 +1440,6 @@ const lockTransition = useCallback(() => {
         onPointerMove={onPointerMove}
         onPointerUp={finishDrag}
         onPointerCancel={finishDrag}
-        onPointerLeave={onPointerLeave}
         onMouseUp={handleSelectionMouseUp}
       >
         {isPaginatedMode ? (
@@ -1536,9 +1520,9 @@ const lockTransition = useCallback(() => {
           </div>
         )}
 
-        {/* 选字工具条（仅竖版）：着色 / 批注 / 复制 / 删除。挂在 viewport 层（不随正文滚动），
-            stopPropagation 避免触发容器 mouseup / 翻页逻辑把自己关掉 */}
-        {!isPaginatedMode && selToolbar && (
+        {/* 选字工具条（三个模式同一套）：着色 / 批注 / 复制 / 删除。挂在 viewport 层（不随正文滚动），
+            stopPropagation 避免容器 mouseup 重新计算选区时把自己关掉 */}
+        {selToolbar && (
           <div
             className="absolute z-30"
             style={{ left: `${selToolbar.x}px`, top: `${selToolbar.y}px`, transform: 'translate(-50%, -110%)' }}

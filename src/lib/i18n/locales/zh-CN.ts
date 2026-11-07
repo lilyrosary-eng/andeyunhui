@@ -101,6 +101,9 @@ export const zhCN: Record<string, string> = {
 
   // 设置 - 主题
   'settings.themes.appearance': '外观',
+  'settings.themes.material': '材质效果',
+  'settings.themes.liquidGlass': '液态玻璃',
+  'settings.themes.liquidGlassDesc': '把全局毛玻璃换成液态玻璃：边缘折射背景、菲涅耳高光与悬浮投影。折射需要 Chromium 内核（Windows 版），其他内核退化为光照近似。',
   'settings.theme.system': '跟随系统',
   'settings.theme.light': '浅色',
   'settings.theme.dark': '深色',

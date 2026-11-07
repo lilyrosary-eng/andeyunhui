@@ -9,7 +9,6 @@
 import React from 'react';
 import { videoPlatforms, type VideoPlatform, type OnlineVideoItem } from './videoPlatforms';
 import { OnlineVideoSidebar, type VideoTempEntry } from './OnlineVideoSidebar';
-import { BilibiliView } from './BilibiliView';
 import { BrowserPanel } from './BrowserPanel';
 import { VideoStatsView } from './VideoStatsView';
 import { PlaylistGridRow } from '@shared/OnlineMusicTemplates';
@@ -27,12 +26,13 @@ interface Props {
   onSelectTemp: (entry: VideoTempEntry) => void;
 }
 
-/** 平台内容体：按平台 id 分派到对应视图 */
-function platformBody(platform: VideoPlatform, onPlayVideo: (item: OnlineVideoItem) => void) {
-  if (platform.id === 'bilibili') return React.createElement(BilibiliView, { onPlayVideo });
-  // 抖音 / 腾讯视频 / 爱奇艺：页面链接受 DRM 或签名保护，纯 API 取不到流，
-  // 因此把面板区当作浏览器用（内嵌子 webview），视频就在其网页里播放，
-  // 再通过「嗅探」列出页面加载的图片/视频资源供下载。
+/** 平台内容体：所有平台统一走「内嵌浏览器」。
+ *
+ * 2026-11 起不再按平台分派 API 视图：B 站没有面向第三方客户端的官方接口，
+ * 抖音/腾讯/爱奇艺更是必须用浏览器。统一成「浏览器」后，
+ * 我们只提供浏览容器，内容由平台官方页面自己加载与播放。
+ */
+function platformBody(platform: VideoPlatform, _onPlayVideo: (item: OnlineVideoItem) => void) {
   return React.createElement(BrowserPanel, { platform });
 }
 
@@ -56,7 +56,7 @@ function PlatformBody({ platform, onPlayVideo }: { platform: VideoPlatform; onPl
         React.createElement(
           'span',
           { className: 'text-[11px] px-2 py-0.5 rounded-full', style: { color: platform.accent, background: `${platform.accent}1a` } },
-          supported ? '纯 API' : '内嵌浏览器',
+          supported ? '纯 API' : '浏览器窗口',
         ),
         ...(platform.capabilities || []).map((c) =>
           React.createElement(
@@ -127,7 +127,7 @@ export function OnlineVideoView({
               React.createElement(
                 'p',
                 { className: 'text-xs text-neutral-400 dark:text-stone-500 max-w-md text-center' },
-                '点击任一平台进入。标「纯 API」的平台可浏览推荐/分区、搜索并去广告播放；标「内嵌浏览器」的平台受 DRM 或签名限制，视频在其网页内播放，可用「嗅探」下载页面加载的图片/视频。',
+                '点击任一平台进入：页面在独立浏览器窗口中打开，登录与播放由官方站点完成；可用「嗅探」列出页面已加载的图片/视频，再自行下载。',
               ),
             ),
     ),

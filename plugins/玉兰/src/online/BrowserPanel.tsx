@@ -1,13 +1,13 @@
 /// <reference path="../../../global.d.ts" />
-// 内嵌浏览器面板：把面板区当作浏览器用（输入网址 → 像浏览器一样浏览），
-// 额外提供「嗅探」——列出页面加载过的图片/视频资源，带缩略图与信息，可直接下载。
+// 网络视频 · 平台页浏览器面板
 //
-// 实现要点：
-//  · 真正的浏览由 Rust 侧的**子 webview** 承载（见 src-tauri/src/embedded_browser.rs），
-//    它精确铺在下面 hostRef 这个 div 的矩形上；本组件负责把矩形同步过去。
-//  · 子 webview 是独立渲染面，**会盖住它范围内的主界面 DOM**，
-//    所以嗅探结果做成**右侧抽屉**：打开时浏览器矩形自动收窄，两者永不重叠。
-//  · 下载走已有的 download_video / download_hls，Referer 用当前页面地址（多数 CDN 认这个）。
+// 页面由 Rust 侧的**独立浏览器窗口**（label = video-browser）承载：
+//   · 主界面这里只保留工具条 + 状态 + 嗅探结果抽屉；
+//   · 为什么不嵌在面板里：实机验证 Windows/WebView2 下 `Window::add_child` 创建的子
+//     webview 始终被主 webview 的合成层盖住（白屏，z-order 无效），详见 embedded_browser.rs 头注释。
+//
+// 嗅探：注入脚本把资源列表经 `bimedia.localhost/__report/...` 上报，Rust 截获后前端取走；
+// 下载走已有的 download_video / download_hls，Referer 用当前页面地址（多数 CDN 认这个）。
 import React from 'react';
 import { videoDownloadManager, VIDEO_DOWNLOAD_DIR_KEY, type VideoDownloadTask } from './OnlineVideoDownloadManager';
 import { pickDownloadDir } from './pickDir';
@@ -68,66 +68,67 @@ export function BrowserPanel({ platform }: Props) {
   const [notice, setNotice] = useState<string | null>(null);
   const [dlDir, setDlDir] = useState(localStorage.getItem(VIDEO_DOWNLOAD_DIR_KEY) || '');
   const [queue, setQueue] = useState<VideoDownloadTask[]>([]);
-  const hostRef = useRef<HTMLDivElement>(null);
+  // 浏览器窗口是否已由我们打开（关闭后置 false，用于占位卡片的文案）
+  const [windowOpen, setWindowOpen] = useState(false);
+  const mountedRef = useRef(true);
 
   useEffect(() => videoDownloadManager.subscribe(setQueue), []);
 
-  // 把 host div 的矩形同步给 Rust 侧的子 webview
-  const syncBounds = useCallback(async () => {
-    const el = hostRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    try {
-      await hostApi.invoke('browser_set_bounds', { x: r.left, y: r.top, width: r.width, height: r.height });
-    } catch {
-      /* 浏览器尚未创建时忽略 */
-    }
-  }, []);
-
-  // 布局变化（窗口缩放、抽屉开关）后重新对齐
+  // 卸载时关闭浏览器窗口，避免它留在桌面上
   useEffect(() => {
-    const el = hostRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => void syncBounds());
-    ro.observe(el);
-    const onWinResize = () => void syncBounds();
-    window.addEventListener('resize', onWinResize);
-    // 抽屉开合会引起布局变化，等一帧后再同步
-    const t = window.setTimeout(() => void syncBounds(), 60);
+    mountedRef.current = true;
     return () => {
-      ro.disconnect();
-      window.removeEventListener('resize', onWinResize);
-      window.clearTimeout(t);
-    };
-  }, [syncBounds, drawerOpen]);
-
-  // 卸载时销毁子 webview，避免它继续盖在界面上
-  useEffect(() => {
-    return () => {
+      mountedRef.current = false;
       void hostApi.invoke('browser_close').catch(() => {});
     };
   }, []);
 
-  const go = useCallback(
-    async (target?: string) => {
-      const u = normalizeUrl(target ?? url);
-      if (!u) return;
-      const el = hostRef.current;
-      if (!el) return;
-      setError(null);
-      setBusy(true);
-      try {
-        const r = el.getBoundingClientRect();
-        await hostApi.invoke('browser_open', { url: u, x: r.left, y: r.top, width: r.width, height: r.height });
-        setCurrent(u);
-      } catch (e: unknown) {
-        setError(String(e));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [url],
-  );
+  /** 打开指定网址：**不依赖任何 state**（自动加载与手动前往共用） */
+  const openAt = useCallback(async (u: string) => {
+    if (!u) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await hostApi.invoke('browser_open', { url: u, x: 0, y: 0, width: 0, height: 0 });
+      if (!mountedRef.current) return;
+      setUrl(u);
+      setCurrent(u);
+      setWindowOpen(true);
+      setNotice('已在独立浏览器窗口打开。窗口可自由拖动/缩放，不会遮挡主界面。');
+    } catch (e: unknown) {
+      const msg = typeof e === 'string' ? e : (e as any)?.message || JSON.stringify(e);
+      setError(msg);
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const go = useCallback((target?: string) => openAt(normalizeUrl(target ?? url)), [url, openAt]);
+
+  // 进入平台即自动打开官方页面（旧实现要手动点「前往」，用户只看到空白）
+  useEffect(() => {
+    let cancelled = false;
+    const raf = requestAnimationFrame(() => {
+      if (!cancelled) void openAt(platform.home);
+    });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [platform.id, openAt]);
+
+  const focusBrowser = () => {
+    void hostApi.invoke('browser_focus').catch((e: unknown) => setError(String(e)));
+  };
+
+  const closeBrowser = () => {
+    void hostApi.invoke('browser_close').catch(() => {});
+    setWindowOpen(false);
+    setCurrent('');
+    setNotice(null);
+    setItems([]);
+    setDrawerOpen(false);
+  };
 
   const doSniff = async () => {
     setBusy(true);
@@ -160,12 +161,12 @@ export function BrowserPanel({ platform }: Props) {
         }
       }
       setItems(merged);
-      setDrawerOpen(true); // 打开抽屉 → 浏览器矩形自动收窄，避免子 webview 盖住抽屉
+      setDrawerOpen(true);
       if (merged.length === 0) {
         setNotice('未捕获到资源。可能是页面还没开始播放，或该站点 CSP 阻止了上报（先点一下页面里的播放再嗅探）。');
       }
     } catch (e: unknown) {
-      setError(`嗅探失败：${String(e)}`);
+      setError(`嗅探失败：${typeof e === 'string' ? e : (e as any)?.message || String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -206,7 +207,6 @@ export function BrowserPanel({ platform }: Props) {
     React.createElement(
       'div',
       { key: `${it.url}-${idx}`, className: 'flex gap-2 p-2 rounded-xl hover:bg-neutral-100 dark:hover:bg-stone-700/50' },
-      // 缩略图：图片直接显示；视频用 <video preload=metadata> 取首帧（同样要过中继补 Referer）
       React.createElement(
         'div',
         { className: 'w-16 h-10 shrink-0 rounded-lg overflow-hidden bg-neutral-200 dark:bg-stone-700 flex items-center justify-center' },
@@ -233,14 +233,7 @@ export function BrowserPanel({ platform }: Props) {
         React.createElement(
           'p',
           { className: 'text-[10px] text-neutral-400 dark:text-stone-500' },
-          [
-            it.type,
-            prettySize(it.url),
-            it.w && it.h ? `${it.w}×${it.h}` : null,
-            it.kind,
-          ]
-            .filter(Boolean)
-            .join(' · '),
+          [it.type, prettySize(it.url), it.w && it.h ? `${it.w}×${it.h}` : null, it.kind].filter(Boolean).join(' · '),
         ),
       ),
       React.createElement(
@@ -256,62 +249,99 @@ export function BrowserPanel({ platform }: Props) {
 
   return React.createElement(
     'div',
-    { className: 'absolute inset-0 flex flex-col' },
+    { className: 'relative flex-1 min-h-0 flex flex-col overflow-hidden' },
     // ===== 工具条 =====
     React.createElement(
       'div',
-      { className: 'shrink-0 flex items-center gap-2 px-3 py-2 border-b border-neutral-200/60 dark:border-stone-700/60 bg-white/70 dark:bg-stone-800/70 backdrop-blur' },
+      { className: 'shrink-0 flex flex-wrap items-center gap-2 px-3 py-2 border-b border-neutral-200/60 dark:border-stone-700/60 bg-white/70 dark:bg-stone-800/70 backdrop-blur' },
       React.createElement('span', { className: 'inline-flex shrink-0', style: { color: platform.accent } }, React.createElement(GlobeIcon, { size: 16 })),
       React.createElement(
         'div',
-        { className: 'flex items-center gap-2 flex-1 bg-neutral-100 dark:bg-stone-700 rounded-xl px-3 py-1.5' },
+        { className: 'flex items-center gap-2 flex-1 min-w-[140px] bg-neutral-100 dark:bg-stone-700 rounded-xl px-3 py-1.5' },
         React.createElement('span', { className: 'inline-flex text-neutral-400' }, React.createElement(SearchIcon, { size: 14 })),
         React.createElement('input', {
           value: url,
           onChange: (e: React.ChangeEvent<HTMLInputElement>) => setUrl(e.target.value),
           onKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => {
-            if (e.key === 'Enter') void go();
+            if (e.key === 'Enter') go();
           },
           placeholder: '输入网址后回车（例：https://www.douyin.com）',
-          className: 'flex-1 bg-transparent text-xs text-neutral-700 dark:text-stone-200 outline-none',
+          className: 'flex-1 min-w-0 bg-transparent text-xs text-neutral-700 dark:text-stone-200 outline-none',
         }),
       ),
       React.createElement(
         'button',
-        { onClick: () => void go(), disabled: busy, className: 'btn-press px-3 py-1.5 rounded-xl text-xs text-white disabled:opacity-50', style: { background: platform.accent } },
-        busy ? '处理中…' : '前往',
+        { onClick: () => go(), disabled: busy, className: 'btn-press shrink-0 px-3 py-1.5 rounded-xl text-xs text-white disabled:opacity-50', style: { background: platform.accent } },
+        busy ? '打开中…' : '前往',
       ),
       React.createElement(
         'button',
-        { onClick: () => void go(current || url), className: 'btn-press px-2 py-1.5 rounded-lg text-xs text-neutral-500 hover:bg-neutral-100 dark:hover:bg-stone-700' },
-        '刷新',
+        { onClick: focusBrowser, className: 'btn-press shrink-0 px-3 py-1.5 rounded-lg text-xs text-neutral-600 dark:text-stone-300 hover:bg-neutral-100 dark:hover:bg-stone-700' },
+        '回到浏览器',
       ),
       React.createElement(
         'button',
-        {
-          onClick: doSniff,
-          disabled: busy,
-          className: 'btn-press px-3 py-1.5 rounded-xl text-xs text-white disabled:opacity-50',
-          style: { background: drawerOpen ? '#6b7280' : platform.accent },
-          title: '列出页面加载过的图片/视频资源',
-        },
+        { onClick: doSniff, disabled: busy, className: 'btn-press shrink-0 px-3 py-1.5 rounded-xl text-xs text-white disabled:opacity-50', style: { background: drawerOpen ? '#6b7280' : platform.accent } },
         drawerOpen ? '收起嗅探' : '嗅探',
       ),
       React.createElement(
         'button',
-        { onClick: pickDir, className: 'btn-press px-2 py-1.5 rounded-lg text-xs text-neutral-500 hover:bg-neutral-100 dark:hover:bg-stone-700', title: '下载目录' },
+        { onClick: pickDir, className: 'btn-press shrink-0 px-2 py-1.5 rounded-lg text-xs text-neutral-500 hover:bg-neutral-100 dark:hover:bg-stone-700', title: '下载目录' },
         dlDir ? '目录✓' : '目录',
       ),
+      windowOpen &&
+        React.createElement(
+          'button',
+          { onClick: closeBrowser, className: 'btn-press shrink-0 px-2 py-1.5 rounded-lg text-xs text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30', title: '关闭浏览器窗口' },
+          '关闭窗口',
+        ),
       React.createElement('span', { className: 'text-xs text-neutral-400 dark:text-stone-500 shrink-0' }, `下载(${active})`),
     ),
-    // ===== 提示 / 错误 =====
+    // ===== 提示 / 错误 / 状态 =====
     notice && React.createElement('div', { className: 'shrink-0 px-3 py-1.5 text-xs text-sky-700 dark:text-sky-300 bg-sky-50/70 dark:bg-sky-950/30' }, notice),
-    error && React.createElement('div', { className: 'shrink-0 px-3 py-1.5 text-xs text-red-500 bg-red-50/60 dark:bg-red-950/30 break-all' }, error),
-    // ===== 主体：浏览器矩形 + 嗅探抽屉（永不重叠）=====
+    error && React.createElement('div', { className: 'shrink-0 px-3 py-1.5 text-xs text-red-500 bg-red-50/60 dark:bg-red-950/30 break-all' }, `打开失败：${error}`),
+    React.createElement(
+      'div',
+      { className: 'shrink-0 px-3 py-1 text-[11px] text-neutral-400 dark:text-stone-500 truncate' },
+      error
+        ? '上面是内核返回的错误；可尝试「前往」重开，或检查代理/梯子是否拦截了 WebView2 请求。'
+        : busy
+          ? '正在打开浏览器窗口…'
+          : current
+            ? `浏览器窗口已打开：${current}`
+            : '浏览器窗口未打开',
+    ),
+    // ===== 主体：占位卡片（真实页面在独立窗口）+ 嗅探抽屉 =====
     React.createElement(
       'div',
       { className: 'flex-1 flex min-h-0' },
-      React.createElement('div', { ref: hostRef, className: 'flex-1 min-w-0 bg-white dark:bg-stone-900' }),
+      React.createElement(
+        'div',
+        { className: 'flex-1 min-w-0 flex flex-col items-center justify-center gap-3 p-8 bg-white dark:bg-stone-900' },
+        React.createElement('span', { className: 'inline-flex', style: { color: platform.accent } }, React.createElement(GlobeIcon, { size: 40 })),
+        React.createElement('p', { className: 'text-sm font-medium text-neutral-700 dark:text-stone-200' }, `${platform.name} 在独立浏览器窗口中打开`),
+        React.createElement(
+          'p',
+          { className: 'text-xs text-neutral-400 dark:text-stone-500 max-w-md text-center leading-relaxed' },
+          '网页、登录与播放都由官方站点自己完成；本窗口只负责发起打开与资源嗅探。' +
+            '如果窗口里是空白，通常是代理/梯子拦截了 WebView2 的请求，或站点要求登录。',
+        ),
+        React.createElement(
+          'div',
+          { className: 'flex items-center gap-2 mt-1' },
+          React.createElement(
+            'button',
+            { onClick: focusBrowser, className: 'btn-press px-4 py-2 rounded-xl text-sm text-white', style: { background: platform.accent } },
+            '回到浏览器窗口',
+          ),
+          React.createElement(
+            'button',
+            { onClick: () => go(), className: 'btn-press px-4 py-2 rounded-xl text-sm bg-neutral-100 dark:bg-stone-700 text-neutral-600 dark:text-stone-300' },
+            current ? '重新加载' : '打开',
+          ),
+        ),
+        React.createElement('p', { className: 'text-[10px] text-neutral-300 dark:text-stone-600 mt-2' }, '提示：嗅探前先在浏览器窗口里点一下播放，资源才会出现。'),
+      ),
       drawerOpen &&
         React.createElement(
           'div',
@@ -331,7 +361,7 @@ export function BrowserPanel({ platform }: Props) {
             'div',
             { className: 'flex-1 overflow-y-auto p-1.5 space-y-0.5' },
             items.length === 0
-              ? React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500 p-3 leading-relaxed' }, '暂无资源。先在浏览器里打开视频页并点一下播放，再点「嗅探」。')
+              ? React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500 p-3 leading-relaxed' }, '暂无资源。先在浏览器窗口里打开视频页并点一下播放，再点「嗅探」。')
               : items.map(renderItem),
           ),
           queue.length > 0 &&

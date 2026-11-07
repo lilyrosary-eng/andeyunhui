@@ -10,6 +10,7 @@
 //! 解锁状态只存内存；锁定时连信封一起丢掉，下次命令重新从磁盘读，避免外部改动后内存陈旧。
 
 use crate::services::ai_service::secret::machine_passphrase;
+use crate::services::biometric;
 use crate::services::vault_crypto::{self, Envelope, Kdf, SlotKind, Unlocked};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -18,8 +19,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 pub const DEFAULT_AUTO_LOCK_MIN: u32 = 5;
-/// 主密码最短长度。真安全性由 scrypt 与口令熵决定；这里只挡「随手一个 a」。
+/// 主密码最短长度（统一 8 位，不做 debug/release 特例）。
+/// 真安全性由 scrypt 与口令熵决定；这里只挡「随手一个 a」。
 pub const MIN_MASTER_PASSWORD_CHARS: usize = 8;
+
+fn min_master_password_chars() -> usize {
+    MIN_MASTER_PASSWORD_CHARS
+}
 const MAX_BACKUPS: usize = 5;
 const MAX_AUDIT: usize = 200;
 const MAX_HISTORY: usize = 20;
@@ -164,6 +170,22 @@ pub struct VaultStatus {
     pub auto_lock_min: u32,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    /// 当前构建的主密码下限（debug=6 / release=8），UI 必须以此为准
+    pub min_password_chars: usize,
+    /// 本机解锁是否强制经过生物识别（策略文件，锁定态也可读）
+    pub biometric_required: bool,
+    /// 当前平台是否支持生物识别（Windows Hello 等）
+    pub biometric_supported: bool,
+    /// 生物识别可用性说明（不可用时给出原因）
+    pub biometric_detail: String,
+}
+
+/// 明文策略文件：只放「本机解锁是否要求生物识别」这类非机密开关。
+/// 不放进 VaultMeta 是因为锁定态读不到 meta（meta 由 DK 解密），而门闸必须锁定态可判定。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VaultPolicy {
+    pub biometric_required: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -188,6 +210,7 @@ struct VaultMemory {
     unlocked: Option<Unlocked>,
     last_activity: Instant,
     auto_lock_min: u32,
+    policy: VaultPolicy,
 }
 
 impl VaultMemory {
@@ -197,6 +220,7 @@ impl VaultMemory {
             unlocked: None,
             last_activity: Instant::now(),
             auto_lock_min: DEFAULT_AUTO_LOCK_MIN,
+            policy: VaultPolicy::default(),
         }
     }
 }
@@ -281,7 +305,45 @@ fn load_into_memory(app: &AppHandle, m: &mut VaultMemory) -> Result<(), String> 
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("读取密码库失败: {e}"))?;
     m.envelope = Some(Envelope::from_json(&raw)?);
+    m.policy = read_policy(app);
     Ok(())
+}
+
+// ===================== 策略文件（明文，非机密） =====================
+
+fn policy_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(vault_dir(app)?.join("policy.json"))
+}
+
+fn read_policy(app: &AppHandle) -> VaultPolicy {
+    let Ok(path) = policy_path(app) else {
+        return VaultPolicy::default();
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_policy(app: &AppHandle, policy: &VaultPolicy) -> Result<(), String> {
+    let path = policy_path(app)?;
+    let tmp = path.with_extension("json.tmp");
+    let json = serde_json::to_string_pretty(policy).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, json).map_err(|e| format!("写入策略失败: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("替换策略文件失败: {e}"))?;
+    Ok(())
+}
+
+/// 生物识别可用性缓存：30 秒 TTL。
+/// 用户在系统里注册/插入设备后，不需要重启应用，下一次状态轮询就会刷新。
+fn availability_cached() -> biometric::BiometricAvailability {
+    static CACHE: OnceLock<Mutex<(Instant, biometric::BiometricAvailability)>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new((Instant::now() - Duration::from_secs(60), biometric::availability())));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.0.elapsed() >= Duration::from_secs(30) {
+        *guard = (Instant::now(), biometric::availability());
+    }
+    guard.1.clone()
 }
 
 // ===================== 锁定策略 =====================
@@ -396,6 +458,10 @@ fn status_from(m: &mut VaultMemory) -> VaultStatus {
             auto_lock_min: m.auto_lock_min.max(1),
             created_at_ms: env.created_at_ms,
             updated_at_ms: env.updated_at_ms,
+            min_password_chars: min_master_password_chars(),
+            biometric_required: m.policy.biometric_required,
+            biometric_supported: availability_cached().supported,
+            biometric_detail: availability_cached().detail.clone(),
         },
         None => VaultStatus {
             exists: false,
@@ -407,6 +473,10 @@ fn status_from(m: &mut VaultMemory) -> VaultStatus {
             auto_lock_min: DEFAULT_AUTO_LOCK_MIN,
             created_at_ms: 0,
             updated_at_ms: 0,
+            min_password_chars: min_master_password_chars(),
+            biometric_required: m.policy.biometric_required,
+            biometric_supported: availability_cached().supported,
+            biometric_detail: availability_cached().detail.clone(),
         },
     }
 }
@@ -448,8 +518,9 @@ pub fn create(
     enable_device_unlock: bool,
     auto_lock_min: Option<u32>,
 ) -> Result<CreateOutcome, String> {
-    if password.chars().count() < MIN_MASTER_PASSWORD_CHARS {
-        return Err(format!("主密码至少 {MIN_MASTER_PASSWORD_CHARS} 位"));
+    let min_chars = min_master_password_chars();
+    if password.chars().count() < min_chars {
+        return Err(format!("主密码至少 {min_chars} 位"));
     }
     let mut m = lock_memory();
     load_into_memory(app, &mut m)?;
@@ -502,6 +573,17 @@ pub fn unlock(app: &AppHandle, password: &str) -> Result<VaultStatus, String> {
 pub fn unlock_device(app: &AppHandle) -> Result<VaultStatus, String> {
     let mut m = lock_memory();
     load_into_memory(app, &mut m)?;
+    if m.policy.biometric_required {
+        return Err("本机解锁已设为必须通过生物识别，请使用 Windows Hello".to_string());
+    }
+    unlock_device_inner(app, &mut m, "本机免密解锁")
+}
+
+fn unlock_device_inner(
+    app: &AppHandle,
+    m: &mut VaultMemory,
+    audit_detail: &str,
+) -> Result<VaultStatus, String> {
     let env = m.envelope.as_ref().ok_or_else(|| "密码库不存在".to_string())?;
     let idx = env
         .slots
@@ -510,7 +592,51 @@ pub fn unlock_device(app: &AppHandle) -> Result<VaultStatus, String> {
         .ok_or_else(|| "本机免密解锁未启用".to_string())?;
     let unlocked = env.unlock_with_slot(idx, &machine_passphrase())?;
     let meta = parse_meta(&unlocked);
-    refresh_unlock_after_meta_write(app, &mut m, unlocked, meta, "vault.unlock", "本机免密解锁")
+    refresh_unlock_after_meta_write(app, m, unlocked, meta, "vault.unlock", audit_detail)
+}
+
+/// 生物识别解锁：先由 Rust 调系统验证（Windows Hello），通过后才解 device 槽位。
+/// 前端无法绕过：没有「先验证再调用解锁」的分离步骤，验证与解槽在同一个后端命令里。
+pub fn unlock_biometric(app: &AppHandle) -> Result<VaultStatus, String> {
+    let mut m = lock_memory();
+    load_into_memory(app, &mut m)?;
+    let env = m.envelope.as_ref().ok_or_else(|| "密码库不存在".to_string())?;
+    if env.slot_count(SlotKind::Device) == 0 {
+        return Err("本机免密解锁未启用，无法使用生物识别".to_string());
+    }
+    if !availability_cached().supported {
+        return Err(availability_cached().detail.clone());
+    }
+    let verified = biometric::request_verification("解锁安得云荟密码库")?;
+    if !verified {
+        return Err("生物识别未通过，请重试或改用主密码".to_string());
+    }
+    unlock_device_inner(app, &mut m, "Windows Hello 解锁")
+}
+
+/// 开关「本机解锁必须经过生物识别」。开启前先做一次真实验证，避免开了却用不了。
+pub fn set_biometric_required(app: &AppHandle, required: bool) -> Result<VaultStatus, String> {
+    let mut m = lock_memory();
+    load_into_memory(app, &mut m)?;
+    {
+        let env = m.envelope.as_ref().ok_or_else(|| "密码库不存在".to_string())?;
+        if required && env.slot_count(SlotKind::Device) == 0 {
+            return Err("请先启用本机免密解锁，再要求生物识别".to_string());
+        }
+    }
+    if required {
+        if !availability_cached().supported {
+            return Err(availability_cached().detail.clone());
+        }
+        let verified = biometric::request_verification("启用密码库生物识别解锁")?;
+        if !verified {
+            return Err("生物识别未通过，未开启".to_string());
+        }
+    }
+    let policy = VaultPolicy { biometric_required: required };
+    write_policy(app, &policy)?;
+    m.policy = policy;
+    Ok(status_from(&mut m))
 }
 
 pub fn lock(app: &AppHandle) -> Result<VaultStatus, String> {
@@ -529,8 +655,9 @@ pub fn change_password(
     current_password: &str,
     new_password: &str,
 ) -> Result<VaultStatus, String> {
-    if new_password.chars().count() < MIN_MASTER_PASSWORD_CHARS {
-        return Err(format!("新主密码至少 {MIN_MASTER_PASSWORD_CHARS} 位"));
+    let min_chars = min_master_password_chars();
+    if new_password.chars().count() < min_chars {
+        return Err(format!("新主密码至少 {min_chars} 位"));
     }
     let mut m = lock_memory();
     load_into_memory(app, &mut m)?;
@@ -598,8 +725,9 @@ pub fn redeem_recovery(
     code: &str,
     new_password: &str,
 ) -> Result<RedeemOutcome, String> {
-    if new_password.chars().count() < MIN_MASTER_PASSWORD_CHARS {
-        return Err(format!("新主密码至少 {MIN_MASTER_PASSWORD_CHARS} 位"));
+    let min_chars = min_master_password_chars();
+    if new_password.chars().count() < min_chars {
+        return Err(format!("新主密码至少 {min_chars} 位"));
     }
     let mut m = lock_memory();
     load_into_memory(app, &mut m)?;
@@ -769,6 +897,46 @@ pub fn set_auto_lock(app: &AppHandle, minutes: u32) -> Result<VaultStatus, Strin
         Ok(())
     })?;
     status(app)
+}
+
+/// 整体移除密码库：校验主密码后删除 `vault.json` **与全部滚动备份**，并清空内存解锁态。
+/// 必须验主密码：既防误删，也确保调用者确实持有库口令（未锁定时同样要求）。
+pub fn destroy(app: &AppHandle, password: &str) -> Result<(), String> {
+    if password.is_empty() {
+        return Err("请输入主密码以确认移除".to_string());
+    }
+    let mut m = lock_memory();
+    load_into_memory(app, &mut m)?;
+    {
+        let env = m.envelope.as_ref().ok_or_else(|| "密码库不存在".to_string())?;
+        env.unlock(password)?;
+    }
+
+    // 先清解锁态，避免删除过程中仍有命令能读到内存数据
+    m.unlocked = None;
+    m.envelope = None;
+    m.policy = VaultPolicy::default();
+
+    let path = vault_file(app)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| format!("删除密码库文件失败: {e}"))?;
+    }
+    let backups = backup_dir(app)?;
+    if backups.exists() {
+        if let Ok(entries) = std::fs::read_dir(&backups) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().map(|e| e == "json").unwrap_or(false) {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+    }
+    let policy = policy_path(app)?;
+    if policy.exists() {
+        let _ = std::fs::remove_file(&policy);
+    }
+    Ok(())
 }
 
 pub fn audit_log(app: &AppHandle, limit: usize) -> Result<Vec<AuditEntry>, String> {

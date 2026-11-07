@@ -1,4 +1,6 @@
 pub mod note_service;
+// 笔记模块「网络」：arXiv / HuggingFace / GitHub / Semantic Scholar 官方开放接口适配
+pub mod note_sources;
 pub mod workflow_service;
 pub mod transfer_station;
 pub mod image_service;
@@ -38,6 +40,8 @@ pub mod plugin_access;
 pub mod vault_crypto;
 // 密码库服务层：文件生命周期 / 内存解锁态 / 条目 CRUD / 闲置自动锁 / 审计。
 pub mod vault_service;
+// Windows Hello 生物识别（WinRT UserConsentVerifier）：仅作为 device 槽位的门闸。
+pub mod biometric;
 pub mod checkpoint;
 // 项目工作区 .adyh / 跨 harness 通道 .Talk：规则、记忆、会话、媒体、消息总线。
 pub mod adyh_service;

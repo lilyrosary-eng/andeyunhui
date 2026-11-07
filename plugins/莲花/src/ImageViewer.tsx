@@ -280,28 +280,34 @@ function TileImage({
   const cssW = br?.width ?? info.width;
   const cssH = br?.height ?? info.height;
   const innerScale = cssW / lv.width;
+  // **定位必须与底层 <img> 完全一致**：
+  // 底层是 `max-w-full max-h-full object-contain`（在容器内居中）+ zoomStyle，
+  // 所以瓦片层也用「flex 居中 + 同一个 zoomStyle」，只是把 transform 挂在
+  // 内层（承载层像素尺寸）上。此前外层用 absolute inset-0 + 自己的定位，
+  // 两层算法不同 ⇒ 错位成两个图。
   return (
     <div
-      className="absolute inset-0 pointer-events-none"
-      style={{
-        ...zoomStyle,
-        width: cssW,
-        height: cssH,
-        overflow: 'hidden',
-        // 提升为独立合成层：缩放时浏览器只重合成这一层，
-        // 而不是每次重新合成整张 8192² 图层（否则缩放巨卡）
-        willChange: 'transform',
-      }}
+      className="absolute inset-0 pointer-events-none flex items-center justify-center"
+      style={{ willChange: 'transform' }}
     >
       <div
         style={{
-          width: lv.width,
-          height: lv.height,
-          transform: `scale(${innerScale})`,
-          transformOrigin: '0 0',
+          ...zoomStyle,
+          width: cssW,
+          height: cssH,
+          overflow: 'hidden',
         }}
       >
-        <TileGrid tiles={tiles} tileSize={info.tile_size} />
+        <div
+          style={{
+            width: lv.width,
+            height: lv.height,
+            transform: `scale(${innerScale})`,
+            transformOrigin: '0 0',
+          }}
+        >
+          <TileGrid tiles={tiles} tileSize={info.tile_size} />
+        </div>
       </div>
     </div>
   );

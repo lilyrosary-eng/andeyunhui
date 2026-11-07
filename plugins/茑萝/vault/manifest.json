@@ -18,6 +18,8 @@
       "vault_create",
       "vault_unlock",
       "vault_unlock_device",
+      "vault_unlock_biometric",
+      "vault_set_biometric_required",
       "vault_lock",
       "vault_change_password",
       "vault_rotate_recovery_codes",
@@ -30,9 +32,14 @@
       "vault_empty_trash",
       "vault_mark_used",
       "vault_set_auto_lock",
+      "vault_destroy",
       "vault_audit_log",
       "vault_export_json",
-      "vault_import_items"
+      "vault_import_items",
+      "pick_file",
+      "pick_save_file",
+      "read_text_file",
+      "write_text_file"
     ],
     "note": "能力域 vault：只放行 vault_* 命令族；解锁态由 Rust 内存状态机维护，插件拿不到未解锁的 DK"
   }

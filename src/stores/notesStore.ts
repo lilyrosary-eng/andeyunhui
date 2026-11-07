@@ -37,8 +37,11 @@ interface NotesState {
   favoriteIds: Set<string>;
   favoriteMeta: Map<string, FavoriteMeta>;
   summonQueue: string[];
+  /** 「网络」独立结果页是否打开（侧栏入口切换；打开时主区不显示编辑器） */
+  networkOpen: boolean;
 
   // ---- actions ----
+  setNetworkOpen: (open: boolean) => void;
   setNotes: (notes: NoteInfo[]) => void;
   setSearchQuery: (q: string) => void;
   setTitle: (t: string) => void;
@@ -65,6 +68,12 @@ interface NotesState {
   setContentSearchResults: (s: Set<string>) => void;
   /** 创建新笔记并加载 */
   createNote: () => Promise<void>;
+  /**
+   * 直接创建一篇带内容的笔记（不切换当前编辑）。
+   * 用于「网络」结果页的「收藏为笔记」：保存后停留在结果页，用户可继续浏览。
+   * 返回新笔记 id。
+   */
+  createNoteWith: (title: string, content: string) => Promise<string>;
   // 常用笔记 actions
   loadFavorites: () => Promise<void>;
   toggleFavorite: (id: string) => Promise<void>;
@@ -149,7 +158,9 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   favoriteIds: new Set(),
   favoriteMeta: new Map(),
   summonQueue: [],
+  networkOpen: false,
 
+  setNetworkOpen: (networkOpen) => set({ networkOpen }),
   setNotes: (notes) => set({ notes }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setTitle: (title) => {
@@ -170,7 +181,8 @@ export const useNotesStore = create<NotesState>((set, get) => ({
       return;
     }
     logger.notes.switchNote(id);
-    set({ currentNoteId: id });
+    // 从「网络」页或列表点开一篇笔记时，主区要回到编辑器（否则看起来像点了没反应）
+    set({ currentNoteId: id, networkOpen: false });
     api.getNoteContent(id).then((data) => {
       logger.notes.contentLoaded(id, data.title);
       // 去掉内容首行 # 大标题（标题输入框已显示，编辑区和预览区无需重复）
@@ -279,6 +291,15 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     const updated = await api.getAllNotes();
     set({ notes: updated });
     get().loadNoteContent(newId);
+  },
+
+  createNoteWith: async (title, content) => {
+    const newId = crypto.randomUUID();
+    logger.notes.create(newId);
+    await api.saveNote(newId, title, content);
+    const updated = await api.getAllNotes();
+    set({ notes: updated });
+    return newId;
   },
 
   loadFavorites: async () => {

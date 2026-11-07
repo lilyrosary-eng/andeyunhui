@@ -990,6 +990,8 @@ struct LevelSampler {
     cols: u32,
     step_x: u32,
     step_y: u32,
+    /// 该层的整数采样步长（横竖相同，保证网格对齐）
+    step: u32,
     /// 已完成的输出行
     out_row: u32,
     /// 瓦片行缓冲：tile_size 行 × level_w 列 × 3
@@ -1002,14 +1004,15 @@ struct LevelSampler {
 }
 
 impl LevelSampler {
-    fn new(level_w: u32, level_h: u32, src_w: u32, src_h: u32, tile: u32) -> Self {
+    fn new(level_w: u32, level_h: u32, src_w: u32, src_h: u32, tile: u32, step: u32) -> Self {
         let cols = level_w.div_ceil(tile);
         Self {
             level_w,
             level_h,
             cols,
-            step_x: (src_w / level_w.max(1)).max(1),
-            step_y: (src_h / level_h.max(1)).max(1),
+            step_x: step.max(1),
+            step_y: step.max(1),
+            step: step.max(1),
             out_row: 0,
             buf: Vec::with_capacity((tile * level_w * 3) as usize),
             buf_rows: 0,
@@ -1172,9 +1175,14 @@ fn generate_png_tiles(
         _ => return Err("暂不支持该 PNG 颜色类型".into()),
     };
 
+    // 每层的整数 step：由 level 尺寸反推。tile_levels 已保证层尺寸是
+    // ceil(src/step) 的形式，这里用同样的公式还原 step。
     let mut samplers: Vec<LevelSampler> = levels
         .iter()
-        .map(|l| LevelSampler::new(l.width, l.height, w0, h0, tile))
+        .map(|l| {
+            let step = ((w0 as u64).div_ceil(l.width.max(1) as u64)) as u32;
+            LevelSampler::new(l.width, l.height, w0, h0, tile, step)
+        })
         .collect();
 
     let row_bytes = w0 as usize * channels;
@@ -1224,24 +1232,37 @@ fn tiles_dir(app: &tauri::AppHandle, image_path: &str) -> Result<std::path::Path
     Ok(base.join("cache").join("tiles").join(h))
 }
 
-/// 计算金字塔层级：从 TILE_SIZE 开始逐级翻倍，直到覆盖原图
+/// 计算金字塔层级。
+///
+/// **step 必须是 1/2/4/8/16… 的整数**，且**所有层共用同一套采样网格**。
+/// 之前用 `step = src_w / level_w`（可能是小数 1.875），导致相邻瓦片的
+/// 抽样相位不同 ⇒ 拼接处像素不连续 ⇒ **肉眼可见的接缝**（用户反馈：
+/// "8192×8192 的图本来就是 usdu 接缝，看不出差别，没想到这里看出来了"）。
+/// 改成整数 step 后，任何两层、任何两块瓦片的采样点都对齐 ⇒ 无接缝。
 fn tile_levels(w0: u32, h0: u32, tile: u32) -> Vec<TileLevel> {
     let mut levels = Vec::new();
-    let mut lw = tile.min(w0.max(1));
-    let mut lh = tile.min(h0.max(1));
+    // 从"最小层 ≈ tile 宽"开始，逐级把 step 减半（step=1 即原图分辨率）
+    let mut step = ((w0.max(1) as f64 / tile as f64).ceil() as u32).max(1);
+    // step 规整到 2 的幂，保证各层 step 互为整数倍
+    let mut p2 = 1u32;
+    while p2 < step {
+        p2 <<= 1;
+    }
+    step = p2;
     loop {
+        let lw = (w0 as u64).div_ceil(step as u64) as u32;
+        let lh = (h0 as u64).div_ceil(step as u64) as u32;
         levels.push(TileLevel {
-            width: lw,
-            height: lh,
-            cols: lw.div_ceil(tile),
-            rows: lh.div_ceil(tile),
+            width: lw.max(1),
+            height: lh.max(1),
+            cols: lw.max(1).div_ceil(tile),
+            rows: lh.max(1).div_ceil(tile),
             scale: lw as f64 / w0.max(1) as f64,
         });
-        if lw >= w0 && lh >= h0 {
+        if step == 1 {
             break;
         }
-        lw = (lw * 2).min(w0);
-        lh = (lh * 2).min(h0);
+        step = (step / 2).max(1);
         if levels.len() > 12 {
             break;
         }

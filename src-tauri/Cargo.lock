@@ -156,6 +156,7 @@ dependencies = [
  "encoding_rs",
  "env_logger",
  "epub-parser",
+ "flate2",
  "futures-util",
  "gdk",
  "globset",
@@ -163,6 +164,7 @@ dependencies = [
  "gtk",
  "ignore",
  "image",
+ "jpeg-decoder",
  "libappindicator",
  "libc",
  "libloading 0.8.9",
@@ -178,6 +180,7 @@ dependencies = [
  "once_cell",
  "pdf-extract",
  "pipewire",
+ "png 0.17.16",
  "portable-pty",
  "pro-tools-kit",
  "pulldown-cmark",
@@ -205,12 +208,14 @@ dependencies = [
  "tokio",
  "uuid",
  "walkdir",
+ "webkit2gtk",
  "webview2-com",
  "webview2-com-sys",
  "winapi",
  "windows 0.62.2",
  "windows-capture",
  "windows-core 0.61.2",
+ "windows-future 0.3.2",
  "x11",
  "zbus",
  "zip 3.0.0",
@@ -3465,6 +3470,15 @@ checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
+]
+
+[[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
+dependencies = [
+ "rayon",
 ]
 
 [[package]]

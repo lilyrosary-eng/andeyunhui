@@ -23,6 +23,7 @@ export const KEYS = {
   },
   theme: {
     theme:             { key: 'theme', kind: 'string', scope: 'shared', default: 'system' },
+    liquidGlass:       { key: 'liquidGlass', kind: 'flag', scope: 'shared', default: '0', note: '液态玻璃材质（主题页开关）' },
     themeColor:        { key: 'themeColor', kind: 'string', scope: 'shared', default: '默认' },
     elementColor:      { key: 'elementColor', kind: 'string', scope: 'shared', default: '默认' },
     reverseColor:      { key: 'reverseColor', kind: 'flag', scope: 'shared', default: 'false' },

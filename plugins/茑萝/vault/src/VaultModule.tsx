@@ -12,20 +12,23 @@ import {
   type VaultItem,
 } from './api';
 import { errText, useVault } from './useVault';
-import { UnlockScreen, VaultOnboarding } from './UnlockScreen';
+import { UnlockScreen, VaultOnboarding, RecoveryCodesDialog } from './UnlockScreen';
 import { ItemEditor } from './ItemEditor';
 import { SettingsPanel } from './SettingsPanel';
 import { PasswordGenerator } from '../../../_shared/PasswordGenerator';
+import { setVaultView, useVaultView, type VaultView } from './nav';
+import type { ComponentType, ReactNode } from 'react';
 
-type Tab = 'all' | 'favorites' | 'trash' | 'security' | 'settings';
-
-const TABS: { key: Tab; label: string }[] = [
-  { key: 'all', label: '全部' },
-  { key: 'favorites', label: '收藏' },
-  { key: 'trash', label: '回收站' },
-  { key: 'security', label: '安全' },
-  { key: 'settings', label: '设置' },
-];
+// 复用宿主侧栏壳与模块设置面板（与其它茑萝子插件同一套外观/行为）
+const SecondaryNavShell = window.__HOST_UI__.SecondaryNavShell as unknown as ComponentType<{
+  children?: ReactNode;
+}>;
+const ModuleSettingsPanel = window.__HOST_UI__.ModuleSettingsPanel as unknown as ComponentType<{
+  title: string;
+  icon?: ReactNode;
+  onClose: () => void;
+  children: ReactNode;
+}>;
 
 function fmtDate(ms: number): string {
   if (!ms) return '—';
@@ -137,21 +140,32 @@ function SecurityPanel({ items, busy }: { items: VaultItem[]; busy: boolean }) {
 function VaultModule() {
   const hook = useVault();
   const { status, items, busy, error, reload, run } = hook;
-  const [tab, setTab] = useState<Tab>('all');
+  const view = useVaultView();
   const [query, setQuery] = useState('');
   const [draft, setDraft] = useState<VaultItem | null>(null);
   const [isNew, setIsNew] = useState(false);
   const [generatorOpen, setGeneratorOpen] = useState(false);
   const [confirmPurgeId, setConfirmPurgeId] = useState<string | null>(null);
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
 
   const visible = useMemo(() => {
-    let list = items.filter((i) => (tab === 'trash' ? !!i.deletedAtMs : !i.deletedAtMs));
-    if (tab === 'favorites') list = list.filter((i) => i.favorite);
+    let list = items.filter((i) => (view === 'trash' ? !!i.deletedAtMs : !i.deletedAtMs));
+    if (view === 'favorites') list = list.filter((i) => i.favorite);
     list = list.filter((i) => matches(query, i));
     return list.sort(
       (a, b) => Number(b.favorite) - Number(a.favorite) || b.updatedAtMs - a.updatedAtMs,
     );
-  }, [items, tab, query]);
+  }, [items, view, query]);
+
+  // 宿主侧栏齿轮：派发 module-settings-toggle → 打开本模块设置（与其它子插件同一契约）
+  useEffect(() => {
+    const onModuleSettings = (e: Event) => {
+      const detail = (e as CustomEvent<{ moduleId?: string }>).detail;
+      if (!detail?.moduleId || detail.moduleId === 'vault') setVaultView('settings');
+    };
+    window.addEventListener('module-settings-toggle', onModuleSettings);
+    return () => window.removeEventListener('module-settings-toggle', onModuleSettings);
+  }, []);
 
   if (!status) {
     return (
@@ -162,7 +176,15 @@ function VaultModule() {
   }
 
   if (!status.exists) {
-    return <VaultOnboarding run={run} />;
+    return (
+      <VaultOnboarding
+        run={run}
+        minPasswordChars={status.minPasswordChars}
+        busy={busy}
+        error={error}
+        onCreated={setRecoveryCodes}
+      />
+    );
   }
 
   if (!status.unlocked) {
@@ -172,7 +194,7 @@ function VaultModule() {
   const openNew = () => {
     setDraft(blankItem());
     setIsNew(true);
-    setTab('all');
+    setVaultView('all');
   };
 
   const select = (item: VaultItem) => {
@@ -211,23 +233,27 @@ function VaultModule() {
           {status.itemCount} 条 · 回收站 {status.trashedCount}
         </div>
         <div className="flex-1" />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="搜索标题 / 账号 / 网址 / 标签"
-          className="w-56 px-2.5 py-1.5 rounded-lg text-xs bg-white/70 dark:bg-stone-800/60 border border-neutral-200/80 dark:border-stone-700/60 outline-none"
-        />
+        {(view === 'all' || view === 'favorites' || view === 'trash') && (
+          <>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="搜索标题 / 账号 / 网址 / 标签"
+              className="w-56 px-2.5 py-1.5 rounded-lg text-xs bg-white/70 dark:bg-stone-800/60 border border-neutral-200/80 dark:border-stone-700/60 outline-none"
+            />
+            <button
+              onClick={openNew}
+              className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-[var(--element-muted)] text-[var(--element-bg)]"
+            >
+              + 新建
+            </button>
+          </>
+        )}
         <button
           onClick={() => setGeneratorOpen(true)}
           className="px-2.5 py-1.5 rounded-lg text-xs hairline hover:bg-black/5 dark:hover:bg-white/10"
         >
           生成器
-        </button>
-        <button
-          onClick={openNew}
-          className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-[var(--element-muted)] text-[var(--element-bg)]"
-        >
-          + 新建
         </button>
         <button
           onClick={() => void run(() => vaultApi.lock())}
@@ -237,35 +263,36 @@ function VaultModule() {
         </button>
       </div>
 
-      <div className="flex items-center gap-1 px-4 py-1.5 border-b border-white/80 dark:border-stone-700/50">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
-              tab === t.key
-                ? 'bg-[var(--element-muted)] text-[var(--element-bg)]'
-                : 'text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5'
-            }`}
-          >
-            {t.label}
-            {t.key === 'trash' && status.trashedCount > 0 ? ` (${status.trashedCount})` : ''}
-          </button>
-        ))}
-        {busy && <span className="ml-2 text-[11px] text-neutral-400">处理中…</span>}
-        {error && <span className="ml-2 text-[11px] text-red-600 dark:text-red-400 truncate">{error}</span>}
-      </div>
+      {(busy || error) && (
+        <div className="flex items-center gap-2 px-4 py-1.5 border-b border-white/80 dark:border-stone-700/50">
+          {busy && <span className="text-[11px] text-neutral-400">处理中…</span>}
+          {error && (
+            <span className="text-[11px] text-red-600 dark:text-red-400 truncate">{error}</span>
+          )}
+        </div>
+      )}
 
-      {tab === 'security' ? (
+      {view === 'security' ? (
         <SecurityPanel items={items} busy={busy} />
-      ) : tab === 'settings' ? (
-        <SettingsPanel status={status} run={run} busy={busy} error={error} />
+      ) : view === 'settings' ? (
+        <ModuleSettingsPanel
+          title="密码托管"
+          icon={
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+              <path d="m9 12 2 2 4-4" />
+            </svg>
+          }
+          onClose={() => setVaultView('all')}
+        >
+          <SettingsPanel status={status} run={run} busy={busy} error={error} />
+        </ModuleSettingsPanel>
       ) : (
         <div className="flex-1 min-h-0 flex">
           <div className="w-72 shrink-0 border-r border-white/80 dark:border-stone-700/50 overflow-auto">
             {visible.length === 0 && (
               <div className="p-4 text-xs text-neutral-400 dark:text-stone-500">
-                {tab === 'trash' ? '回收站是空的' : query ? '没有匹配的条目' : '还没有条目，点右上角「新建」'}
+                {view === 'trash' ? '回收站是空的' : query ? '没有匹配的条目' : '还没有条目，点右上角「新建」'}
               </div>
             )}
             {visible.map((item) => (
@@ -276,7 +303,7 @@ function VaultModule() {
                     ? 'bg-[var(--element-muted)]/15'
                     : 'hover:bg-black/5 dark:hover:bg-white/5'
                 }`}
-                onClick={() => (tab === 'trash' ? undefined : select(item))}
+                onClick={() => (view === 'trash' ? undefined : select(item))}
               >
                 <div className="flex items-center gap-1.5">
                   {item.favorite && <span className="text-amber-500 text-[11px]">★</span>}
@@ -290,7 +317,7 @@ function VaultModule() {
                 <div className="mt-0.5 text-[11px] text-neutral-400 dark:text-stone-500 truncate">
                   {item.username || item.urls[0] || '—'}
                 </div>
-                {tab === 'trash' && (
+                {view === 'trash' && (
                   <div className="mt-1 flex items-center gap-1">
                     <button
                       onClick={async (e) => {
@@ -330,7 +357,7 @@ function VaultModule() {
                 )}
               </div>
             ))}
-            {tab === 'trash' && items.some((i) => i.deletedAtMs) && (
+            {view === 'trash' && items.some((i) => i.deletedAtMs) && (
               <div className="p-2">
                 <button
                   onClick={async () => {
@@ -382,17 +409,96 @@ function VaultModule() {
           </div>
         </div>
       )}
+
+      {recoveryCodes && (
+        <RecoveryCodesDialog
+          codes={recoveryCodes}
+          onDone={() => setRecoveryCodes(null)}
+          title="备用验证码（只显示这一次）"
+        />
+      )}
     </div>
   );
 }
 
+const SIDEBAR_VIEWS: { key: VaultView; label: string; icon: ReactNode }[] = [
+  {
+    key: 'all',
+    label: '全部条目',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="M3 9h18" />
+      </svg>
+    ),
+  },
+  {
+    key: 'favorites',
+    label: '收藏',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="m12 3 2.9 6.1 6.6.9-4.8 4.6 1.2 6.6L12 18.1 6.1 21.2l1.2-6.6L2.5 10l6.6-.9z" />
+      </svg>
+    ),
+  },
+  {
+    key: 'trash',
+    label: '回收站',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
+      </svg>
+    ),
+  },
+  {
+    key: 'security',
+    label: '安全体检',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z" />
+        <path d="m9 12 2 2 4-4" />
+      </svg>
+    ),
+  },
+  {
+    key: 'settings',
+    label: '设置',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+      </svg>
+    ),
+  },
+];
+
 function VaultSidebar() {
+  const view = useVaultView();
   return (
-    <div className="p-4 text-xs text-neutral-400 dark:text-stone-500">
-      密码托管 · v0.1
-      <div className="mt-2">主密码 + 本机免密 · 备用码兜底</div>
-      <div className="mt-1">数据仅存本机，自动锁定</div>
-    </div>
+    <SecondaryNavShell>
+      <div className="px-3 pt-2 pb-1 text-[11px] font-medium text-neutral-400 dark:text-stone-500">
+        密码库
+      </div>
+      {SIDEBAR_VIEWS.map((item) => (
+        <button
+          key={item.key}
+          onClick={() => setVaultView(item.key)}
+          className={`mx-1 mb-0.5 w-[calc(100%-8px)] flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-sm transition-colors ${
+            view === item.key
+              ? 'bg-black/5 dark:bg-white/10 text-neutral-800 dark:text-stone-100 font-medium'
+              : 'text-neutral-600 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5'
+          }`}
+        >
+          <span className="w-4 h-4 shrink-0">{item.icon}</span>
+          <span className="flex-1 truncate">{item.label}</span>
+        </button>
+      ))}
+      <div className="px-3 pt-3 text-[11px] leading-relaxed text-neutral-400 dark:text-stone-500">
+        仅存本机 · 自动锁定
+        <br />
+        主密码 / 本机免密 / 备用码
+      </div>
+    </SecondaryNavShell>
   );
 }
 

@@ -22,6 +22,19 @@ pub fn search_notes_content(app: AppHandle, query: String) -> Result<Vec<String>
     note_service::search_notes_content(notes_dir, &query)
 }
 
+/// 笔记模块「网络」搜索：按源调用站点**官方开放接口**，返回统一结构。
+///
+/// 与插件的能力模型无关（这是宿主自己的命令）：源固定为四个适配器，
+/// 不做任意 URL 代理，避免把「网络」做成一类可被滥用的抓取通道。
+#[tauri::command]
+pub async fn note_web_search(
+    source: String,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<crate::services::note_sources::NoteWebResult>, String> {
+    crate::services::note_sources::search(&source, &query, limit).await
+}
+
 #[tauri::command]
 pub fn get_note_content(app: AppHandle, note_id: &str) -> Result<Value, String> {
     let root_dir = notes_root_dir(&app)?;

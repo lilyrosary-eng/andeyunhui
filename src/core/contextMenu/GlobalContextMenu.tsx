@@ -102,22 +102,29 @@ export function GlobalContextMenu() {
     setMenu((prev) => (prev ? { ...prev, items } : prev));
   }, []);
 
+  const close = useCallback(() => {
+    setMenu(null);
+    targetRef.current = null;
+  }, []);
+
   useEffect(() => {
     const onContextMenu = (e: MouseEvent) => {
+      // 组件自带的局部菜单（导轨等）会自己 preventDefault 并已弹出自己的菜单，让路给它。
+      // 除此之外**一律拦掉系统默认菜单** —— 用户口径：全软件层不要 WebView2 那套，
+      // 只在启用了我们的菜单的场景弹我们的；凑不出条目也照样拦，宁可什么都不弹。
       if (e.defaultPrevented) return;
       // 带修饰键的右键留给系统与其它软件（截图/触控板的自定义手势都走这条）
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      e.preventDefault();
       const el = e.target as Element | null;
-      if (!el || el.nodeType !== 1) return;
+      if (!el || el.nodeType !== 1) { close(); return; }
       const info = describeContextMenuTarget(el, {
         selectionText: currentSelectionText(),
         moduleId: useAppStore.getState().activeModule || null,
       });
       const hasBuiltin = Object.values(builtinFlags(info)).some(Boolean);
       const providers = visibleProviders(info.moduleId);
-      // 一条都凑不出来就不要拦：那样只会让右键变成哑键
-      if (!hasBuiltin && providers.length === 0) return;
-      e.preventDefault();
+      if (!hasBuiltin && providers.length === 0) { close(); return; }
       targetRef.current = { info, element: el };
       setMenu({ x: e.clientX, y: e.clientY, items: [] });
       setActive(-1);
@@ -125,18 +132,13 @@ export function GlobalContextMenu() {
     };
     document.addEventListener('contextmenu', onContextMenu);
     return () => document.removeEventListener('contextmenu', onContextMenu);
-  }, [rebuild]);
+  }, [rebuild, close]);
 
   // 菜单开着时 provider 增删（模块挂载/卸载）→ 重算一次，别显示过期的东西
   useEffect(() => {
     if (!menu) return;
     return subscribeContextMenu(() => { void rebuild(); });
   }, [menu, rebuild]);
-
-  const close = useCallback(() => {
-    setMenu(null);
-    targetRef.current = null;
-  }, []);
 
   useEffect(() => {
     if (!menu) return;

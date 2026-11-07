@@ -34,6 +34,7 @@ import {
   Bell,
   ChevronRight,
   ExternalLink,
+  Droplets,
 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { CompanionManageScreen } from './CompanionManageScreen';
@@ -360,7 +361,7 @@ export function GeneralSettingsScreen() {
 
 /** 主题与外观屏 —— 复用全局 ThemeProvider，切完即生效并持久化 */
 export function AppearanceSettingsScreen() {
-  const { theme, setTheme, resolved, themeColor, setThemeColor, elementColor, setElementColor } = useTheme();
+  const { theme, setTheme, liquidGlass, setLiquidGlass, resolved, themeColor, setThemeColor, elementColor, setElementColor } = useTheme();
 
   const themeOptions = [
     { id: 'system' as const, label: '跟随系统', icon: <Monitor size={20} /> },
@@ -399,6 +400,32 @@ export function AppearanceSettingsScreen() {
             </button>
           );
         })}
+      </section>
+
+      <section className="rounded-2xl bg-[var(--card)] border border-[var(--border)] overflow-hidden">
+        <div className="px-4 pt-3 pb-1 text-[var(--muted-foreground)]" style={{ fontSize: 'var(--m-text-caption)' }}>
+          材质效果
+        </div>
+        <button
+          type="button"
+          onClick={() => setLiquidGlass(!liquidGlass)}
+          className="flex w-full items-center gap-3 px-4 text-left active:bg-[var(--muted)]/60 transition-colors"
+          style={{ height: '56px' }}
+        >
+          <span className="text-[var(--element-bg)]" style={{ width: '24px', display: 'flex', justifyContent: 'center' }}>
+            <Droplets size={20} />
+          </span>
+          <span
+            className="flex-1"
+            style={{ fontSize: 'var(--m-text-label)', color: liquidGlass ? 'var(--element-bg)' : 'var(--foreground)' }}
+          >
+            液态玻璃
+          </span>
+          {liquidGlass && <Check size={20} className="text-[var(--element-bg)]" />}
+        </button>
+        <div className="px-4 pb-3 text-[var(--muted-foreground)]" style={{ fontSize: 'var(--m-text-caption)' }}>
+          把全局毛玻璃换成液态玻璃：边缘折射背景、菲涅耳高光与悬浮投影。折射需要 Chromium 内核，其他内核退化为光照近似。
+        </div>
       </section>
 
       <section className="rounded-2xl bg-[var(--card)] border border-[var(--border)] overflow-hidden">

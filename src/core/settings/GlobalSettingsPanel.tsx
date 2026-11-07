@@ -189,7 +189,7 @@ export function GlobalSettingsPanel() {
     return () => window.removeEventListener('open-global-settings', onOpen as EventListener);
   }, []);
   const { t, lang, setLang } = useI18n();
-  const { theme, setTheme, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily, bgImage, setBgImage, bgVideo, setBgVideo, bgVideoPersist, setBgVideoPersist, bgBlur, setBgBlur, setBgAngle, setBgFlip, bgScrub, setBgScrub } = useTheme();
+  const { theme, setTheme, liquidGlass, setLiquidGlass, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily, bgImage, setBgImage, bgVideo, setBgVideo, bgVideoPersist, setBgVideoPersist, bgBlur, setBgBlur, setBgAngle, setBgFlip, bgScrub, setBgScrub } = useTheme();
   const [autoSave, setAutoSave] = useState(true);
   const [bgEditorSrc, setBgEditorSrc] = useState<string | null>(null);
   const [bgEditorFile, setBgEditorFile] = useState<File | null>(null);
@@ -787,6 +787,19 @@ export function GlobalSettingsPanel() {
                       <span className="text-xs font-medium">{m.label}</span>
                     </button>
                   ))}
+                </div>
+              </section>
+
+              <section>
+                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">{t('settings.themes.material')}</h2>
+                <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 overflow-hidden">
+                  <div className="flex justify-between items-center p-4 gap-4">
+                    <div>
+                      <div className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.themes.liquidGlass')}</div>
+                      <div className="text-xs text-neutral-400 dark:text-stone-500 mt-1">{t('settings.themes.liquidGlassDesc')}</div>
+                    </div>
+                    <Switch checked={liquidGlass} onCheckedChange={setLiquidGlass} className="data-[state=checked]:bg-[var(--element-color-raw)] shrink-0" />
+                  </div>
                 </div>
               </section>
 

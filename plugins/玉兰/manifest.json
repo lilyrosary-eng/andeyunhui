@@ -10,8 +10,8 @@
   "permissions": {
     "commands": [
       "add_to_blacklist",
-      "bilibili_request",
       "browser_close",
+      "browser_focus",
       "browser_open",
       "browser_set_bounds",
       "browser_sniff",

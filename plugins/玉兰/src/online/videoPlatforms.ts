@@ -1,24 +1,16 @@
 // 视频模块 · 网络视频平台注册表
 //
-// 两种模式，取决于平台是否开放可取流的接口：
-//  · 'api'（哔哩哔哩）：前端调平台 API（wbi 签名在 TS 端）→ Rust 无 CORS 转发（白名单校验）→
-//    播放交给我们的 VideoPlayer（去广告 + 统一控制条 + SMTC）→ 下载由 Rust 落地到本地。
-//  · 'url'（抖音）：面板区作为**内嵌浏览器**（Rust 侧子 webview，
-//    精确铺在面板矩形上，不是独立浮窗），视频在该平台自己的网页里播放，
-//    再由「嗅探」列出页面加载的图片/视频资源供下载。
+// 2026-11 收敛后只剩一种模式：'url'（官方网页 + 独立浏览器窗口）。
 //
-// ⚠️ 两种模式都**不使用 OS 浮窗**（旧方案 alwaysOnTop 的浮窗会盖住主窗 UI、
-//    不跟随主窗移动、尺寸不同步 —— 已废弃）。'url' 模式用的是主窗口内的子 webview。
+// 历史：B 站曾走 'api'（wbi 签名 + playurl）。但 B 站没有面向第三方客户端的官方接口，
+// 网页接口属未授权调用（社区客户端已收到律师函），已移除；抖音页面链接也需
+// a_bogus 签名，纯 HTTP 不可解析。因此两个平台都改为：
+//   · Rust 侧创建**独立浏览器窗口**（WebviewWindow，label = video-browser）；
+//   · 登录、播放完全由官方站点自己完成，我们不解析、不代理视频流；
+//   · 可选「嗅探」列出页面已加载的图片/视频资源，用户自行下载。
 //
-// mode 说明：
-//  - 'api'：存在可用的公开接口，能原生「首页/分区/推荐 + 搜索 + 取流 + 下载」。
-//           代表：哔哩哔哩（wbi 签名 + playurl + 推荐流/排行榜）。
-//  - 'url'：平台页面链接受 DRM 或无签名接口保护，纯 API 拿不到播放地址；
-//           因此改为**「内嵌浏览器」模式** —— 面板区就是浏览器（Rust 侧子 webview），
-//           视频在该平台自己的网页里播放，再由「嗅探」列出页面加载过的
-//           图片/视频资源（带缩略图与信息）供下载。
-//           代表：抖音。
-// 无论哪种模式都**不使用内嵌网页 / 浮窗**（旧方案的浮窗缺陷已移除）。
+// ⚠️ 为什么不是「面板里嵌网页」：实机验证 Windows/WebView2 下子 webview 始终被
+//    主 webview 的合成层盖住（白屏，z-order 无效），见 src-tauri/src/embedded_browser.rs。
 // 注：腾讯视频 / 爱奇艺 因 DRM 且无公开接口，已从注册表移除。
 
 export type VideoPlatformMode = 'api' | 'url';
@@ -70,12 +62,19 @@ export const VIDEO_PLATFORMS: VideoPlatform[] = [
     id: 'bilibili',
     name: '哔哩哔哩',
     home: 'https://www.bilibili.com',
-    mode: 'api',
+    // 2026-11 起改为浏览器窗口：B 站没有面向第三方客户端的官方接口，
+    // 网页接口 + wbi 签名属于未授权调用（社区客户端已收到律师函）。
+    // 改壳后由用户在官方页面内自行登录与播放，我们不解析、不抓流。
+    mode: 'url',
     accent: '#fb7299',
     accentDark: '#fc9bbb',
-    desc: '推荐 · 分区 · 搜索 · 去广告播放',
-    downloadable: true,
-    capabilities: ['推荐', '分区', '搜索', '清晰度', '下载'],
+    desc: '浏览器窗口 · 官方页面播放',
+    downloadable: false,
+    capabilities: ['浏览器窗口', '官方页面', '登录态'],
+    note:
+      'B 站未向第三方客户端开放浏览/播放接口，直接调用网页接口存在授权与合规风险。' +
+      '因此这里以「浏览器」方式打开官方站点：登录、播放都由 bilibili.com 自己完成，' +
+      '我们不解析页面、不代理视频流。',
   },
   {
     id: 'douyin',
@@ -86,9 +85,9 @@ export const VIDEO_PLATFORMS: VideoPlatform[] = [
     mode: 'url',
     accent: '#161823',
     accentDark: '#3a3a44',
-    desc: '内嵌浏览器 · 可嗅探下载',
+    desc: '浏览器窗口 · 可嗅探下载',
     downloadable: true,
-    capabilities: ['浏览器', '嗅探下载'],
+    capabilities: ['浏览器窗口', '嗅探下载'],
     note:
       '抖音的视频详情已改为客户端调用带 a_bogus 签名的接口，纯 HTTP 无法获取。' +
       '实测：分享页 window._SSR_DATA.data 为空对象、_ROUTER_DATA 仅含静态渲染配置（无 videoInfoRes/play_addr），' +

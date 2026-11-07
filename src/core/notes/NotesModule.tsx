@@ -5,6 +5,7 @@ import { registerNavigator } from '@/core/navigation/navigation';
 import { api } from '@/lib/api';
 import { NotesEditor } from '@/core/notes/NotesEditor';
 import { NotesSidebar } from '@/core/notes/NotesSidebar';
+import { NotesNetworkPage } from '@/core/notes/NotesNetworkPage';
 import { NoteSettingsPanel } from '@/core/notes/NoteSettingsPanel';
 
 /**
@@ -13,6 +14,7 @@ import { NoteSettingsPanel } from '@/core/notes/NoteSettingsPanel';
  */
 export function NotesModule() {
   const showNoteSettings = useAppStore(s => s.showNoteSettings);
+  const networkOpen = useNotesStore(s => s.networkOpen);
 
   // 命令面板「笔记 › 某篇」直达：统一走导航契约，不再依赖面板硬编码打开逻辑。
   useEffect(() => registerNavigator('notes', (target) => {
@@ -41,7 +43,14 @@ export function NotesModule() {
       {/* immersive-safe-top 打在编辑区自己这层（它自带 main-panel-bg）：顶部 38px 带子用同一底色
           填满，不产生色差条。侧栏由 ModuleSidebarShell 自带同一个类（它自带 nav-secondary-bg）。 */}
       <div className={`flex-1 h-full overflow-hidden immersive-safe-top ${showNoteSettings ? '' : 'main-panel-bg p-6'}`}>
-        {showNoteSettings ? <NoteSettingsPanel /> : <NotesEditor />}
+        {showNoteSettings ? (
+          <NoteSettingsPanel />
+        ) : networkOpen ? (
+          // 「网络」是独立结果页：侧栏入口进入，主区整块让给它，不挤在编辑器里
+          <NotesNetworkPage />
+        ) : (
+          <NotesEditor />
+        )}
       </div>
     </div>
   );

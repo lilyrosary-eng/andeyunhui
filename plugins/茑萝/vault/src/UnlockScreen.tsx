@@ -3,7 +3,7 @@
 const React = window.__HOST_REACT__;
 const { useState } = React;
 
-import { vaultApi, type VaultStatus } from './api';
+import { datedFileName, vaultApi, type VaultStatus } from './api';
 import type { VaultHook } from './useVault';
 
 const inputCls =
@@ -33,6 +33,7 @@ export function RecoveryCodesDialog({
   title?: string;
 }) {
   const [copied, setCopied] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const copyAll = async () => {
     try {
       await navigator.clipboard.writeText(codes.join('\n'));
@@ -40,6 +41,25 @@ export function RecoveryCodesDialog({
       setTimeout(() => setCopied(false), 1500);
     } catch {
       setCopied(false);
+    }
+  };
+
+  const saveFile = async () => {
+    setSaveMsg(null);
+    try {
+      const path = await vaultApi.pickSavePath(datedFileName('vault-recovery-codes', 'txt'));
+      if (!path) return;
+      const content = [
+        '安得云荟 · 密码库备用验证码',
+        `生成时间：${new Date().toLocaleString()}`,
+        '每个码只能使用一次；请离线保存，不要放进云端同步笔记。',
+        '',
+        ...codes,
+      ].join('\n');
+      await vaultApi.writeTextFile(path, content);
+      setSaveMsg(`已保存到：${path}`);
+    } catch (e) {
+      setSaveMsg(`保存失败：${typeof e === 'string' ? e : String(e)}`);
     }
   };
 
@@ -57,9 +77,13 @@ export function RecoveryCodesDialog({
             </div>
           ))}
         </div>
+        {saveMsg && <div className="mt-2 text-[11px] text-emerald-600 dark:text-emerald-400 break-all">{saveMsg}</div>}
         <div className="mt-4 flex items-center justify-end gap-2">
           <button onClick={copyAll} className={ghostBtn}>
             {copied ? '已复制全部' : '复制全部'}
+          </button>
+          <button onClick={saveFile} className={ghostBtn}>
+            保存为文件
           </button>
           <button onClick={onDone} className={primaryBtn}>
             我已保存
@@ -70,29 +94,37 @@ export function RecoveryCodesDialog({
   );
 }
 
-export function VaultOnboarding({ run }: { run: VaultHook['run'] }) {
+export function VaultOnboarding({
+  run,
+  minPasswordChars = 8,
+  busy = false,
+  error = null,
+  onCreated,
+}: {
+  run: VaultHook['run'];
+  minPasswordChars?: number;
+  busy?: boolean;
+  error?: string | null;
+  /** 备用码只在创建时出现一次：交给父组件持有，避免本组件被主界面替换后丢失 */
+  onCreated: (codes: string[]) => void;
+}) {
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [deviceUnlock, setDeviceUnlock] = useState(true);
   const [autoLock, setAutoLock] = useState(5);
   const [localError, setLocalError] = useState<string | null>(null);
-  const [codes, setCodes] = useState<string[] | null>(null);
 
   const submit = async () => {
     setLocalError(null);
-    if (password.length < 8) return setLocalError('主密码至少 8 位');
+    if (password.length < minPasswordChars) return setLocalError(`主密码至少 ${minPasswordChars} 位`);
     if (password !== confirm) return setLocalError('两次输入的主密码不一致');
     const outcome = await run(() => vaultApi.create(password, deviceUnlock, autoLock));
     if (outcome) {
       setPassword('');
       setConfirm('');
-      setCodes(outcome.recoveryCodes);
+      onCreated(outcome.recoveryCodes);
     }
   };
-
-  if (codes) {
-    return <RecoveryCodesDialog codes={codes} onDone={() => setCodes(null)} />;
-  }
 
   return (
     <div className="h-full flex items-center justify-center p-6 bg-[#f5f5f0] dark:bg-[#1c1917]" data-vault-ui>
@@ -109,7 +141,7 @@ export function VaultOnboarding({ run }: { run: VaultHook['run'] }) {
 
         <div className="mt-5 flex flex-col gap-3">
           <div>
-            <div className="mb-1 text-xs text-neutral-500 dark:text-stone-400">主密码（≥ 8 位）</div>
+            <div className="mb-1 text-xs text-neutral-500 dark:text-stone-400">主密码（≥ {minPasswordChars} 位）</div>
             <input
               type="password"
               autoFocus
@@ -154,10 +186,13 @@ export function VaultOnboarding({ run }: { run: VaultHook['run'] }) {
         </div>
 
         {localError && <div className="mt-3 text-xs text-red-600 dark:text-red-400">{localError}</div>}
+        {!localError && error && (
+          <div className="mt-3 text-xs text-red-600 dark:text-red-400">{error}</div>
+        )}
 
         <div className="mt-5 flex justify-end">
-          <button onClick={submit} className={primaryBtn}>
-            创建并生成备用码
+          <button onClick={submit} disabled={busy} className={primaryBtn}>
+            {busy ? '创建中…（首次 KDF 较慢）' : '创建并生成备用码'}
           </button>
         </div>
       </div>
@@ -191,6 +226,11 @@ export function UnlockScreen({
   const unlockByDevice = async () => {
     setNotice(null);
     await run(() => vaultApi.unlockDevice());
+  };
+
+  const unlockByBiometric = async () => {
+    setNotice(null);
+    await run(() => vaultApi.unlockBiometric());
   };
 
   const redeem = async () => {
@@ -234,14 +274,27 @@ export function UnlockScreen({
             <button onClick={unlock} disabled={busy || !password} className={primaryBtn}>
               {busy ? '解锁中…' : '解锁'}
             </button>
-            <div className="flex items-center justify-between">
-              {status.hasDeviceSlot ? (
-                <button onClick={unlockByDevice} disabled={busy} className={ghostBtn}>
-                  本机免密解锁
-                </button>
-              ) : (
-                <span className="text-[11px] text-neutral-400 dark:text-stone-500">未启用本机免密解锁</span>
-              )}
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-col gap-1">
+                {status.biometricRequired && status.hasDeviceSlot ? (
+                  <button onClick={unlockByBiometric} disabled={busy} className={ghostBtn}>
+                    🖐 Windows Hello 解锁
+                  </button>
+                ) : status.hasDeviceSlot ? (
+                  <button onClick={unlockByDevice} disabled={busy} className={ghostBtn}>
+                    本机免密解锁
+                  </button>
+                ) : (
+                  <span className="text-[11px] text-neutral-400 dark:text-stone-500">
+                    未启用本机免密解锁
+                  </span>
+                )}
+                {!status.biometricRequired && status.hasDeviceSlot && status.biometricSupported && (
+                  <button onClick={unlockByBiometric} disabled={busy} className={ghostBtn}>
+                    🖐 Windows Hello 解锁
+                  </button>
+                )}
+              </div>
               <button
                 onClick={() => {
                   setRecoveryMode(true);
@@ -252,6 +305,11 @@ export function UnlockScreen({
                 忘记主密码？
               </button>
             </div>
+            {status.biometricRequired && (
+              <div className="text-[11px] text-neutral-400 dark:text-stone-500">
+                本机解锁已要求生物识别（{status.biometricDetail}）
+              </div>
+            )}
           </div>
         ) : (
           <div className="mt-5 flex flex-col gap-3">
@@ -269,14 +327,14 @@ export function UnlockScreen({
               type="password"
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
-              placeholder="新主密码（≥ 8 位）"
+              placeholder={`新主密码（≥ ${status.minPasswordChars} 位）`}
               className={inputCls}
             />
             <div className="flex items-center justify-between">
               <button onClick={() => setRecoveryMode(false)} className={ghostBtn}>
                 返回
               </button>
-              <button onClick={redeem} disabled={busy || !code || newPassword.length < 8} className={primaryBtn}>
+              <button onClick={redeem} disabled={busy || !code || newPassword.length < status.minPasswordChars} className={primaryBtn}>
                 {busy ? '重置中…' : '重置主密码'}
               </button>
             </div>

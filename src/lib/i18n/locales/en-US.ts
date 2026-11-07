@@ -101,6 +101,9 @@ export const enUS: Record<string, string> = {
 
   // Settings - Themes
   'settings.themes.appearance': 'Appearance',
+  'settings.themes.material': 'Material',
+  'settings.themes.liquidGlass': 'Liquid Glass',
+  'settings.themes.liquidGlassDesc': 'Replace all frosted glass with liquid glass: edge refraction, Fresnel rim light and floating shadow. Refraction needs a Chromium engine (Windows); other engines fall back to lighting only.',
   'settings.theme.system': 'Follow system',
   'settings.theme.light': 'Light',
   'settings.theme.dark': 'Dark',

@@ -3,6 +3,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { isAndroid } from '../platform/isMobile';
 import { HEAVY_FX } from '../platform/isLinux';
+import { LIQUID_GLASS_REFRACTION, startLiquidGlass, stopLiquidGlass } from '../core/theme/liquidGlass';
 import { sampleWallpaper, scrimPctFor, type WallpaperSample } from './wallpaperProbe';
 import { storage } from '../core/storage';
 import { KEYS } from '../core/storage/keys';
@@ -13,6 +14,8 @@ interface ThemeContextType {
   theme: Theme;
   resolved: 'light' | 'dark';
   setTheme: (t: Theme) => void;
+  liquidGlass: boolean;
+  setLiquidGlass: (val: boolean) => void;
   themeColor: string;
   setThemeColor: (color: string) => void;
   elementColor: string;
@@ -45,6 +48,8 @@ const ThemeContext = createContext<ThemeContextType>({
   theme: 'system',
   resolved: 'light',
   setTheme: () => {},
+  liquidGlass: false,
+  setLiquidGlass: () => {},
   themeColor: '默认',
   setThemeColor: () => {},
   elementColor: '默认',
@@ -139,6 +144,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [reverseColor, setReverseColorState] = useState<boolean>(() => {
     return storage.getString(KEYS.theme.reverseColor.key, '') === 'true';
   });
+  const [liquidGlass, setLiquidGlassState] = useState<boolean>(() => {
+    return storage.getString(KEYS.theme.liquidGlass.key, '') === '1';
+  });
   const [zoom, setZoomState] = useState<number>(() => {
     return Number(storage.getString(KEYS.theme.zoom.key, '')) || 100;
   });
@@ -208,6 +216,21 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     setReverseColorState(val);
     storage.setString(KEYS.theme.reverseColor.key, String(val));
   }, []);
+
+  const setLiquidGlass = useCallback((val: boolean) => {
+    setLiquidGlassState(val);
+    storage.setString(KEYS.theme.liquidGlass.key, val ? '1' : '0');
+  }, []);
+
+  // 液态玻璃：CSS 光照层始终生效；折射层（SVG 位移图 backdrop-filter）只在 Chromium 内核启动，
+  // WebKitGTK 无 backdrop-filter 引用能力且历史上会打爆显存（见 platform/isLinux.ts）。
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle('liquid-glass', liquidGlass);
+    if (liquidGlass && LIQUID_GLASS_REFRACTION) startLiquidGlass();
+    else stopLiquidGlass();
+    return () => stopLiquidGlass();
+  }, [liquidGlass]);
 
   const setZoom = useCallback((val: number) => {
     setZoomState(val);
@@ -488,7 +511,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const wallpaperSrc = !HEAVY_FX && wallpaperFx.blurUrl ? wallpaperFx.blurUrl : bgImage;
 
   return (
-    <ThemeContext.Provider value={{ theme, resolved, setTheme, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily, bgImage, setBgImage, bgVideo, setBgVideo, bgVideoPersist, setBgVideoPersist, bgBlur, setBgBlur, bgAngle, setBgAngle, bgFlip, setBgFlip, bgScrub, setBgScrub }}>
+    <ThemeContext.Provider value={{ theme, resolved, setTheme, liquidGlass, setLiquidGlass, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily, bgImage, setBgImage, bgVideo, setBgVideo, bgVideoPersist, setBgVideoPersist, bgBlur, setBgBlur, bgAngle, setBgAngle, bgFlip, setBgFlip, bgScrub, setBgScrub }}>
       {bgVideo ? (
         <video
           ref={bgLayerRef as RefObject<HTMLVideoElement>}

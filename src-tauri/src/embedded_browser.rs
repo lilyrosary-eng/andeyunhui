@@ -1,32 +1,45 @@
-//! 内嵌浏览器（子 webview）：把「网络视频」的面板区当作浏览器用。
+//! 内置浏览器窗口（网络视频平台页）。
 //!
-//! # 为什么用「子 webview」而不是旧方案的浮窗
+//! # 为什么是「独立窗口」而不是「面板里的子 webview」
 //!
-//! 旧实现用 `alwaysOnTop: true` 的**独立 OS 浮窗**盖在面板上，带来三个固有缺陷：
-//! 遮挡主窗口 UI、不跟随主窗移动、尺寸不同步。
+//! 最初改用 tauri 的多 webview 能力 `Window::add_child`，把子 webview 精确铺在
+//! 面板矩形上。实机验证（Windows / WebView2）发现：子 webview 的 HWND 确实创建在
+//! 正确位置，但**始终被主 webview 的合成层盖住**，页面只呈现一片白色 ——
+//! 提升 HWND 的 z-order 也无效（WebView2 走的是 DComp 合成，不是 GDI 绘制顺序）。
 //!
-//! 本模块改用 tauri 的多 webview 能力 `Window::add_child(builder, pos, size)`
-//! （需 `unstable` feature），把子 webview **精确铺在面板矩形上** —— 它是主窗口的一部分，
-//! 随窗口移动/最小化，不越界、不遮挡其它 UI。
-//!
-//! # 与主界面 HTML 的层级关系（重要）
-//!
-//! 子 webview 是**独立的渲染面**，会盖在它矩形范围内主 webview 的 DOM 之上。
-//! 所以「嗅探结果」不能做成覆盖在它上面的浮层 —— 前端在打开结果抽屉时会**把浏览器矩形收窄**，
-//! 让两者永不重叠（见 BrowserPanel 的 bounds 计算）。
+//! 因此改为 **一个真正的 Tauri 窗口**（WebviewWindow）承载平台页面：
+//! - 一定可见、可输入；
+//! - 不遮挡主界面（用户可自由拖动/缩放/最大化）；
+//! - 与「面板里嵌网页」相比只是少了贴边，稳定性完全不在一个量级。
 //!
 //! # 嗅探通道
 //!
 //! 外部页面无法使用 Tauri IPC，因此注入脚本把结果经本协议送出：
 //! `location.href = "http://bimedia.localhost/__report/<b64u(json)>"`，
-//! 由下面的 `on_navigation` 截获并 `return false` 取消导航（页面不会跳走），
+//! 由 `on_navigation` 截获并 `return false` 取消导航（页面不会跳走），
 //! 载荷存入 `media_relay` 的进程内缓冲，前端用 `browser_sniff` 取走。
 //! 用「导航」而非 fetch 的原因：外部站点的 CSP 管不到导航，但很可能把 fetch 拦掉。
 
 use tauri::http::{header, Response, StatusCode};
-use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, WebviewBuilder, WebviewUrl};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 pub const LABEL: &str = "video-browser";
+
+/// 浏览器窗口的 UA：伪装成普通桌面 Edge。
+///
+/// 默认 UA 会带 Tauri 标识，抖音 / B 站等站点会据此判定为「非常规浏览器」，
+/// 表现为白屏、强制登录或滑块 —— 这是内嵌浏览器打不开页面最常见的原因。
+const DESKTOP_UA: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
+     Chrome/132.0.0.0 Safari/537.36 Edg/132.0.0.0";
+
+/// 与主窗口 tauri.conf.json 的 `additionalBrowserArgs` **必须逐字一致**。
+///
+/// WebView2 的同一个 user-data 目录只允许一套环境参数；新窗口若换成另一组
+/// browser args，WebView2 会直接拒绝创建（实测 HRESULT 0x8007139F「组或资源的状态
+/// 不是执行请求操作的正确状态」）。这正是「命令返回成功但窗口没出现」的根因。
+const BROWSER_ARGS: &str =
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,MediaSession,HardwareMediaKeyHandling";
 
 /// 注入到每个页面最前面的嗅探钩子。
 ///
@@ -117,8 +130,25 @@ fn parse_target(url: &str) -> Result<tauri::Url, String> {
     }
 }
 
-/// 打开（或复用）内嵌浏览器，并把矩形对齐到面板区域。
-/// 坐标为**逻辑像素**、相对主窗口客户区左上角。
+/// 嗅探上报的拦截逻辑：命中 `bimedia.localhost/__report/...` 时存下载荷并取消导航。
+fn sniff_navigation(u: &tauri::Url) -> bool {
+    if u.host_str() == Some("bimedia.localhost")
+        && u.path().starts_with(crate::media_relay::REPORT_PATH_PREFIX)
+    {
+        if let Some(p) = u.path().strip_prefix(crate::media_relay::REPORT_PATH_PREFIX) {
+            if let Some(json) = crate::media_relay::decode_b64u(p) {
+                crate::media_relay::push_sniff_report(json);
+            }
+        }
+        return false;
+    }
+    true
+}
+
+/// 打开（或复用）浏览器窗口。
+///
+/// `x/y/width/height` 保留在签名里只为兼容既有前端调用；窗口模式下位置由系统窗口
+/// 管理器负责（首次创建居中，之后记住用户拖动后的位置）。
 #[tauri::command]
 pub async fn browser_open(
     app: AppHandle,
@@ -128,60 +158,46 @@ pub async fn browser_open(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
+    // 参数名必须与前端 payload 一致（Tauri 按参数名反序列化，改成 `_x` 会因为缺字段而失败）
+    let _ = (x, y, width, height);
     let target = parse_target(&url)?;
-    let pos = LogicalPosition::new(x, y);
-    let size = LogicalSize::new(width.max(1.0), height.max(1.0));
 
-    // 已存在：只更新位置/尺寸并导航（避免重复创建导致 label 冲突）
-    if let Some(wv) = app.get_webview(LABEL) {
-        let _ = wv.set_position(pos);
-        let _ = wv.set_size(size);
-        wv.navigate(target).map_err(|e| format!("导航失败：{e}"))?;
-        let _ = wv.show();
+    // 已存在：直接导航并聚焦，不重复创建（label 冲突）
+    if let Some(win) = app.get_webview_window(LABEL) {
+        win.navigate(target).map_err(|e| format!("导航失败：{e}"))?;
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
         return Ok(());
     }
 
-    let window = app
-        .get_window("main")
-        .ok_or_else(|| "未找到主窗口 main".to_string())?;
-
-    let builder = WebviewBuilder::new(LABEL, WebviewUrl::External(target))
+    let builder = WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::External(target))
+        .title("安得云荟 · 网页")
+        .inner_size(1120.0, 780.0)
+        .min_inner_size(640.0, 420.0)
+        .center()
+        .user_agent(DESKTOP_UA)
+        .additional_browser_args(BROWSER_ARGS)
         .initialization_script(SNIFF_HOOK)
-        .zoom_hotkeys_enabled(false)
-        .on_navigation(|u| {
-            // 嗅探上报：截获并取消这次导航，页面停留在原处
-            if u.host_str() == Some("bimedia.localhost")
-                && u.path().starts_with(crate::media_relay::REPORT_PATH_PREFIX)
-            {
-                if let Some(p) = u.path().strip_prefix(crate::media_relay::REPORT_PATH_PREFIX) {
-                    if let Some(json) = crate::media_relay::decode_b64u(p) {
-                        crate::media_relay::push_sniff_report(json);
-                    }
-                }
-                return false;
-            }
-            true
-        });
+        .on_navigation(sniff_navigation);
 
-    window
-        .add_child(builder, pos, size)
-        .map_err(|e| format!("创建内嵌浏览器失败：{e}"))?;
+    let win = builder
+        .build()
+        .map_err(|e| format!("创建浏览器窗口失败：{e}"))?;
+    let _ = win.set_focus();
     Ok(())
 }
 
-/// 同步浏览器矩形（面板尺寸变化、打开嗅探抽屉收窄时调用）。
+/// 兼容旧前端：面板矩形同步。窗口模式下无需同步（保留命令避免调用方报「未注册」）。
 #[tauri::command]
 pub async fn browser_set_bounds(
-    app: AppHandle,
+    _app: AppHandle,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    if let Some(wv) = app.get_webview(LABEL) {
-        let _ = wv.set_position(LogicalPosition::new(x, y));
-        let _ = wv.set_size(LogicalSize::new(width.max(1.0), height.max(1.0)));
-    }
+    let _ = (x, y, width, height);
     Ok(())
 }
 
@@ -189,10 +205,23 @@ pub async fn browser_set_bounds(
 #[tauri::command]
 pub async fn browser_navigate(app: AppHandle, url: String) -> Result<(), String> {
     let target = parse_target(&url)?;
-    let wv = app
-        .get_webview(LABEL)
-        .ok_or_else(|| "内嵌浏览器尚未打开".to_string())?;
-    wv.navigate(target).map_err(|e| format!("导航失败：{e}"))?;
+    let win = app
+        .get_webview_window(LABEL)
+        .ok_or_else(|| "浏览器窗口尚未打开".to_string())?;
+    win.navigate(target).map_err(|e| format!("导航失败：{e}"))?;
+    let _ = win.set_focus();
+    Ok(())
+}
+
+/// 把浏览器窗口提到最前（用户在主界面点「回到浏览器窗口」时用）。
+#[tauri::command]
+pub async fn browser_focus(app: AppHandle) -> Result<(), String> {
+    let win = app
+        .get_webview_window(LABEL)
+        .ok_or_else(|| "浏览器窗口尚未打开".to_string())?;
+    let _ = win.show();
+    let _ = win.unminimize();
+    win.set_focus().map_err(|e| format!("聚焦失败：{e}"))?;
     Ok(())
 }
 
@@ -204,7 +233,7 @@ pub async fn browser_navigate(app: AppHandle, url: String) -> Result<(), String>
 pub async fn browser_sniff(app: AppHandle) -> Result<Vec<String>, String> {
     let wv = app
         .get_webview(LABEL)
-        .ok_or_else(|| "内嵌浏览器尚未打开".to_string())?;
+        .ok_or_else(|| "浏览器窗口尚未打开".to_string())?;
     wv.eval(SNIFF_COLLECT)
         .map_err(|e| format!("执行嗅探脚本失败：{e}"))?;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -220,11 +249,11 @@ pub async fn browser_current_url(app: AppHandle) -> Result<String, String> {
     }
 }
 
-/// 关闭并销毁内嵌浏览器
+/// 关闭浏览器窗口
 #[tauri::command]
 pub async fn browser_close(app: AppHandle) -> Result<(), String> {
-    if let Some(wv) = app.get_webview(LABEL) {
-        wv.close().map_err(|e| format!("关闭失败：{e}"))?;
+    if let Some(win) = app.get_webview_window(LABEL) {
+        win.close().map_err(|e| format!("关闭失败：{e}"))?;
     }
     Ok(())
 }
