@@ -54,8 +54,14 @@ export interface ZoomPanOptions {
 export const ZOOM_NOTCH = 1.3;
 /** 浏览器滚轮一档大约 100px；用于把 deltaY 换算成档数。 */
 /** 多少像素算「一档」；调小 = 更灵敏。100 → 70（同批调整） */
-/** 多少像素算一档。Loupe 是按「滚轮 detent」计数，这里近似为 100px 一档 */
-export const ZOOM_NOTCH_PX = 100;
+/**
+ * 多少像素算一档。
+ * **关键**：GNOME 上鼠标滚轮一格的 deltaY 约 53px，而 Loupe 是按「detent」计数的
+ * （一格 = 一档）。这里原值 100 意味着一格只走 0.53 档 —— 一直是半速，
+ * 所以无论把 ZOOM_NOTCH 调到多大都显得慢。取 50 让「一格 ≈ 一档」。
+ * 触摸板是细粒度像素滚动，按比例折算仍然平滑。
+ */
+export const ZOOM_NOTCH_PX = 50;
 
 /**
  * 连续滚轮时「一档」走完的时长（毫秒）。
