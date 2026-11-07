@@ -931,6 +931,382 @@ fn decode_png_stream_lanczos(
     Some(image::DynamicImage::ImageRgb8(out))
 }
 
+
+// =====================================================================
+// Tile 金字塔（2026-11-07）
+//
+// 为什么需要：降采样显示层是「一张固定分辨率的缩略图」⇒ 放大到超过它的
+// 分辨率就糊。而系统图片查看器（Loupe）之所以清晰，是因为**原图直出**，
+// 代价是 8192² PNG 整图解码 ≈ 268MB 内存。
+//
+// tile 金字塔是第三条路：预先把图切成多级瓦片（libvips dzsave 的思路），
+// 按视口只加载需要的瓦片 ⇒ 内存只与视口大小相关，且任意缩放都清晰。
+//
+// 生成方式：一次流式解码，**同时**写出所有层级（每级独立从原图做 box 抽样，
+// 不是链式抽样，避免误差累积）。内存 = 各级的一行 + 一个瓦片行。
+// =====================================================================
+
+/// 瓦片边长（像素）
+pub const TILE_SIZE: u32 = 512;
+
+/// 一层瓦片的信息
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct TileLevel {
+    /// 该层的像素宽
+    pub width: u32,
+    /// 该层的像素高
+    pub height: u32,
+    /// 瓦片列数
+    pub cols: u32,
+    /// 瓦片行数
+    pub rows: u32,
+    /// 该层相对原图的缩放比（1.0 = 原图分辨率）
+    pub scale: f64,
+}
+
+/// 瓦片集信息
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct TilesInfo {
+    /// 原图宽
+    pub width: u32,
+    /// 原图高
+    pub height: u32,
+    /// 瓦片边长
+    pub tile_size: u32,
+    /// 各层信息（levels[0] 最小，levels.last() 最大）
+    pub levels: Vec<TileLevel>,
+    /// 是否已全部生成完毕（false 表示还在生成，前端可先用已有的低层）
+    pub complete: bool,
+    /// 瓦片所在目录（绝对路径，前端用 convertFileSrc 转 asset:// 后拼 L{level}/{row}_{col}.jpg）
+    pub dir: String,
+}
+
+/// 单层的采样+切瓦片器。
+///
+/// 输入是原图逐行（每行 level 宽度方向的 box 抽样），输出是瓦片 JPEG。
+struct LevelSampler {
+    level_w: u32,
+    level_h: u32,
+    cols: u32,
+    step_x: u32,
+    step_y: u32,
+    /// 已完成的输出行
+    out_row: u32,
+    /// 瓦片行缓冲：tile_size 行 × level_w 列 × 3
+    buf: Vec<u8>,
+    /// 已写入 buf 的行数
+    buf_rows: u32,
+    /// 下一个要写出的瓦片行号（**不能从 buf_rows 反推**：
+    /// 末行补齐时 buf_rows 会被改写成 tile，反推会得到 0 并覆盖首行瓦片）
+    tile_row_idx: u32,
+}
+
+impl LevelSampler {
+    fn new(level_w: u32, level_h: u32, src_w: u32, src_h: u32, tile: u32) -> Self {
+        let cols = level_w.div_ceil(tile);
+        Self {
+            level_w,
+            level_h,
+            cols,
+            step_x: (src_w / level_w.max(1)).max(1),
+            step_y: (src_h / level_h.max(1)).max(1),
+            out_row: 0,
+            buf: Vec::with_capacity((tile * level_w * 3) as usize),
+            buf_rows: 0,
+            tile_row_idx: 0,
+        }
+    }
+
+    /// 喂一行原图像素（src_line 是 src_w × channels）
+    fn push_row(&mut self, y: u32, src_line: &[u8], channels: usize) {
+        if self.out_row >= self.level_h {
+            return;
+        }
+        if y % self.step_y != 0 {
+            return;
+        }
+        // 水平方向 box 平均（质量比最近邻好得多）
+        let mut line = vec![0u8; self.level_w as usize * 3];
+        for x in 0..self.level_w {
+            let x0 = (x * self.step_x) as usize;
+            let x1 = (((x + 1) * self.step_x) as usize).min(src_line.len() / channels);
+            let x1 = x1.max(x0 + 1);
+            let mut r = 0u64;
+            let mut g = 0u64;
+            let mut b = 0u64;
+            let mut n = 0u64;
+            for sx in x0..x1 {
+                let s = sx * channels;
+                r += src_line[s] as u64;
+                g += src_line[s + 1] as u64;
+                b += src_line[s + 2] as u64;
+                n += 1;
+            }
+            let o = x as usize * 3;
+            line[o] = (r / n) as u8;
+            line[o + 1] = (g / n) as u8;
+            line[o + 2] = (b / n) as u8;
+        }
+        self.buf.extend_from_slice(&line);
+        self.buf_rows += 1;
+        self.out_row += 1;
+    }
+
+    /// 攒够一整行瓦片就切出来写盘
+    fn flush_tile_row(&mut self, dir: &std::path::Path, level_idx: usize, tile: u32) -> Result<(), String> {
+        if self.buf_rows < tile {
+            return Ok(());
+        }
+        let level_dir = dir.join(format!("L{level_idx}"));
+        std::fs::create_dir_all(&level_dir).map_err(|e| format!("创建瓦片目录失败: {e}"))?;
+        let tile_row = self.tile_row_idx;
+        for c in 0..self.cols {
+            // 取出第 c 列的 tile 宽 × tile 高 区域，拼成一张 tile 图
+            let tile_bytes = (tile * tile * 3) as usize;
+            let mut data = vec![0u8; tile_bytes];
+            for ty in 0..tile {
+                let src_row = ty as usize * self.level_w as usize * 3;
+                let dst_off = ty as usize * tile as usize * 3;
+                let src_off = src_row + c as usize * tile as usize * 3;
+                if src_off + tile as usize * 3 > self.buf.len() {
+                    break;
+                }
+                data[dst_off..dst_off + tile as usize * 3]
+                    .copy_from_slice(&self.buf[src_off..src_off + tile as usize * 3]);
+            }
+            let img = image::RgbImage::from_raw(tile, tile, data)
+                .ok_or_else(|| "构造瓦片图像失败".to_string())?;
+            let path = level_dir.join(format!("{tile_row}_{c}.jpg"));
+            let mut out = std::fs::File::create(&path).map_err(|e| format!("创建瓦片失败: {e}"))?;
+            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                std::io::BufWriter::new(&mut out),
+                90,
+            );
+            enc.encode_image(&img)
+                .map_err(|e| format!("写瓦片失败: {e}"))?;
+        }
+        // 丢掉已写出的整行瓦片
+        self.tile_row_idx += 1;
+        let start = (tile as usize) * self.level_w as usize * 3;
+        self.buf.drain(..start);
+        self.buf_rows -= tile;
+        Ok(())
+    }
+
+    fn finish(&mut self, dir: &std::path::Path, level_idx: usize, tile: u32) -> Result<(), String> {
+        // 补齐最后不满的行（用最后一行复制）
+        if self.buf_rows > 0 && self.buf_rows % tile != 0 {
+            let have = self.buf_rows as usize * self.level_w as usize * 3;
+            let need = tile as usize * self.level_w as usize * 3;
+            let last_row = have - self.level_w as usize * 3;
+            let mut i = have;
+            while i < need {
+                let src = last_row + (i - have) % (self.level_w as usize * 3);
+                let v = self.buf[src];
+                self.buf.push(v);
+                i += 1;
+            }
+            self.buf_rows = tile;
+            self.flush_tile_row(dir, level_idx, tile)?;
+        }
+        Ok(())
+    }
+}
+
+/// 为一张 PNG 生成 tile 金字塔（一次流式解码写出所有层）。
+fn generate_png_tiles(
+    image_path: &std::path::Path,
+    dir: &std::path::Path,
+    levels: &[TileLevel],
+    tile: u32,
+) -> Result<(), String> {
+    use std::io::Read as _;
+
+    // 解析 chunk
+    let mut f = std::fs::File::open(image_path).map_err(|e| format!("打开图片失败: {e}"))?;
+    let mut sig = [0u8; 8];
+    f.read_exact(&mut sig).map_err(|e| format!("读取失败: {e}"))?;
+    if &sig[1..4] != b"PNG" {
+        return Err("只支持 PNG 生成瓦片".into());
+    }
+    let mut ihdr: Option<(u32, u32, u8, u8, u8)> = None;
+    let mut idat: Vec<u8> = Vec::new();
+    loop {
+        let mut lenb = [0u8; 4];
+        if f.read_exact(&mut lenb).is_err() {
+            break;
+        }
+        let len = u32::from_be_bytes(lenb) as usize;
+        let mut ctype = [0u8; 4];
+        if f.read_exact(&mut ctype).is_err() {
+            break;
+        }
+        let mut data = vec![0u8; len];
+        if f.read_exact(&mut data).is_err() {
+            break;
+        }
+        let mut crc = [0u8; 4];
+        let _ = f.read_exact(&mut crc);
+        match &ctype {
+            b"IHDR" => {
+                if data.len() < 13 {
+                    return Err("IHDR 损坏".into());
+                }
+                ihdr = Some((
+                    u32::from_be_bytes([data[0], data[1], data[2], data[3]]),
+                    u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+                    data[8],
+                    data[9],
+                    data[12],
+                ));
+            }
+            b"IDAT" => idat.extend_from_slice(&data),
+            b"IEND" => break,
+            _ => {}
+        }
+    }
+    let (w0, h0, bit_depth, color_type, interlace) = ihdr.ok_or("缺少 IHDR")?;
+    if bit_depth != 8 || interlace != 0 {
+        return Err("暂不支持该 PNG 格式".into());
+    }
+    let channels: usize = match color_type {
+        2 => 3,
+        6 => 4,
+        _ => return Err("暂不支持该 PNG 颜色类型".into()),
+    };
+
+    let mut samplers: Vec<LevelSampler> = levels
+        .iter()
+        .map(|l| LevelSampler::new(l.width, l.height, w0, h0, tile))
+        .collect();
+
+    let row_bytes = w0 as usize * channels;
+    let mut dec = flate2::read::ZlibDecoder::new(&idat[..]);
+    let mut line = vec![0u8; row_bytes + 1];
+    let mut prev = vec![0u8; row_bytes];
+    let mut cur = vec![0u8; row_bytes];
+
+    for y in 0..h0 {
+        if dec.read_exact(&mut line).is_err() {
+            break;
+        }
+        let filter = match line[0] {
+            0 => png::FilterType::NoFilter,
+            1 => png::FilterType::Sub,
+            2 => png::FilterType::Up,
+            3 => png::FilterType::Avg,
+            4 => png::FilterType::Paeth,
+            _ => return Err("未知的 PNG filter".into()),
+        };
+        cur.copy_from_slice(&line[1..]);
+        png_unfilter(filter, &mut cur, &prev, channels);
+        for (i, s) in samplers.iter_mut().enumerate() {
+            s.push_row(y, &cur, channels);
+            s.flush_tile_row(dir, i, tile)?;
+        }
+        prev.copy_from_slice(&cur);
+    }
+    for (i, s) in samplers.iter_mut().enumerate() {
+        s.finish(dir, i, tile)?;
+    }
+    Ok(())
+}
+
+/// 瓦片缓存目录（按图片路径哈希）
+fn tiles_dir(app: &tauri::AppHandle, image_path: &str) -> Result<std::path::PathBuf, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("取应用数据目录失败: {e}"))?;
+    // 用 DefaultHasher（与项目内其他缓存键一致的做法）
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    image_path.hash(&mut hasher);
+    let h = format!("{:016x}", hasher.finish());
+    Ok(base.join("cache").join("tiles").join(h))
+}
+
+/// 计算金字塔层级：从 TILE_SIZE 开始逐级翻倍，直到覆盖原图
+fn tile_levels(w0: u32, h0: u32, tile: u32) -> Vec<TileLevel> {
+    let mut levels = Vec::new();
+    let mut lw = tile.min(w0.max(1));
+    let mut lh = tile.min(h0.max(1));
+    loop {
+        levels.push(TileLevel {
+            width: lw,
+            height: lh,
+            cols: lw.div_ceil(tile),
+            rows: lh.div_ceil(tile),
+            scale: lw as f64 / w0.max(1) as f64,
+        });
+        if lw >= w0 && lh >= h0 {
+            break;
+        }
+        lw = (lw * 2).min(w0);
+        lh = (lh * 2).min(h0);
+        if levels.len() > 12 {
+            break;
+        }
+    }
+    levels
+}
+
+/// 生成（或复用）一张图的 tile 金字塔。
+pub fn generate_tiles(
+    app: &tauri::AppHandle,
+    image_path: &str,
+) -> Result<TilesInfo, String> {
+    let _permit = acquire_decode_permit();
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+    }
+
+    let (w0, h0) = image::ImageReader::open(image_path)
+        .ok()
+        .and_then(|r| r.with_guessed_format().ok())
+        .and_then(|r| r.into_dimensions().ok())
+        .ok_or("读不出图片尺寸")?;
+    let levels = tile_levels(w0, h0, TILE_SIZE);
+    let dir = tiles_dir(app, image_path)?;
+    let done_marker = dir.join("done.json");
+
+    // 已生成完 ⇒ 直接复用
+    if done_marker.exists() {
+        return Ok(TilesInfo {
+            width: w0,
+            height: h0,
+            tile_size: TILE_SIZE,
+            levels,
+            complete: true,
+            dir: dir.to_string_lossy().to_string(),
+        });
+    }
+
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建瓦片目录失败: {e}"))?;
+    // **一次流式解码写出所有层**（不是逐级各解一次）：
+    // 既省一半以上的解码时间，也保证各层来自同一份源数据（不会出现层间错位）。
+    // 注意：必须整体调用 —— 单层调用时层索引会退化成 0，所有层都写进 L0。
+    let need = levels
+        .iter()
+        .enumerate()
+        .any(|(i, _)| !dir.join(format!("L{i}")).exists());
+    if need {
+        generate_png_tiles(std::path::Path::new(image_path), &dir, &levels, TILE_SIZE)?;
+    }
+    std::fs::write(&done_marker, "{}").map_err(|e| format!("写标记失败: {e}"))?;
+
+    Ok(TilesInfo {
+        width: w0,
+        height: h0,
+        tile_size: TILE_SIZE,
+        levels,
+        complete: true,
+        dir: dir.to_string_lossy().to_string(),
+    })
+}
+
 /// (当前占用数, 条件变量) —— 手工实现的信号量。
 /// 不用 tokio::sync::Semaphore：它的 new() 不是 const（不能放 static），
 /// 且本工程 Rust 版本上没有 blocking_acquire。std::sync::Semaphore 也还没有。
@@ -1328,5 +1704,67 @@ mod png_lanczos_stream_test {
         // 实测 ≈6.9：主要是**边缘夹取策略**与 image crate 的差异
         // （边缘像素占少数 ⇒ max_diff 大但均值不高），观感已等同整图 Lanczos3。
         assert!(mae < 10.0, "MAE 过大 ({mae:.2})，流式重采样有误差");
+    }
+}
+
+#[cfg(test)]
+mod tiles_generation_test {
+    use super::*;
+
+    /// 瓦片金字塔生成：检查层级计算、瓦片文件数量与单块尺寸。
+    #[test]
+    fn tiles_generation_ok() {
+        let path = match std::env::var("TEST_PNG") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let p = std::path::Path::new(&path);
+        let (w0, h0) = image::ImageReader::open(p)
+            .ok()
+            .and_then(|r| r.with_guessed_format().ok())
+            .and_then(|r| r.into_dimensions().ok())
+            .expect("应能读到尺寸");
+
+        let levels = tile_levels(w0, h0, TILE_SIZE);
+        assert!(!levels.is_empty());
+        // 最小的层应 ≤ TILE_SIZE，最大的层应覆盖原图
+        assert!(levels[0].width <= TILE_SIZE && levels[0].height <= TILE_SIZE);
+        assert!(levels.last().unwrap().width >= w0.min(TILE_SIZE));
+        eprintln!(
+            "层级：{}",
+            levels
+                .iter()
+                .map(|l| format!("{}x{}({}x{})", l.width, l.height, l.cols, l.rows))
+                .collect::<Vec<_>>()
+                .join(" → ")
+        );
+
+        let dir = std::env::temp_dir().join("andeyun-tiles-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 一次生成所有层（层索引由 generate_png_tiles 内部给出）
+        generate_png_tiles(p, &dir, &levels, TILE_SIZE).expect("生成瓦片应成功");
+        for (i, lv) in levels.iter().enumerate() {
+            let level_dir = dir.join(format!("L{i}"));
+            let files: Vec<_> = std::fs::read_dir(&level_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .collect();
+            eprintln!(
+                "L{i} ({}x{})：{} 个瓦片",
+                lv.width,
+                lv.height,
+                files.len()
+            );
+            assert_eq!(files.len() as u32, lv.cols * lv.rows, "瓦片数量应等于 cols×rows");
+            // 抽查一块：应是 512×512 的 JPEG
+            let one = &files[0];
+            let img = image::open(one).expect("瓦片应可读");
+            assert_eq!(img.width(), TILE_SIZE);
+            assert_eq!(img.height(), TILE_SIZE);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

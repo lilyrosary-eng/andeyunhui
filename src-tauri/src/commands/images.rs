@@ -112,6 +112,18 @@ pub async fn get_image_metadata(file_path: String) -> Result<image_service::Imag
 /// 生成缩略图（200px 宽 JPEG，首次生成后缓存复用）
 /// 异步 + spawn_blocking：图像解码/编码是 CPU 密集操作，同步命令会在主线程执行，
 /// 大文件夹批量生成缩略图时会直接把 UI 卡死。
+/// 生成（或复用）一张图的 tile 金字塔。
+#[tauri::command]
+pub async fn generate_tiles(
+    app: tauri::AppHandle,
+    image_path: String,
+) -> Result<image_service::TilesInfo, String> {
+    tokio::task::spawn_blocking(move || image_service::generate_tiles(&app, &image_path))
+        .await
+        .map_err(|e| format!("生成瓦片任务失败: {e}"))?
+}
+
+/// 生成缩略图（200px 宽 JPEG，首次生成后缓存复用）
 #[tauri::command]
 pub async fn generate_thumbnail(app: tauri::AppHandle, image_path: String, width: u32) -> Result<String, String> {
     tokio::task::spawn_blocking(move || image_service::generate_thumbnail(&app, &image_path, width))

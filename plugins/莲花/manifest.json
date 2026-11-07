@@ -15,6 +15,7 @@
       "cleanup_thumbnail_cache",
       "delete_image_cache",
       "generate_thumbnail",
+      "generate_tiles",
       "get_blacklist_paths",
       "get_folder_images",
       "get_image_metadata",

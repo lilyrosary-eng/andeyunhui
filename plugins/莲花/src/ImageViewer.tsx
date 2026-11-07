@@ -91,6 +91,135 @@ function safeFileSrc(p: string): string {
   try { return hostApi.convertFileSrc(p); } catch { return ''; }
 }
 
+
+/** 后端返回的瓦片集信息 */
+interface TilesInfo {
+  width: number;
+  height: number;
+  tile_size: number;
+  levels: { width: number; height: number; cols: number; rows: number; scale: number }[];
+  complete: boolean;
+  dir: string;
+}
+
+/**
+ * **Tile 金字塔渲染**（替代单张 <img>）。
+ *
+ * 为什么：降采样显示层是「一张固定分辨率的缩略图」⇒ 放大超过它的分辨率就糊；
+ * 而系统图片查看器（Loupe）清晰是因为**原图直出**（8192² PNG 整图解码 ≈268MB）。
+ * tile 金字塔是第三条路：预生成多级瓦片，按需取用 ⇒ 内存只与视口相关，
+ * 且任意缩放都清晰。
+ *
+ * 坐标系：瓦片层与原来的单张 <img> 用**同一套 transform**
+ * （translate(x,y) scale(s)），因此可以直接复用 useZoomPan 的相机，
+ * 缩放/平移手感与之前完全一致。
+ *
+ * 当前实现：整层加载（不按视口裁剪）。最大层 8192² 是 16×16=256 块，
+ * 每块 512² 解码后约 0.75MB ⇒ 整层约 190MB 偏大，因此**只取当前缩放
+ * 需要的层**，且优先用较小层。后续可加视口裁剪进一步降内存。
+ */
+function TileImage({
+  imagePath,
+  baseWidth,
+  zoomScale,
+  zoomStyle,
+  onImageLoaded,
+}: {
+  imagePath: string;
+  baseWidth: number;
+  /** 当前缩放倍率（用来选层） */
+  zoomScale: number;
+  /** 与底层 <img> 完全相同的 transform，保证两层对齐 */
+  zoomStyle: React.CSSProperties;
+  onImageLoaded?: (size: { width: number; height: number }) => void;
+}) {
+  const [info, setInfo] = useState<TilesInfo | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  // 懒生成瓦片（后端限流解码 + 磁盘缓存，重复调用直接命中）
+  useEffect(() => {
+    if (!imagePath) return;
+    let alive = true;
+    setFailed(false);
+    void hostApi
+      .invoke<TilesInfo>('generate_tiles', { imagePath })
+      .then((t) => {
+        if (alive) setInfo(t);
+      })
+      .catch(() => {
+        if (alive) setFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [imagePath]);
+
+  // 按当前缩放级别选层：取「宽度 ≥ 屏幕显示像素宽」的最小层
+  const levelIdx = useMemo(() => {
+    if (!info || info.levels.length === 0) return -1;
+    const targetPx = Math.max(1, baseWidth * zoomScale);
+    // 从大到小找第一个满足的（levels 是从小到大）
+    for (let i = info.levels.length - 1; i >= 0; i--) {
+      if (info.levels[i].width >= targetPx) return i;
+    }
+    return 0;
+  }, [info, baseWidth, zoomScale]);
+
+  // 瓦片 URL 列表
+  const tiles = useMemo(() => {
+    if (!info || levelIdx < 0) return [];
+    const lv = info.levels[levelIdx];
+    const dirUrl = safeFileSrc(info.dir);
+    if (!dirUrl) return [];
+    const out: { url: string; left: number; top: number }[] = [];
+    const t = info.tile_size;
+    for (let r = 0; r < lv.rows; r++) {
+      for (let c = 0; c < lv.cols; c++) {
+        out.push({
+          url: `${dirUrl}/L${levelIdx}/${r}_${c}.jpg`,
+          left: c * t,
+          top: r * t,
+        });
+      }
+    }
+    return out;
+  }, [info, levelIdx]);
+
+  // 回填尺寸（getBaseRect 依赖它）
+  useEffect(() => {
+    if (info && onImageLoaded) {
+      onImageLoaded({ width: info.width, height: info.height });
+    }
+  }, [info, onImageLoaded]);
+
+  if (failed || !info || tiles.length === 0) {
+    return null;
+  }
+  const lv = info.levels[levelIdx];
+  return (
+    <div
+      className="absolute inset-0 pointer-events-none"
+      style={{
+        ...zoomStyle,
+        width: lv.width,
+        height: lv.height,
+        overflow: 'hidden',
+      }}
+    >
+      {tiles.map((t, i) => (
+        <img
+          key={i}
+          src={t.url}
+          alt=""
+          draggable={false}
+          className="absolute select-none"
+          style={{ left: t.left, top: t.top, width: info.tile_size, height: info.tile_size }}
+        />
+      ))}
+    </div>
+  );
+}
+
 export function ImageViewer({ folderPath, folderName, onBack, initialPath, imagesOverride, favorites, onToggleFavorite }: ImageViewerProps) {
   useLang();
   const [images, setImages] = useState<string[]>([]);
@@ -985,6 +1114,8 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
             setCurrentIndex={setCurrentIndex}
             imgRef={fullImgRef}
             zoomStyle={zoomTransformStyle}
+            zoomScale={zoomCamera.scale}
+            baseWidth={loadedSize?.width ?? 0}
             zoomed={webglReady ? webglZoomed : zoomCamera.scale > 1}
             onPanBy={panZoomBy}
             onResetZoom={() => resetZoom()}
@@ -1166,6 +1297,8 @@ function FullView({
   setCurrentIndex,
   imgRef,
   zoomStyle,
+  zoomScale,
+  baseWidth,
   zoomed,
   onPanBy,
   onResetZoom,
@@ -1182,6 +1315,10 @@ function FullView({
   setCurrentIndex: (i: number) => void;
   imgRef: React.RefObject<HTMLImageElement>;
   zoomStyle: React.CSSProperties;
+  /** 当前缩放倍率（Tile 层选层用） */
+  zoomScale: number;
+  /** 原图像素宽（Tile 层选层用：目标显示像素 = baseWidth × zoomScale） */
+  baseWidth: number;
   zoomed: boolean;
   onPanBy: (dx: number, dy: number) => void;
   onResetZoom: () => void;
@@ -1314,6 +1451,17 @@ function FullView({
           draggable={false}
         />
       )}
+        {/* Tile 金字塔层：瓦片就绪后盖在降采样显示层之上（更清晰，且可任意缩放）。
+            底层始终是 2560px 降采样显示层，所以瓦片生成期间也有内容、也不会卡。
+            pointer-events-none：避免这层拦截点击（点击用于切换工具栏 / 翻页）。 */}
+        {!isCurrentGif && currentPath && (
+          <TileImage
+            imagePath={currentPath}
+            baseWidth={baseWidth}
+            zoomScale={zoomScale}
+            zoomStyle={zoomStyle}
+          />
+        )}
     </div>
   );
 }
