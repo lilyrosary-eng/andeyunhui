@@ -112,6 +112,11 @@ export class WebglImageCanvas {
     }
   }
 
+  /** 纹理的实际像素尺寸（已考虑降采样）；未加载时为 null。 */
+  getImageSize(): { width: number; height: number } | null {
+    return this.tex ? { width: this.texWidth, height: this.texHeight } : null;
+  }
+
   isAvailable(): boolean {
     return this.gl !== null && this.program !== null;
   }

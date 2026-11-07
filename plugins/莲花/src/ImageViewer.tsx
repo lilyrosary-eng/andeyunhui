@@ -2,6 +2,7 @@
 /// <reference path="../../global.d.ts" />
 import React from "react";
 import { T, useLang } from '../../_shared/pluginRuntime';
+import { WebglImageCanvas } from '../../_shared/webglImageCanvas';
 import { useZoomPan } from '../../_shared/useZoomPan';
 // 图片查看器 — 四种查看模式
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
@@ -182,12 +183,79 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
     zoomByWheel,
     panBy: panZoomBy,
     reset: resetZoom,
+  // ===== WebGL 渲染（mipmap）=====
+  // 缩小卡顿的根因是 <img> + CSS transform 每帧从原图重采样；这里改用 GPU 纹理 + mipmap。
+  // SVG/GIF 仍走 <img>（矢量和动画 WebGL 处理不了），所以是双路径。
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const webglRef = useRef<WebglImageCanvas | null>(null);
+  const [webglReady, setWebglReady] = useState(false);
+  // 只跟踪"是否已放大"这个布尔，避免每帧 setState 把 React 拖回重渲染
+  const [webglZoomed, setWebglZoomed] = useState(false);
+
+  // camera 变化 → 直接重绘，不经过 React
+  const handleCameraChange = useCallback((cam: { scale: number; x: number; y: number }) => {
+    const r = webglRef.current;
+    const view = fullImageRef.current;
+    if (!r || !view) return;
+    const br = getBaseRect();
+    if (!br) return;
+    r.draw(cam, {
+      width: br.width,
+      height: br.height,
+      viewportWidth: view.clientWidth,
+      viewportHeight: view.clientHeight,
+      dpr: window.devicePixelRatio || 1,
+    });
+    // setState 用函数式：值不变时 React 会 bail out，不会引发重渲染
+    const zoomedNow = cam.scale > 1.001;
+    setWebglZoomed((prev) => (prev === zoomedNow ? prev : zoomedNow));
+  }, [getBaseRect]);
+
   } = useZoomPan(fullImageRef, fullImgRef, {
     min: ZOOM_MIN,
     max: ZOOM_MAX,
     zoomOutAnchor: 'viewport',
     getBaseRect,
+    onCameraChange: handleCameraChange,
   });
+
+  // 纹理加载：图片/模式变化时重建渲染器。SVG/GIF 直接放弃 WebGL（走 <img>）。
+  useEffect(() => {
+    if (viewMode !== 'full') return;
+    const url = currentUrl || '';
+    const isVectorOrAnimated = /\.svg($|\?)/i.test(url) || isGif(url);
+    if (isVectorOrAnimated) {
+      setWebglReady(false);
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const renderer = new WebglImageCanvas(canvas);
+    if (!renderer.isAvailable()) {
+      setWebglReady(false);
+      return;
+    }
+    webglRef.current = renderer;
+    let alive = true;
+    void renderer.setImage(url).then((ok) => {
+      if (!alive) return;
+      setWebglReady(ok);
+      if (ok) {
+        // canvas 路径没有 <img> 的 onLoad，尺寸从这里回填（getBaseRect 依赖它）
+        const size = renderer.getImageSize();
+        if (size) setLoadedSize(size);
+        handleCameraChange(zoomCamera);
+      }
+    });
+    return () => {
+      alive = false;
+      renderer.dispose();
+      webglRef.current = null;
+      setWebglReady(false);
+    };
+    // zoomCamera 只用于首帧定位，故意不进依赖（否则每次缩放都重建纹理）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUrl, viewMode, handleCameraChange]);
   // 随机模式 + 幻灯片模式
   const [isRandomMode, setIsRandomMode] = useState(false);
   const [isSlideshow, setIsSlideshow] = useState(false);
@@ -811,12 +879,14 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
             setCurrentIndex={setCurrentIndex}
             imgRef={fullImgRef}
             zoomStyle={zoomTransformStyle}
-            zoomed={zoomCamera.scale > 1}
+            zoomed={webglReady ? webglZoomed : zoomCamera.scale > 1}
             onPanBy={panZoomBy}
             onResetZoom={() => resetZoom()}
             containerRef={fullImageRef}
             onToggleChrome={() => setChromeHidden(v => !v)}
             onImageLoaded={(size) => setLoadedSize(size)}
+            canvasRef={canvasRef}
+            useWebgl={webglReady}
           />
         )}
         {viewMode === 'vertical' && (
@@ -991,6 +1061,8 @@ function FullView({
   containerRef,
   onToggleChrome,
   onImageLoaded,
+  canvasRef,
+  useWebgl,
 }: {
   imgUrls: string[];
   imgPaths: string[];
@@ -1102,6 +1174,11 @@ function FullView({
 
       {imgError ? (
         <div className="text-neutral-300 dark:text-stone-600 text-sm">{T('image.viewer.loadFailed')}</div>
+      ) : useWebgl ? (
+        <canvas
+          ref={canvasRef}
+          className="absolute inset-0 w-full h-full select-none"
+        />
       ) : (
         <img
           ref={imgRef}
