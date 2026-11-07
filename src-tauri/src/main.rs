@@ -738,6 +738,32 @@ fn marker_exists(name: &str) -> bool {
 }
 
 fn main() {
+    // panic = "abort"（Cargo.toml:288）：panic 会直接 abort，默认什么都不打印，
+    // 排查时只能看到进程凭空消失。这里装一个 hook，在 abort 前把位置和信息写出来
+    // （同时写日志文件，便于崩溃后回看）。
+    std::panic::set_hook(Box::new(|info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "未知位置".to_string());
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "非字符串 payload".to_string()
+        };
+        eprintln!("[PANIC] {loc} :: {msg}");
+        if let Ok(dir) = std::env::var("HOME") {
+            let path = std::path::Path::new(&dir).join(".local/share/andeyunhui-panic.log");
+            let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = writeln!(f, "[PANIC] {loc} :: {msg}");
+            }
+        }
+    }));
+
     // MCP 随包分发：同一个 exe 带 --mcp 时只跑 stdio 协议，直接返回，不初始化窗口 / WebView。
     // 放在最前面是有意的：托盘、单实例锁、日志、数据库都不该在这个模式下启动。
     if ai_collab_kit::mcp::uses_args(std::env::args().skip(1)) {
