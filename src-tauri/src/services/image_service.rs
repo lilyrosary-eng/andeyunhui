@@ -803,6 +803,21 @@ pub fn generate_thumbnail(app: &tauri::AppHandle, image_path: &str, width: u32) 
         return Ok(png_path.to_string_lossy().to_string());
     }
 
+    // **原图本来就够小 ⇒ 直接返回原图，不做任何解码**。
+    // 只读文件头拿尺寸（into_dimensions 只解析头，不解像素），非常便宜。
+    // 这一条同时解决两件事：
+    //   · 小图秒加载（不必付「解码 + 抽样 + Lanczos3」的代价）
+    //   · 小图画质就是原图画质（不必降到 2560 显示层）
+    if let Some((ow, oh)) = image::ImageReader::open(&image_path)
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+    {
+        if ow > 0 && oh > 0 && ow.max(oh) <= width {
+            log::info!("[image] 原图已够小 ({ow}x{oh} ≤ {width})，直接用原图");
+            return Ok(image_path.to_string());
+        }
+    }
+
     // 限流：解码（含整图读入内存）是本进程最吃资源的动作，必须限并发。
     let _permit = acquire_decode_permit();
     // 再把当前线程的优先级降下来：解码是纯后台工作，不该和 GTK 主线程抢 CPU。
