@@ -97,6 +97,14 @@ export class WebglImageCanvas {
   private gl: WebGL2RenderingContext | null = null;
   private program: WebGLProgram | null = null;
   private tiles = new Map<string, WebGLTexture>();
+  /** 正在异步切片中的瓦片（避免重复请求） */
+  private pending = new Set<string>();
+  /** 每帧最多发起几次异步切片（限流，避免解码队列把主线程压满） */
+  private static readonly MAX_TILE_REQ_PER_FRAME = 2;
+  /** 当前源地址（供使用方在 LOD 重载时复用，避免依赖外部作用域顺序） */
+  private sourceUrl = '';
+  /** 瓦片上传完成后请求重绘（由外部注入） */
+  private requestRedraw: (() => void) | null = null;
   private vao: WebGLVertexArrayObject | null = null;
   private uTileCss: WebGLUniformLocation | null = null;
   private uTranslate: WebGLUniformLocation | null = null;
@@ -167,6 +175,16 @@ export class WebglImageCanvas {
       rows: this.rows,
       tiles: this.tiles.size,
     };
+  }
+
+  /** 当前图片地址；为空表示来源不是 URL（Blob/ImageBitmap） */
+  getSourceUrl(): string {
+    return this.sourceUrl;
+  }
+
+  /** 由使用方注入：瓦片异步就绪后触发一次重绘 */
+  setRedrawRequester(fn: (() => void) | null): void {
+    this.requestRedraw = fn;
   }
 
   isAvailable(): boolean {
@@ -319,6 +337,7 @@ export class WebglImageCanvas {
 
     // 不整图上传：只保存 source，瓦片在 draw 时按可见区域切。
     // 这样显存只跟「可见瓦片数」有关，与图片总尺寸无关。
+    this.sourceUrl = typeof src === 'string' ? src : '';
     this.source?.close?.();
     this.source = bitmap;
     this.srcPixelW = w;
@@ -339,44 +358,62 @@ export class WebglImageCanvas {
   }
 
   /**
-   * 确保某片瓦片已有纹理。首次可见时才从 source 切出来上传，
-   * 上传时同样 `generateMipmap` —— 放大靠 MAG_FILTER、缩小靠 mipmap。
+   * 取某片瓦片。**只读缓存，不阻塞**：
+   * 命中就返回纹理；未命中则发起一次异步切片并返回 null（本帧先跳过该片）。
+   * 这样 draw 永远不阻塞主线程 —— 之前的同步 drawImage + texImage2D
+   * 在首次加载时一帧内切 20 片，直接把界面卡死。
    */
   private ensureTile(col: number, row: number): WebGLTexture | null {
-    const gl = this.gl;
-    if (!gl || !this.source) return null;
     const key = `${col},${row}`;
     const hit = this.tiles.get(key);
     if (hit) return hit;
+    this.queueTile(col, row);
+    return null;
+  }
+
+  /** 异步切片 + 上传。createImageBitmap 支持从源位图裁剪，解码在后台线程。 */
+  private queueTile(col: number, row: number): void {
+    const key = `${col},${row}`;
+    if (this.pending.has(key) || this.pending.size >= WebglImageCanvas.MAX_TILE_REQ_PER_FRAME * 4) return;
+    const source = this.source;
+    if (!source) return;
 
     const T = WebglImageCanvas.TILE;
     const sx = col * T;
     const sy = row * T;
     const sw = Math.min(T, this.srcPixelW - sx);
     const sh = Math.min(T, this.srcPixelH - sy);
-    if (sw <= 0 || sh <= 0) return null;
+    if (sw <= 0 || sh <= 0) return;
 
-    if (!this.scratch) this.scratch = document.createElement('canvas');
-    const cv = this.scratch;
-    cv.width = sw;
-    cv.height = sh;
-    const ctx = cv.getContext('2d');
-    if (!ctx) return null;
-    ctx.clearRect(0, 0, sw, sh);
-    ctx.drawImage(this.source, sx, sy, sw, sh, 0, 0, sw, sh);
-
-    const tex = gl.createTexture();
-    if (!tex) return null;
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    this.tiles.set(key, tex);
-    return tex;
+    this.pending.add(key);
+    void createImageBitmap(source, sx, sy, sw, sh)
+      .then((bmp) => {
+        this.pending.delete(key);
+        const gl = this.gl;
+        if (!gl || this.disposed || this.source !== source) {
+          bmp.close?.();
+          return;
+        }
+        const tex = gl.createTexture();
+        if (!tex) {
+          bmp.close?.();
+          return;
+        }
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        bmp.close?.();
+        this.tiles.set(key, tex);
+        this.requestRedraw?.();
+      })
+      .catch(() => {
+        this.pending.delete(key);
+      });
   }
 
   /**
