@@ -82,9 +82,12 @@ export class WebglImageCanvas {
   private uTex: WebGLUniformLocation | null = null;
   private uAlpha: WebGLUniformLocation | null = null;
 
-  /** 纹理的实际像素尺寸（可能因超出 MAX_TEXTURE_SIZE 而降采样） */
+  /** 纹理的实际像素尺寸（降采样后） */
   private texWidth = 0;
   private texHeight = 0;
+  /** 图片的**原始**像素尺寸（用于布局计算，不能拿纹理尺寸顶替） */
+  private srcWidth = 0;
+  private srcHeight = 0;
   /** 最近一次 draw 的参数，resize/image 变化后可重放 */
   private lastDraw: { camera: CameraLike; opts: DrawOptions } | null = null;
   private disposed = false;
@@ -112,8 +115,16 @@ export class WebglImageCanvas {
     }
   }
 
-  /** 纹理的实际像素尺寸（已考虑降采样）；未加载时为 null。 */
+  /**
+   * 图片的**原始**尺寸（不是纹理尺寸）。
+   * 布局要用它算适配比例，用纹理尺寸会把图片显示得比实际小。
+   */
   getImageSize(): { width: number; height: number } | null {
+    return this.srcWidth > 0 ? { width: this.srcWidth, height: this.srcHeight } : null;
+  }
+
+  /** 实际上传的纹理尺寸，仅供诊断 */
+  getTextureSize(): { width: number; height: number } | null {
     return this.tex ? { width: this.texWidth, height: this.texHeight } : null;
   }
 
@@ -180,17 +191,53 @@ export class WebglImageCanvas {
    * 上传图片。内部用 `createImageBitmap` 解码（比 `<img>` + drawImage 少一次拷贝），
    * 超过 `MAX_TEXTURE_SIZE` 时按比例降采样到上限内。
    */
-  async setImage(src: Blob | ImageBitmap | string): Promise<boolean> {
+  async setImage(
+    src: Blob | ImageBitmap | string,
+    /** 解码时的尺寸上限（CSS 像素）；不给则按 MAX_TEXTURE_SIZE 处理 */
+    maxSize?: { width: number; height: number },
+  ): Promise<boolean> {
     if (!this.isAvailable() || this.disposed) return false;
     const gl = this.gl!;
 
+    // 关键：**解码阶段**就降到目标尺寸，而不是解出全尺寸再缩。
+    // 一张 8000×6000 的图全尺寸解码约 192MB，按屏幕尺寸解只要几 MB。
+    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    const capW = maxSize ? Math.max(1, Math.round(maxSize.width * dpr)) : 0;
+    const capH = maxSize ? Math.max(1, Math.round(maxSize.height * dpr)) : 0;
+    const resizeOpts: ImageBitmapOptions =
+      capW > 0 && capH > 0
+        ? { resizeWidth: capW, resizeHeight: capH, resizeQuality: 'high' }
+        : {};
+
     let bitmap: ImageBitmap | null = null;
     try {
-      if (typeof src === 'string') {
-        const res = await fetch(src);
-        bitmap = await createImageBitmap(await res.blob());
-      } else if (src instanceof Blob) {
-        bitmap = await createImageBitmap(src);
+      // resizeWidth/Height 会按比例适配（只给两者时浏览器取裁剪式；所以先量一下原尺寸）
+      if (typeof src === 'string' || src instanceof Blob) {
+        const blob = typeof src === 'string' ? await (await fetch(src)).blob() : src;
+        if (resizeOpts.resizeWidth) {
+          const probe = await createImageBitmap(blob);
+          this.srcWidth = probe.width;
+          this.srcHeight = probe.height;
+          const ratio = Math.min(
+            resizeOpts.resizeWidth / probe.width,
+            resizeOpts.resizeHeight! / probe.height,
+            1, // 不放大
+          );
+          const target: ImageBitmapOptions =
+            ratio < 1
+              ? {
+                  resizeWidth: Math.max(1, Math.round(probe.width * ratio)),
+                  resizeHeight: Math.max(1, Math.round(probe.height * ratio)),
+                  resizeQuality: 'high',
+                }
+              : {};
+          probe.close?.();
+          bitmap = await createImageBitmap(blob, target);
+        } else {
+          bitmap = await createImageBitmap(blob);
+          this.srcWidth = bitmap.width;
+          this.srcHeight = bitmap.height;
+        }
       } else {
         bitmap = src;
       }

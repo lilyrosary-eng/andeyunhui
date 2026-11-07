@@ -73,11 +73,11 @@ const MODES: ViewMode[] = ['full', 'vertical', 'horizontal-forward', 'horizontal
 /** 完整模式滚轮缩放范围。 */
 /**
  * WebGL 渲染开关。
- * 2026-11-07 临时关闭：实测打开大图时内存暴涨（createImageBitmap 解码 + 纹理 + mipmap
- * 三者叠加，一张 8000×6000 的图峰值可达数百 MB），触发系统 OOM 把进程杀掉。
- * 待做「先降采样再上传」+ 释放时序修正后再打开。
+ * 2026-11-07 曾因内存暴涨（全尺寸解码 + 纹理 + mipmap ≈ 600MB，撞 3G cgroup 上限）关闭。
+ * 现已改为**解码阶段降采样**：按视口尺寸 ×2 ×dpr 解码，一张 8000×6000 的图
+ * 纹理只剩几十 MB。设 false 可退回 <img> 路径（SVG/GIF 本来就走那条）。
  */
-const IMAGE_WEBGL_ENABLED = false;
+const IMAGE_WEBGL_ENABLED = true;
 
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 16;
@@ -246,7 +246,12 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
     }
     webglRef.current = renderer;
     let alive = true;
-    void renderer.setImage(url).then((ok) => {
+    const view = fullImageRef.current;
+    void renderer.setImage(url, {
+      // 2 倍余量：放大到 2× 时仍清晰，再往上靠 mipmap 采样（Loupe 也是按显示器尺寸建纹理）
+      width: (view?.clientWidth ?? 1920) * 2,
+      height: (view?.clientHeight ?? 1080) * 2,
+    }).then((ok) => {
       if (!alive) return;
       setWebglReady(ok);
       if (ok) {
