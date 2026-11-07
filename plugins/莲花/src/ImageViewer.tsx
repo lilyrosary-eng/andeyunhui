@@ -176,7 +176,7 @@ function TileImage({
     for (let r = 0; r < lv.rows; r++) {
       for (let c = 0; c < lv.cols; c++) {
         out.push({
-          url: `${dirUrl}/L${levelIdx}/${r}_${c}.jpg`,
+          url: `${dirUrl}/L${levelIdx}/${r}_${c}.png`,
           left: c * t,
           top: r * t,
         });
@@ -206,6 +206,28 @@ function TileImage({
         overflow: 'hidden',
       }}
     >
+      <TileGrid tiles={tiles} tileSize={info.tile_size} />
+    </div>
+  );
+}
+
+/**
+ * 瓦片网格（memo 化）。
+ *
+ * 必须单独抽成 memo 组件：缩放时 zoomStyle 每帧都在变，若把几百个 <img>
+ * 直接放在带 transform 的 div 里，React 每次都要重渲染整棵子树 ⇒ 缩放巨卡
+ * （用户反馈"缩放很卡，拖动没问题"——拖动不触发 React 重渲染）。
+ * 抽出来后，transform 变化只更新外层一个 div 的 style，网格完全不动。
+ */
+const TileGrid = React.memo(function TileGrid({
+  tiles,
+  tileSize,
+}: {
+  tiles: { url: string; left: number; top: number }[];
+  tileSize: number;
+}) {
+  return (
+    <>
       {tiles.map((t, i) => (
         <img
           key={i}
@@ -213,12 +235,12 @@ function TileImage({
           alt=""
           draggable={false}
           className="absolute select-none"
-          style={{ left: t.left, top: t.top, width: info.tile_size, height: info.tile_size }}
+          style={{ left: t.left, top: t.top, width: tileSize, height: tileSize }}
         />
       ))}
-    </div>
+    </>
   );
-}
+});
 
 export function ImageViewer({ folderPath, folderName, onBack, initialPath, imagesOverride, favorites, onToggleFavorite }: ImageViewerProps) {
   useLang();

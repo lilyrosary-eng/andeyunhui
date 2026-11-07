@@ -1076,14 +1076,11 @@ impl LevelSampler {
             }
             let img = image::RgbImage::from_raw(tile, tile, data)
                 .ok_or_else(|| "构造瓦片图像失败".to_string())?;
-            let path = level_dir.join(format!("{tile_row}_{c}.jpg"));
-            let mut out = std::fs::File::create(&path).map_err(|e| format!("创建瓦片失败: {e}"))?;
-            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
-                std::io::BufWriter::new(&mut out),
-                90,
-            );
-            enc.encode_image(&img)
-                .map_err(|e| format!("写瓦片失败: {e}"))?;
+            // **瓦片用 PNG（无损）**：JPEG q90 有损，放大后与原图仍有可见差异
+            // （用户反馈"清晰度上来了但还是差一点"）。瓦片只有 512²，
+            // PNG 体积完全可接受，换来的是与原图等效的清晰度。
+            let path = level_dir.join(format!("{tile_row}_{c}.png"));
+            save_png_fast(&image::DynamicImage::ImageRgb8(img), &path)?;
         }
         // 丢掉已写出的整行瓦片
         self.tile_row_idx += 1;

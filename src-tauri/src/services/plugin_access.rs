@@ -101,6 +101,7 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("clipboard_clear", "clipboard.write"),
     // ---- 媒体 ----
     ("generate_thumbnail", "media"),
+    ("generate_tiles", "media"),
     ("convert_image", "media"),
     ("convert_bytes_to_markdown", "media"),
     ("convert_document", "media"),
@@ -547,6 +548,7 @@ mod tests {
     #[test]
     fn known_commands_resolve() {
         assert_eq!(capability_for("generate_thumbnail"), Some("media"));
+        assert_eq!(capability_for("generate_tiles"), Some("media"));
         assert_eq!(capability_for("music_set_favorite"), Some("data"));
         // 新加的 QQ 音乐代理命令必须能被解析出能力，否则 铃兰 manifest 里声明它们
         // 会被「所有插件声明命令都能归位」那条测试判红
