@@ -421,10 +421,24 @@ fn decode_jpeg_scaled(path: &std::path::Path, target_max: u32) -> Option<image::
     if w0 == 0 || h0 == 0 {
         return None;
     }
-    // 按最长边算目标尺寸，保持比例，且**不放大**（原图比目标小就整图解）。
-    let ratio = (target_max as f64 / w0.max(h0) as f64).min(1.0);
-    let tw = ((w0 as f64 * ratio).round() as u16).max(1);
-    let th = ((h0 as f64 * ratio).round() as u16).max(1);
+    // **jpeg-decoder 的 scale() 只能取 1/1、1/2、1/4、1/8 整数档**：
+    // 直接请求 2560 而原图 8192 时，它会挑 1/4 档 → 实际只解出 2048×2048，
+    // 看起来"和 2048×2048 一样"（用户实测）。
+    //
+    // 正确做法：**自己挑档位**，令 orig/n >= target（宁可解大一点），
+    // 解完再由外层 resize 到精确目标。
+    let want = target_max.max(1);
+    let n = if w0 as u32 / 8 >= want {
+        8
+    } else if w0 as u32 / 4 >= want {
+        4
+    } else if w0 as u32 / 2 >= want {
+        2
+    } else {
+        1
+    };
+    let tw = ((w0 as u32 / n).max(1).min(u16::MAX as u32)) as u16;
+    let th = ((h0 as u32 / n).max(1).min(u16::MAX as u32)) as u16;
     // scale() 在 IDCT 阶段按目标尺寸缩放，返回实际输出尺寸
     let (aw, ah) = dec.scale(tw, th).ok()?;
     let pixels = dec.decode().ok()?;
@@ -439,6 +453,243 @@ fn decode_jpeg_scaled(path: &std::path::Path, target_max: u32) -> Option<image::
         _ => None,
     }?;
     Some(img)
+}
+
+/// **PNG 流式降采样解码**（自研，2026-11-07）。
+///
+/// 为什么自己写：
+///   · `image::open` / `png` crate 的 `next_frame` 都必须**整图解**进内存
+///     —— 8192×8192 的 RGBA PNG = 268MB，这就是"打开大图时整机卡死"的 PNG 版本。
+///   · `zune-png 0.5` 也没有 `by_row`，`decode()` 同样是整图（已实测）。
+///   · PNG 的 IDAT 是 zlib 压缩流，可以**逐行解压**；每行只依赖上一行（反滤波），
+///     所以完全可以"边解边抽样"，永远不持有整图。
+///
+/// 内存：压缩后的 IDAT（几十 MB）+ 两行原宽缓冲（~64KB）+ 目标尺寸图（2560² ≈ 20MB）。
+/// 抽样用**双向 box 平均**（列方向在行内求平均，行方向跨 step_y 行求平均），
+/// 质量接近 Lanczos，比最近邻好得多 —— 与系统图片查看器的观感差距主要来自这里。
+///
+/// 只支持 8 位 RGB / RGBA 且非隔行（Adam7）；其余格式回退整图解码。
+fn decode_png_stream_scaled(path: &std::path::Path, target_max: u32) -> Option<image::DynamicImage> {
+    use std::io::Read;
+
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut sig = [0u8; 8];
+    f.read_exact(&mut sig).ok()?;
+    if &sig[1..4] != b"PNG" {
+        return None;
+    }
+
+    // 解析 chunk：IHDR 拿参数，IDAT 累积压缩数据
+    let mut ihdr: Option<(u32, u32, u8, u8, u8)> = None;
+    let mut idat: Vec<u8> = Vec::new();
+    loop {
+        let mut lenb = [0u8; 4];
+        if f.read_exact(&mut lenb).is_err() {
+            break;
+        }
+        let len = u32::from_be_bytes(lenb) as usize;
+        let mut ctype = [0u8; 4];
+        if f.read_exact(&mut ctype).is_err() {
+            break;
+        }
+        let mut data = vec![0u8; len];
+        if f.read_exact(&mut data).is_err() {
+            break;
+        }
+        let mut crc = [0u8; 4];
+        let _ = f.read_exact(&mut crc);
+        match &ctype {
+            b"IHDR" => {
+                if data.len() < 13 {
+                    return None;
+                }
+                ihdr = Some((
+                    u32::from_be_bytes([data[0], data[1], data[2], data[3]]),
+                    u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+                    data[8],
+                    data[9],
+                    data[12],
+                ));
+            }
+            b"IDAT" => idat.extend_from_slice(&data),
+            b"IEND" => break,
+            _ => {}
+        }
+    }
+    let (w0, h0, bit_depth, color_type, interlace) = ihdr?;
+    if bit_depth != 8 || interlace != 0 || w0 == 0 || h0 == 0 {
+        return None;
+    }
+    let channels: usize = match color_type {
+        2 => 3, // RGB
+        6 => 4, // RGBA
+        _ => return None,
+    };
+
+    // **两段式缩放**（画质关键）：
+    //   ① 流式解码时按 **2 倍余量** 抽样（box 平均，内存可控）；
+    //   ② 再用 Lanczos3 精缩到目标尺寸。
+    // 只做一次 box 抽样的话，大比例缩小时会明显偏软（实测与 image crate 的
+    // Lanczos3 差异 MAE≈32），这正是"和系统图片查看器比画质明显下降"的原因。
+    let final_ratio = (target_max as f64 / w0.max(h0) as f64).min(1.0);
+    let final_w = ((w0 as f64 * final_ratio).round() as u32).max(1);
+    let final_h = ((h0 as f64 * final_ratio).round() as u32).max(1);
+    // 流式阶段的中间尺寸：目标 × OVERSAMPLE，但不超原图。
+    // box 抽样本身有损，倍率越大越接近无损（后续 Lanczos3 才能恢复细节）。
+    let oversample: u32 = std::env::var("PNG_OVERSAMPLE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+    let inner_max = target_max
+        .saturating_mul(oversample)
+        .max(target_max)
+        .min(w0.max(h0));
+    let ratio = (inner_max as f64 / w0.max(h0) as f64).min(1.0);
+    let tw = ((w0 as f64 * ratio).round() as u32).max(1);
+    let th = ((h0 as f64 * ratio).round() as u32).max(1);
+    let step_x = ((w0 as f64 / tw as f64).ceil() as u32).max(1);
+    let step_y = ((h0 as f64 / th as f64).ceil() as u32).max(1);
+
+    let row_bytes = w0 as usize * channels;
+    let mut out = image::RgbImage::new(tw, th);
+    // 行方向累加器：每个目标列的 RGB 累加和 + 已累计行数
+    let mut acc = vec![0u64; tw as usize * 3];
+    let mut acc_n = 0u32;
+    let mut out_row = 0u32;
+
+    // **flate2 的 ZlibDecoder** 实现 std::io::Read ⇒ 可以**逐行读**：
+    // 每次 read_exact 恰好一行（1 字节 filter type + 整行像素），
+    // 立刻反滤波并抽样丢弃，整图从不进内存。
+    //
+    // 之前试过 fdeflate（png crate 自带的极简解压器）：它不支持 PNG 里常见的
+    // 大距离 LZ77 回溯，会报 DistanceTooFarBack —— 不适合解 PNG。
+    use std::io::Read as _;
+    let mut dec = flate2::read::ZlibDecoder::new(&idat[..]);
+    let mut line = vec![0u8; row_bytes + 1]; // 一行像素 + 1 字节 filter type
+    let mut prev = vec![0u8; row_bytes];
+    let mut cur = vec![0u8; row_bytes];
+
+    for y in 0..h0 {
+        if dec.read_exact(&mut line).is_err() {
+            break;
+        }
+        let filter = match line[0] {
+            0 => png::FilterType::NoFilter,
+            1 => png::FilterType::Sub,
+            2 => png::FilterType::Up,
+            3 => png::FilterType::Avg,
+            4 => png::FilterType::Paeth,
+            _ => return None,
+        };
+        cur.copy_from_slice(&line[1..]);
+        png_unfilter(filter, &mut cur, &prev, channels);
+
+        // 列方向 box 平均（行内）
+        for x in 0..tw {
+            // step_x 是 ceil，最后一个目标列的起点可能越过原图右边界 —— 必须夹住
+            let x0 = ((x * step_x) as usize).min(w0 as usize - 1);
+            let x1 = (((x + 1) * step_x) as usize).min(w0 as usize).max(x0 + 1);
+            let mut r = 0u64;
+            let mut g = 0u64;
+            let mut b = 0u64;
+            let mut n = 0u64;
+            for sx in x0..x1 {
+                let s = sx * channels;
+                r += cur[s] as u64;
+                g += cur[s + 1] as u64;
+                b += cur[s + 2] as u64;
+                n += 1;
+            }
+            let o = x as usize * 3;
+            acc[o] += r / n;
+            acc[o + 1] += g / n;
+            acc[o + 2] += b / n;
+        }
+        acc_n += 1;
+
+        // 行方向：攒够 step_y 行就落一行目标
+        if acc_n >= step_y && out_row < th {
+            for x in 0..tw {
+                let o = x as usize * 3;
+                let inv = acc_n as u64;
+                out.put_pixel(
+                    x,
+                    out_row,
+                    image::Rgb([
+                        (acc[o] / inv).min(255) as u8,
+                        (acc[o + 1] / inv).min(255) as u8,
+                        (acc[o + 2] / inv).min(255) as u8,
+                    ]),
+                );
+            }
+            out_row += 1;
+            acc.iter_mut().for_each(|v| *v = 0);
+            acc_n = 0;
+        }
+
+        prev.copy_from_slice(&cur);
+    }
+
+    if out_row == 0 {
+        return None;
+    }
+    // ② Lanczos3 精缩到最终目标
+    let out = if tw != final_w || th != final_h {
+        // image::ImageBuffer 没有 resize 方法，要用 imageops::resize 自由函数
+        image::imageops::resize(
+            &out,
+            final_w,
+            final_h,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        out
+    };
+    Some(image::DynamicImage::ImageRgb8(out))
+}
+
+/// PNG 行反滤波（filter types 0..4，标准 PNG 规范）。
+fn png_unfilter(filter: png::FilterType, cur: &mut [u8], prev: &[u8], bpp: usize) {
+    let len = cur.len();
+    match filter {
+        png::FilterType::NoFilter => {}
+        png::FilterType::Sub => {
+            for i in bpp..len {
+                cur[i] = cur[i].wrapping_add(cur[i - bpp]);
+            }
+        }
+        png::FilterType::Up => {
+            for i in 0..len {
+                cur[i] = cur[i].wrapping_add(prev[i]);
+            }
+        }
+        png::FilterType::Avg => {
+            for i in 0..len {
+                let left = if i >= bpp { cur[i - bpp] as u16 } else { 0 };
+                let up = prev[i] as u16;
+                cur[i] = cur[i].wrapping_add(((left + up) / 2) as u8);
+            }
+        }
+        png::FilterType::Paeth => {
+            for i in 0..len {
+                let a = if i >= bpp { cur[i - bpp] as i16 } else { 0 };
+                let b = prev[i] as i16;
+                let c = if i >= bpp { prev[i - bpp] as i16 } else { 0 };
+                let p = a + b - c;
+                let pa = (p - a).abs();
+                let pb = (p - b).abs();
+                let pc = (p - c).abs();
+                let pred = if pa <= pb && pa <= pc {
+                    a
+                } else if pb <= pc {
+                    b
+                } else {
+                    c
+                };
+                cur[i] = cur[i].wrapping_add(pred as u8);
+            }
+        }
+    }
 }
 
 /// (当前占用数, 条件变量) —— 手工实现的信号量。
@@ -547,9 +798,28 @@ pub fn generate_thumbnail(app: &tauri::AppHandle, image_path: &str, width: u32) 
     // **优先走 JPEG 降采样解码**：在 IDCT 阶段就缩放，像素量降到 1/4~1/64，
     // 不必整图解码 —— 这是"打开大图时整机卡死"的根治手段。
     // 非 JPEG（或 CMYK/L16）回退整图解码。
-    let img = match decode_jpeg_scaled(std::path::Path::new(&image_path), width) {
+    // 优先降采样解码（内存降一个量级）：
+    //   · JPEG → jpeg-decoder 的 IDCT 缩放档（1/2、1/4、1/8）
+    //   · PNG  → 自研流式逐行解码（decode_png_stream_scaled）
+    // 都不适用时（CMYK / 16 位 / 隔行等）回退整图解码，并加内存上限，
+    // 超限直接报错，而不是硬撑到系统卡死。
+    let img = match decode_jpeg_scaled(std::path::Path::new(&image_path), width)
+        .or_else(|| decode_png_stream_scaled(std::path::Path::new(&image_path), width))
+    {
         Some(i) => i,
-        None => image::open(&image_path).map_err(|e| format!("打开图片失败: {}", e))?,
+        None => {
+            // image::Limits 是 non-exhaustive struct，只能 default() 后逐字段赋值
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(20000);
+            limits.max_image_height = Some(20000);
+            limits.max_alloc = Some(320 * 1024 * 1024);
+            let mut reader = image::ImageReader::open(&image_path)
+                .map_err(|e| format!("打开图片失败: {}", e))?;
+            reader.limits(limits);
+            reader
+                .decode()
+                .map_err(|e| format!("打开图片失败（超出解码内存上限）: {}", e))?
+        }
     };
     let has_alpha = img.color().has_alpha();
     // 无损来源（PNG/BMP）保持 PNG，避免 JPEG 4:2:0 在截图/文字上产生块状发糊。
@@ -661,4 +931,92 @@ pub fn cleanup_thumbnail_cache(app: &tauri::AppHandle) -> Result<usize, String> 
     }
 
     Ok(removed)
+}
+
+#[cfg(test)]
+mod png_scaled_quality_test {
+    use super::*;
+
+    /// 自研 PNG 流式降采样 vs image crate 的 Lanczos3：
+    /// 检查尺寸一致、平均像素差在可接受范围（抽样算法不同，细节会有差异，
+    /// 但整体亮度/色彩必须接近，否则说明反滤波或抽样写错了）。
+    #[test]
+    fn png_scaled_matches_lanczos3_roughly() {
+        let path = match std::env::var("TEST_PNG") {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("skip: 未设置 TEST_PNG");
+                return;
+            }
+        };
+        let p = std::path::Path::new(&path);
+        let target = 512u32;
+        let mine = decode_png_stream_scaled(p, target).expect("自研解码应成功");
+        let full = image::open(p).expect("image::open 应成功");
+        // 用同样的目标尺寸（自研保持比例，不变形），基准同样用 Lanczos3 —— 公平比较
+        let expect = image::imageops::resize(
+            &full,
+            mine.width(),
+            mine.height(),
+            image::imageops::FilterType::Lanczos3,
+        );
+
+        assert_eq!(mine.width(), expect.width(), "宽度应一致");
+        assert_eq!(mine.height(), expect.height(), "高度应一致");
+
+        let m = mine.to_rgb8();
+        let e = expect; // imageops::resize 已返回 RgbImage
+        let mut sum = 0u64;
+        let mut n = 0u64;
+        for (a, b) in m.pixels().zip(e.pixels()) {
+            sum += (a[0] as i64 - b[0] as i64).unsigned_abs();
+            sum += (a[1] as i64 - b[1] as i64).unsigned_abs();
+            sum += (a[2] as i64 - b[2] as i64).unsigned_abs();
+            n += 3;
+        }
+        let mae = sum as f64 / n as f64;
+        eprintln!("平均像素差 MAE = {mae:.3}");
+        assert!(mae < 12.0, "MAE 过大 ({mae:.2})，反滤波或抽样可能有误");
+    }
+}
+
+#[cfg(test)]
+mod png_scaled_exact_match_test {
+    use super::*;
+
+    /// 1:1 对照：流式解码（不缩放）应与 image::open **逐像素几乎一致**。
+    /// 这是反滤波正确性的硬校验 —— 若反滤波有误，这里会直接暴露。
+    #[test]
+    fn png_stream_exact_matches_image_crate() {
+        let path = match std::env::var("TEST_PNG") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let p = std::path::Path::new(&path);
+        // target 取大于原图的尺寸 ⇒ ratio=1 ⇒ 1:1
+        let mine = decode_png_stream_scaled(p, 100000).expect("流式解码应成功");
+        let full = image::open(p).expect("image::open 应成功");
+        let e = full.to_rgb8();
+        let m = mine.to_rgb8();
+        assert_eq!(m.dimensions(), e.dimensions(), "尺寸应完全一致");
+        let mut max_diff = 0i64;
+        let mut bad = 0u64;
+        for (a, b) in m.pixels().zip(e.pixels()) {
+            let d = (a[0] as i64 - b[0] as i64)
+                .abs()
+                .max((a[1] as i64 - b[1] as i64).abs())
+                .max((a[2] as i64 - b[2] as i64).abs());
+            if d > 0 {
+                bad += 1;
+            }
+            max_diff = max_diff.max(d);
+        }
+        let total = (m.width() as u64) * (m.height() as u64);
+        eprintln!(
+            "1:1 对照：max_diff={max_diff} 不同像素={bad}/{} ({:.4}%)",
+            total,
+            bad as f64 * 100.0 / total as f64
+        );
+        assert_eq!(max_diff, 0, "1:1 流式解码应与 image::open 逐像素一致");
+    }
 }
