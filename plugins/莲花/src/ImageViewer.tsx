@@ -1168,24 +1168,14 @@ function FullView({
     }
   }, [currentIndex, isCurrentGif, currentPath]);
 
-  const goPrev = () => setCurrentIndex(Math.max(0, currentIndex - 1));
-  const goNext = () => setCurrentIndex(Math.min(imgUrls.length - 1, currentIndex + 1));
 
   return (
     <div
       ref={containerRef}
       className="w-full h-full flex items-center justify-center relative overflow-hidden"
     >
-      {/* 点击左半区 */}
-      {currentIndex > 0 && (
-        <div className="absolute left-0 top-0 w-1/3 h-full cursor-pointer z-10" onClick={goPrev} />
-      )}
       {/* 点击中间区：隐藏/唤出顶部工具栏与缩略图条（沉浸切换） */}
       <div className="absolute left-1/3 top-0 w-1/3 h-full z-10" onClick={onToggleChrome} />
-      {/* 点击右半区 */}
-      {currentIndex < imgUrls.length - 1 && (
-        <div className="absolute right-0 top-0 w-1/3 h-full cursor-pointer z-10" onClick={goNext} />
-      )}
 
       {/* 放大后：整层可拖动平移 + 双击复位。覆盖在点击区之上，避免拖动时误触翻页/显隐。
           只认右键(2)/中键(1)：左键留给双击复位，且左键拖在 WebView2 里会出禁止光标。
