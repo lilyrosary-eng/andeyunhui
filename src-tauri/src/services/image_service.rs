@@ -455,6 +455,22 @@ fn decode_jpeg_scaled(path: &std::path::Path, target_max: u32) -> Option<image::
     Some(img)
 }
 
+/// 整图解码（降采样路径都不适用时的回退）。
+/// 加内存上限：超限直接报错，而不是硬撑到系统卡死。
+fn decode_whole_image(image_path: &str) -> Result<image::DynamicImage, String> {
+    // image::Limits 是 non-exhaustive struct，只能 default() 后逐字段赋值
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(20000);
+    limits.max_image_height = Some(20000);
+    limits.max_alloc = Some(320 * 1024 * 1024);
+    let mut reader = image::ImageReader::open(image_path)
+        .map_err(|e| format!("打开图片失败: {}", e))?;
+    reader.limits(limits);
+    reader
+        .decode()
+        .map_err(|e| format!("打开图片失败（超出解码内存上限）: {}", e))
+}
+
 /// **PNG 流式降采样解码**（自研，2026-11-07）。
 ///
 /// 为什么自己写：
@@ -803,23 +819,21 @@ pub fn generate_thumbnail(app: &tauri::AppHandle, image_path: &str, width: u32) 
     //   · PNG  → 自研流式逐行解码（decode_png_stream_scaled）
     // 都不适用时（CMYK / 16 位 / 隔行等）回退整图解码，并加内存上限，
     // 超限直接报错，而不是硬撑到系统卡死。
-    let img = match decode_jpeg_scaled(std::path::Path::new(&image_path), width)
-        .or_else(|| decode_png_stream_scaled(std::path::Path::new(&image_path), width))
-    {
-        Some(i) => i,
-        None => {
-            // image::Limits 是 non-exhaustive struct，只能 default() 后逐字段赋值
-            let mut limits = image::Limits::default();
-            limits.max_image_width = Some(20000);
-            limits.max_image_height = Some(20000);
-            limits.max_alloc = Some(320 * 1024 * 1024);
-            let mut reader = image::ImageReader::open(&image_path)
-                .map_err(|e| format!("打开图片失败: {}", e))?;
-            reader.limits(limits);
-            reader
-                .decode()
-                .map_err(|e| format!("打开图片失败（超出解码内存上限）: {}", e))?
+    let img = match decode_jpeg_scaled(std::path::Path::new(&image_path), width) {
+        Some(i) => {
+            log::info!("[image] jpeg downscaled {width} from {}x{}", i.width(), i.height());
+            i
         }
+        None => match decode_png_stream_scaled(std::path::Path::new(&image_path), width) {
+            Some(i) => {
+                log::info!("[image] png streamed {width} from {}x{}", i.width(), i.height());
+                i
+            }
+            None => {
+                log::warn!("[image] 整图解码（降采样不适用）: {image_path}");
+                decode_whole_image(&image_path)?
+            }
+        },
     };
     let has_alpha = img.color().has_alpha();
     // 无损来源（PNG/BMP）保持 PNG，避免 JPEG 4:2:0 在截图/文字上产生块状发糊。

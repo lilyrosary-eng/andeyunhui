@@ -1262,11 +1262,16 @@ function FullView({
           ref={canvasRef}
           className="absolute inset-0 w-full h-full select-none"
         />
+      ) : !isCurrentGif && !displaySrc ? (
+        // 显示层还没就绪：**绝不回退原图**。
+        // 回退原图会让 WebView 解码 8192×8192（≈268MB）—— 表现就是
+        // 「打开大图时整机卡死」+「画质在原图/降采样之间来回跳」。
+        <div className="text-neutral-300 dark:text-stone-600 text-sm">{T('image.viewer.loading')}</div>
       ) : (
         <img
           ref={imgRef}
-          // 显示层优先（Rust 侧限流解码）；拿不到时才回退原图。
-          src={isCurrentGif ? gifDataUrl || currentUrl : displaySrc || currentUrl}
+          // 只用显示层（Rust 侧限流解码的降采样图）。GIF 走原逻辑。
+          src={isCurrentGif ? gifDataUrl || currentUrl : displaySrc}
           alt={`${currentIndex + 1}/${imgUrls.length}`}
           key={currentIndex}
           onError={() => setImgError(true)}
