@@ -976,6 +976,26 @@ fn main() {
             // 透明窗口在 Wayland 下的已知问题：窗口失焦/被遮挡后合成器丢弃 buffer，
             // 回来时 WebKit 不主动重绘 ⇒ 用户看到"没内容了"（2026-11-07 实测）。
             // 这里在焦点回来、以及从完全遮挡状态恢复时强制重绘一次。
+            // WebProcess 终止（白屏）自愈：WebKit 的渲染进程退出后，页面会永久空白，
+            // 且不会自动恢复。这里监听终止信号并 reload —— 丢状态总比白屏好。
+            #[cfg(target_os = "linux")]
+            {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.with_webview(|platform| {
+                        use gtk::prelude::*;
+                        let widget = platform.inner();
+                        use webkit2gtk::WebViewExt as _;
+                        let webview = widget
+                            .downcast::<webkit2gtk::WebView>()
+                            .expect("主窗 webview 应为 WebKitWebView");
+                        webview.connect_web_process_terminated(|view, reason| {
+                            eprintln!("[webview] WebProcess 终止: {reason:?}，自动重载");
+                            view.reload();
+                        });
+                    });
+                }
+            }
+
             #[cfg(target_os = "linux")]
             {
                 if let Some(w) = app.get_webview_window("main") {

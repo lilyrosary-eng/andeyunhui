@@ -15,6 +15,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+
 # unstable：解锁多 webview（Window::add_child），「网络视频」的内嵌浏览器依赖它。
 # 见 src/embedded_browser.rs —— 用它把子 webview 精确铺在面板矩形上，
 # 取代旧方案 alwaysOnTop 独立浮窗（遮挡主窗 UI / 不跟随移动 / 尺寸不同步）。
@@ -124,6 +125,8 @@ num-complex = "0.4"
 # （正确显示名「安得云荟」+ 响应系统媒体键）。需要 Media/Media_Playback（SMTC 类型）
 # 与 Win32_System_WinRT（ISystemMediaTransportControlsInterop / RoGetActivationFactory）。
 [target.'cfg(windows)'.dependencies]
+# WinRT 异步操作（UserConsentVerifier 需要 join 等同步等待）
+windows-future = "0.3.2"
 windows = { version = "0.62", features = [
   "Win32_UI_Shell",
   "Win32_UI_Shell_PropertiesSystem",
@@ -133,6 +136,8 @@ windows = { version = "0.62", features = [
   "Win32_System_Registry",
   "Win32_System_Variant",
   "Win32_System_WinRT",
+  # Windows Hello 生物识别（密码库 device 槽位门闸）：WinRT Security.Credentials.UI
+  "Security_Credentials_UI",
   "Win32_UI_WindowsAndMessaging",
   "Win32_Media_Audio",
   "Win32_Storage_FileSystem",
@@ -263,6 +268,17 @@ test-manifest = []
 [profile.dev.package.andeyunhui]
 opt-level = 2
 
+# 密码库 KDF：未优化的 scrypt 一次派生实测可达 ~30 秒，建库/解锁看起来像卡死。
+# 只给 KDF 链路（scrypt → pbkdf2 → salsa20/sha2）提优化，不动其它依赖，重建面很小。
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.release]
 # 全链路优化：跨 crate 内联 + 死代码消除，性能提升 10-20%
 lto = true
@@ -297,6 +313,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mobile)', 'cfg(desktop)'] 
 # 两者内部都走 libdbus（构建机已具备 dbus-1 1.16.2，pkg-config 可解析）。
 # 放在 target_os = "linux" 段：不参与 Windows / Android 构建，对既有平台零影响。
 [target.'cfg(target_os = "linux")'.dependencies]
+# 直接访问 WebKitWebView：监听 WebProcess 终止以做白屏自愈
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
 mpris = "2.1"
 # 发布端自研 MPRIS（替代 souvlaki）：souvlaki 0.8 无法设置 DesktopEntry / Capabilities，
 # 也不给 Seek·SetPosition ⇒ GNOME 媒体卡片缺图标、不能拖进度。tokio feature 让底层 zbus
