@@ -121,12 +121,24 @@ interface TilesInfo {
 function TileImage({
   imagePath,
   zoomScale,
+  cameraX,
+  cameraY,
   zoomStyle,
+  getBaseRect,
+  containerRef,
   onImageLoaded,
 }: {
   imagePath: string;
   /** 当前缩放倍率（用来选层） */
   zoomScale: number;
+  /** 相机平移量（用于算视口落在图像的哪一块） */
+  cameraX: number;
+  cameraY: number;
+  /** 查看区容器（用于取视口尺寸） */
+  containerRef?: React.RefObject<HTMLElement>;
+  /** 与底层 <img> 完全相同的适配矩形（getBaseRect 返回）——
+   *  瓦片层必须用它来定尺寸，否则两层坐标系不一致（会看到两个图 / 尺寸错位） */
+  getBaseRect?: () => { left: number; top: number; width: number; height: number } | null;
   /** 与底层 <img> 完全相同的 transform，保证两层对齐 */
   zoomStyle: React.CSSProperties;
   onImageLoaded?: (size: { width: number; height: number }) => void;
@@ -162,28 +174,83 @@ function TileImage({
   const levelIdx = useMemo(() => {
     if (!info || info.levels.length === 0) return -1;
     const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    // 适配宽：优先用 getBaseRect（与底层 <img> 的 object-contain 结果**完全一致**），
+    // 退化时用视口自己算 contain。
+    const br = getBaseRect?.();
     const vw = typeof window !== 'undefined' ? window.innerWidth : 1920;
     const vh = typeof window !== 'undefined' ? window.innerHeight : 1080;
     const fit = Math.min(1, vw / info.width, vh / info.height);
-    const cssWidth = info.width * fit; // 适配时的 CSS 显示宽
+    const cssWidth = br?.width ?? info.width * fit; // 适配时的 CSS 显示宽
     const targetPx = Math.max(1, cssWidth * zoomScale * dpr);
     // 从大到小找第一个满足的（levels 是从小到大）
     for (let i = info.levels.length - 1; i >= 0; i--) {
       if (info.levels[i].width >= targetPx) return i;
     }
     return 0;
-  }, [info, zoomScale]);
+  }, [info, zoomScale, getBaseRect]);
 
-  // 瓦片 URL 列表
+  // 查看区尺寸（跟随窗口/布局变化）
+  const [viewSize, setViewSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = containerRef?.current;
+    if (!el) return;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      setViewSize((prev) =>
+        Math.abs(prev.w - r.width) < 1 && Math.abs(prev.h - r.height) < 1
+          ? prev
+          : { w: r.width, h: r.height },
+      );
+    };
+    update();
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
+    ro?.observe(el);
+    window.addEventListener('resize', update);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener('resize', update);
+    };
+  }, [containerRef]);
+
+  // **瓦片列表：只取视口内的瓦片**。
+  //
+  // 这是缩放流畅的关键：8192² 的最大层是 16×16 = 256 块，整层渲染意味着
+  //   · 解码内存 ≈ 268MB
+  //   · 每次 transform 变化都要重合成整张 8192² 图层 ⇒ 缩放巨卡
+  // 裁剪到视口（外扩 1.6 倍留余量）后通常只需十几块。
   const tiles = useMemo(() => {
     if (!info || levelIdx < 0) return [];
     const lv = info.levels[levelIdx];
     const dirUrl = safeFileSrc(info.dir);
     if (!dirUrl) return [];
-    const out: { url: string; left: number; top: number }[] = [];
     const t = info.tile_size;
-    for (let r = 0; r < lv.rows; r++) {
-      for (let c = 0; c < lv.cols; c++) {
+
+    // 视口在「层像素坐标」里的范围
+    let c0 = 0;
+    let c1 = lv.cols - 1;
+    let r0 = 0;
+    let r1 = lv.rows - 1;
+    const br = getBaseRect?.();
+    if (br && viewSize.w > 0 && viewSize.h > 0 && zoomScale > 0) {
+      // 图像左上角的屏幕坐标 = 适配矩形左上角 + 相机平移
+      const imgLeft = br.left + cameraX;
+      const imgTop = br.top + cameraY;
+      // 屏幕 → 图像坐标 → 层像素坐标
+      const toLayer = (screen: number, origin: number, cssSize: number, layerSize: number) =>
+        ((screen - origin) / zoomScale) * (layerSize / cssSize);
+      const x0 = toLayer(br.left - 60, imgLeft, br.width, lv.width);
+      const x1 = toLayer(br.left + viewSize.w + 60, imgLeft, br.width, lv.width);
+      const y0 = toLayer(br.top - 60, imgTop, br.height, lv.height);
+      const y1 = toLayer(br.top + viewSize.h + 60, imgTop, br.height, lv.height);
+      c0 = Math.max(0, Math.floor(x0 / t));
+      c1 = Math.min(lv.cols - 1, Math.floor(x1 / t));
+      r0 = Math.max(0, Math.floor(y0 / t));
+      r1 = Math.min(lv.rows - 1, Math.floor(y1 / t));
+    }
+
+    const out: { url: string; left: number; top: number }[] = [];
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
         out.push({
           url: `${dirUrl}/L${levelIdx}/${r}_${c}.png`,
           left: c * t,
@@ -192,7 +259,7 @@ function TileImage({
       }
     }
     return out;
-  }, [info, levelIdx]);
+  }, [info, levelIdx, getBaseRect, viewSize, zoomScale, cameraX, cameraY]);
 
   // 回填尺寸（getBaseRect 依赖它）
   useEffect(() => {
@@ -205,20 +272,37 @@ function TileImage({
     return null;
   }
   const lv = info.levels[levelIdx];
+  // **外层尺寸必须等于底层 <img> 的适配尺寸**（getBaseRect 的 width/height），
+  // 内层再把「层的像素尺寸」缩放到它 —— 两层才严格重合。
+  // 之前外层直接用 lv.width（原图像素，8192）⇒ 瓦片以 1:1 像素铺开，
+  // 看起来像「卡在最大缩放」，还和底层错位成两个图。
+  const br = getBaseRect?.();
+  const cssW = br?.width ?? info.width;
+  const cssH = br?.height ?? info.height;
+  const innerScale = cssW / lv.width;
   return (
     <div
       className="absolute inset-0 pointer-events-none"
       style={{
         ...zoomStyle,
-        width: lv.width,
-        height: lv.height,
+        width: cssW,
+        height: cssH,
         overflow: 'hidden',
         // 提升为独立合成层：缩放时浏览器只重合成这一层，
         // 而不是每次重新合成整张 8192² 图层（否则缩放巨卡）
         willChange: 'transform',
       }}
     >
-      <TileGrid tiles={tiles} tileSize={info.tile_size} />
+      <div
+        style={{
+          width: lv.width,
+          height: lv.height,
+          transform: `scale(${innerScale})`,
+          transformOrigin: '0 0',
+        }}
+      >
+        <TileGrid tiles={tiles} tileSize={info.tile_size} />
+      </div>
     </div>
   );
 }
@@ -1150,6 +1234,9 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
             zoomStyle={zoomTransformStyle}
             zoomScale={zoomCamera.scale}
             baseWidth={loadedSize?.width ?? 0}
+            getBaseRectProp={getBaseRect}
+            cameraX={zoomCamera.x}
+            cameraY={zoomCamera.y}
             zoomed={webglReady ? webglZoomed : zoomCamera.scale > 1}
             onPanBy={panZoomBy}
             onResetZoom={() => resetZoom()}
@@ -1333,6 +1420,9 @@ function FullView({
   zoomStyle,
   zoomScale,
   baseWidth,
+  getBaseRectProp,
+  cameraX,
+  cameraY,
   zoomed,
   onPanBy,
   onResetZoom,
@@ -1353,6 +1443,11 @@ function FullView({
   zoomScale: number;
   /** 原图像素宽（Tile 层选层用：目标显示像素 = baseWidth × zoomScale） */
   baseWidth: number;
+  /** 与底层 <img> 相同的适配矩形（Tile 层必须用它对齐，否则会看到两个图） */
+  getBaseRectProp?: () => { left: number; top: number; width: number; height: number } | null;
+  /** 相机平移量（Tile 层裁剪视口时需要） */
+  cameraX: number;
+  cameraY: number;
   zoomed: boolean;
   onPanBy: (dx: number, dy: number) => void;
   onResetZoom: () => void;
@@ -1492,6 +1587,10 @@ function FullView({
           <TileImage
             imagePath={currentPath}
             zoomScale={zoomScale}
+            getBaseRect={getBaseRectProp}
+            cameraX={cameraX}
+            cameraY={cameraY}
+            containerRef={containerRef}
             zoomStyle={zoomStyle}
           />
         )}
