@@ -458,14 +458,36 @@ pub fn generate_thumbnail(app: &tauri::AppHandle, image_path: &str, width: u32) 
     let t_gen = std::time::Instant::now();
     // 统一用快速盒式缩小：debug 构建下 Triangle/PNG 默认压缩会把 3072² 显示层
     // 拖到 5~10 秒，用户体验上等同于“永远糊”。质量靠 PNG/JPEG q92 + 原图兜底保证。
-    let thumb = img.thumbnail(width, width.saturating_mul(10));
+    // 保持宽高比、且**不放大**。
+    // image::DynamicImage::thumbnail(nw, nh) 是「缩放到恰好 nw×nh」：
+    //   ① 会把小图放大（1024 的原图 → 3072×3072，白烧几秒且变形）
+    //   ② 不保持宽高比
+    // 改为：原图已够小就直接用原图；否则按最长边等比缩到 width。
+    let (ow, oh) = (img.width(), img.height());
+    let (tw, th) = {
+        let longest = ow.max(oh);
+        if longest <= width {
+            (ow, oh)
+        } else {
+            let r = width as f64 / longest as f64;
+            (
+                ((ow as f64 * r).round() as u32).max(1),
+                ((oh as f64 * r).round() as u32).max(1),
+            )
+        }
+    };
+    let thumb = if tw == ow && th == oh {
+        img
+    } else {
+        img.resize(tw, th, image::imageops::FilterType::Triangle)
+    };
     if width >= 1024 {
         log::info!(
             "[image] display layer {}x{} from {}x{} in {}ms ({})",
             thumb.width(),
             thumb.height(),
-            img.width(),
-            img.height(),
+            ow,
+            oh,
             t_gen.elapsed().as_millis(),
             if has_alpha || lossless_src { "png" } else { "jpg" }
         );

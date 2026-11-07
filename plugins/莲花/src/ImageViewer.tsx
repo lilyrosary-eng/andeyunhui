@@ -90,7 +90,17 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
   const [images, setImages] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>('full');
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentIndex, setCurrentIndexRaw] = useState(0);
+  // 临时探针：任何翻页都打印调用栈，用于定位"左右点击仍翻页"的真实来源。
+  // 排查完删除（搜索 PAGE-CHANGE）。
+  const setCurrentIndex = useCallback((v: React.SetStateAction<number>) => {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[PAGE-CHANGE]',
+      new Error().stack?.split('\n').slice(1, 4).map((l) => l.trim()).join(' <- '),
+    );
+    setCurrentIndexRaw(v);
+  }, []);
   // ===== 中心点击（full=沉浸切换上下条框；滚动模式=唤出跳转菜单）=====
   const [menuOpen, setMenuOpen] = useState(false);
   // 完整模式沉浸：隐藏顶部工具栏与缩略图条（点击中心切换）
@@ -1222,6 +1232,10 @@ function FullView({
           ref={canvasRef}
           className="absolute inset-0 w-full h-full select-none"
         />
+      ) : !previewSrc ? (
+        // 缩略图还没就绪：**不渲染 <img>**。
+        // 渲染 src="" 会立刻触发 onError，直接落进"加载失败"态（2026-11-07 实测）。
+        <div className="text-neutral-300 dark:text-stone-600 text-sm">{T('image.viewer.loading')}</div>
       ) : (
         <img
           ref={imgRef}
