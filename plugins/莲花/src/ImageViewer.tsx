@@ -158,9 +158,11 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
   // 几何不再依赖 img 的 DOM transform（大图每帧变形会拖垮合成器）：按容器 + 原图尺寸直接算。
   const getBaseRect = useCallback(() => {
     const view = fullImageRef.current;
+    if (!view) return null;
+    // WebGL 路径没有 <img>，尺寸取已加载的 loadedSize；DOM 路径优先用 naturalWidth。
     const img = fullImgRef.current;
-    if (!view || !img) return null;
-    const nw = img.naturalWidth, nh = img.naturalHeight;
+    const nw = img?.naturalWidth || loadedSize?.width || 0;
+    const nh = img?.naturalHeight || loadedSize?.height || 0;
     if (!nw || !nh) return null;
     const vr = view.getBoundingClientRect();
     if (vr.width <= 0 || vr.height <= 0) return null;
@@ -173,7 +175,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
       height: h,
       view: vr,
     };
-  }, []);
+  }, [loadedSize]);
   const {
     camera: zoomCamera,
     transformStyle: zoomTransformStyle,

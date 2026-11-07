@@ -32,6 +32,12 @@ export interface ZoomPanOptions {
    * 几何由容器 + 原图尺寸算，不再依赖 DOM 上的 transform（大图不会每帧生成巨型图层）。
    */
   getBaseRect?: () => { left: number; top: number; width: number; height: number; view: DOMRect } | null;
+  /**
+   * 每帧相机变化回调。提供它时**不再 setState**（走 ref + 回调），
+   * 供 WebGL/Canvas 这类「自己按 camera 重绘」的渲染层使用，避免每帧 React 重渲染；
+   * 不提供则维持原来的 DOM transform 行为。
+   */
+  onCameraChange?: (camera: ZoomPanCamera) => void;
 }
 
 /** 一档滚轮对应的缩放倍率。 */
@@ -118,9 +124,17 @@ export function useZoomPan(
   /** 上一次滚轮事件的时间/方向：用于识别快速连滚。 */
   const lastWheelRef = useRef<{ t: number; dir: ZoomDirection } | null>(null);
 
+  // 用 ref 持有回调，避免 options 每次渲染变化导致 apply 重建
+  const onCameraChangeRef = useRef(options.onCameraChange);
+  useEffect(() => {
+    onCameraChangeRef.current = options.onCameraChange;
+  }, [options.onCameraChange]);
+
   const apply = useCallback((next: ZoomPanCamera) => {
     cameraRef.current = next;
-    setCamera(next);
+    const cb = onCameraChangeRef.current;
+    if (cb) cb(next);
+    else setCamera(next);
   }, []);
 
   const stop = useCallback(() => {
