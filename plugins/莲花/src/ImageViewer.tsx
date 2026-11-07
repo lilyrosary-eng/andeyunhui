@@ -77,7 +77,7 @@ const MODES: ViewMode[] = ['full', 'vertical', 'horizontal-forward', 'horizontal
  * 现已改为**解码阶段降采样**：按视口尺寸 ×2 ×dpr 解码，一张 8000×6000 的图
  * 纹理只剩几十 MB。设 false 可退回 <img> 路径（SVG/GIF 本来就走那条）。
  */
-const IMAGE_WEBGL_ENABLED = false;
+const IMAGE_WEBGL_ENABLED = true;
 
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 16;
@@ -719,7 +719,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
     <div className={`flex-1 flex flex-col h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top image-viewer-root${viewMode === 'full' && chromeHidden ? ' image-viewer-full-bleed' : ''}`}>
       {/* 顶部工具栏（完整模式可点击图片中心隐藏，沉浸阅读） */}
       {!(viewMode === 'full' && chromeHidden) && (
-      <div className="flex items-center justify-between px-4 py-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-sm">
+      <div className="relative flex items-center justify-between px-4 py-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-sm">
         {/* 左侧：返回 + 标题 */}
         <div className="flex items-center gap-3">
           <button onClick={onBack} className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200">
@@ -732,8 +732,10 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
           </div>
         </div>
 
-        {/* 中间：模式切换 + 随机 + 幻灯片 */}
-        <div className="flex items-center gap-0.5">
+        {/* 中间：模式切换 + 随机 + 幻灯片。
+            绝对居中：原先放在 justify-between 的三段里，块的位置虽在中间，
+            但块内内容左对齐（flex items-center 没有 justify-center），视觉上偏左。 */}
+        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-0.5">
           <div className="flex items-center gap-0.5 bg-black/5 dark:bg-white/5 rounded-lg p-0.5">
             {MODES.map(mode => (
               <button
