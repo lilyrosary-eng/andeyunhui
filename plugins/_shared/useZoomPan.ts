@@ -118,6 +118,12 @@ export function useZoomPan(
   const getBaseRect = options.getBaseRect;
 
   const [camera, setCamera] = useState<ZoomPanCamera>(DEFAULT_CAMERA);
+  /**
+   * 是否正在缩放/拖动。**只用于动态挂 will-change**：
+   * 常驻 will-change 会让浏览器为内容建立合成层，大图会变成一张巨型位图常驻显存；
+   * 交互结束后立刻摘掉，让图层可以被回收。
+   */
+  const [interacting, setInteracting] = useState(false);
   const cameraRef = useRef(camera);
   const animRef = useRef<ZoomAnimation | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -143,12 +149,14 @@ export function useZoomPan(
       rafRef.current = null;
     }
     animRef.current = null;
+    setInteracting(false);
   }, []);
 
   const frame = useCallback((now: number) => {
     const anim = animRef.current;
     if (!anim) {
       rafRef.current = null;
+      setInteracting(false);
       return;
     }
     let scale: number;
@@ -217,6 +225,7 @@ export function useZoomPan(
    */
   const zoomAt = useCallback((clientX: number, clientY: number, factor: number, direction: ZoomDirection = 'in', gapMs?: number) => {
     if (!Number.isFinite(factor) || factor <= 0) return;
+    setInteracting(true);
     const base = baseRect();
     if (!base || base.width <= 0 || base.height <= 0) return;
 
@@ -332,6 +341,7 @@ export function useZoomPan(
   /** 拖动平移：即时跟手；同时取消未完成的缩放动画。 */
   const panBy = useCallback((dx: number, dy: number) => {
     stop();
+    setInteracting(true);
     const cur = cameraRef.current;
     apply({ ...cur, x: cur.x + dx, y: cur.y + dy });
   }, [apply, stop]);
@@ -346,7 +356,8 @@ export function useZoomPan(
   const transformStyle: React.CSSProperties = {
     transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.scale})`,
     transformOrigin: '0 0',
-    willChange: 'transform',
+    // 只在交互期间挂：常驻会让大图常驻一张巨型合成层
+    willChange: interacting ? 'transform' : undefined,
   };
 
   return { camera, transformStyle, zoomAt, zoomByWheel, panBy, reset };

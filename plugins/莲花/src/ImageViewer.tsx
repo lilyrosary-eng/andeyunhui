@@ -199,6 +199,13 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
   const [webglReady, setWebglReady] = useState(false);
   // 只跟踪"是否已放大"这个布尔，避免每帧 setState 把 React 拖回重渲染
   const [webglZoomed, setWebglZoomed] = useState(false);
+  /**
+   * 当前纹理对应的「最大可用放大倍数」。纹理按 视口×lod×dpr 解码，
+   * 放大跨过这个倍数时会在防抖后换一份更高分辨率的纹理（多级 LOD）。
+   * 数值越大越清晰、越费内存；上限 4 是经验值（再高收益递减）。
+   */
+  const lodRef = useRef(2);
+  const lodTimerRef = useRef<number | null>(null);
 
   // camera 变化 → 直接重绘，不经过 React
   const handleCameraChange = useCallback((cam: { scale: number; x: number; y: number }) => {
@@ -217,6 +224,31 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
     // setState 用函数式：值不变时 React 会 bail out，不会引发重渲染
     const zoomedNow = cam.scale > 1.001;
     setWebglZoomed((prev) => (prev === zoomedNow ? prev : zoomedNow));
+
+    // 多级 LOD：放大快接近当前纹理上限时，防抖换更高分辨率的纹理
+    if (cam.scale > lodRef.current * 0.9 && lodRef.current < 4 && lodTimerRef.current === null) {
+      lodTimerRef.current = window.setTimeout(() => {
+        lodTimerRef.current = null;
+        const renderer = webglRef.current;
+        const v = fullImageRef.current;
+        if (!renderer || !v) return;
+        const nextLod = Math.min(4, lodRef.current * 2);
+        const url = currentUrl || '';
+        void renderer
+          .setImage(url, { width: v.clientWidth * nextLod, height: v.clientHeight * nextLod })
+          .then((ok) => {
+            if (!ok) return;
+            lodRef.current = nextLod;
+            renderer.draw(cam, {
+              width: br.width,
+              height: br.height,
+              viewportWidth: v.clientWidth,
+              viewportHeight: v.clientHeight,
+              dpr: window.devicePixelRatio || 1,
+            });
+          });
+      }, 220);
+    }
   }, [getBaseRect]);
 
   } = useZoomPan(fullImageRef, fullImgRef, {
@@ -245,6 +277,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
       return;
     }
     webglRef.current = renderer;
+    lodRef.current = 2; // 新图从 2× LOD 起步
     let alive = true;
     const view = fullImageRef.current;
     void renderer.setImage(url, {
@@ -263,6 +296,10 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
     });
     return () => {
       alive = false;
+      if (lodTimerRef.current !== null) {
+        clearTimeout(lodTimerRef.current);
+        lodTimerRef.current = null;
+      }
       renderer.dispose();
       webglRef.current = null;
       setWebglReady(false);

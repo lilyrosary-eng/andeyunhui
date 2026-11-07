@@ -47,13 +47,13 @@ export interface DrawOptions {
 const VERT = `#version 300 es
 in vec2 a_unit;              // 0..1 的单位四边形
 out vec2 v_uv;
-uniform vec2 u_size;         // 图片基础尺寸（CSS px）
+uniform vec4 u_tileCss;      // 该瓦片在「图片局部坐标系」里的矩形 (x, y, w, h)，单位 CSS px
 uniform vec2 u_translate;    // 相机平移（CSS px）
 uniform float u_scale;       // 相机缩放
 uniform vec2 u_viewport;     // 视口尺寸（CSS px）
 void main() {
-  vec2 px = a_unit * u_size;                    // 图片内的像素坐标
-  vec2 screen = px * u_scale + u_translate;     // 视口坐标
+  vec2 local = u_tileCss.xy + a_unit * u_tileCss.zw;  // 图片局部坐标
+  vec2 screen = local * u_scale + u_translate;        // 视口坐标
   vec2 clip = screen / u_viewport * 2.0 - 1.0;  // → NDC
   gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0); // Y 轴翻转（视口原点在左上）
   v_uv = a_unit;
@@ -62,29 +62,42 @@ void main() {
 const FRAG = `#version 300 es
 precision highp float;
 in vec2 v_uv;
+uniform vec2 u_uvOffset;   // 该瓦片在整图中的归一化偏移
+uniform vec2 u_uvScale;    // 该瓦片占整图的比例
 uniform sampler2D u_tex;
 uniform float u_alpha;
 out vec4 outColor;
 void main() {
-  vec4 c = texture(u_tex, v_uv);
+  vec4 c = texture(u_tex, u_uvOffset + v_uv * u_uvScale);
   outColor = vec4(c.rgb, c.a * u_alpha);
 }`;
 
 export class WebglImageCanvas {
   private gl: WebGL2RenderingContext | null = null;
   private program: WebGLProgram | null = null;
-  private tex: WebGLTexture | null = null;
+  private tiles = new Map<string, WebGLTexture>();
   private vao: WebGLVertexArrayObject | null = null;
-  private uSize: WebGLUniformLocation | null = null;
+  private uTileCss: WebGLUniformLocation | null = null;
   private uTranslate: WebGLUniformLocation | null = null;
   private uScale: WebGLUniformLocation | null = null;
   private uViewport: WebGLUniformLocation | null = null;
   private uTex: WebGLUniformLocation | null = null;
+  private uUvOffset: WebGLUniformLocation | null = null;
+  private uUvScale: WebGLUniformLocation | null = null;
+  /** 解码后的源位图，瓦片按需从中切（不整体上传） */
+  private source: ImageBitmap | null = null;
+  /** 源位图的像素尺寸（已降采样） */
+  private srcPixelW = 0;
+  private srcPixelH = 0;
+  /** 瓦片网格 */
+  private cols = 0;
+  private rows = 0;
+  /** 单片边长（像素）；512 在常见视口下可见瓦片数 < 20 */
+  private static readonly TILE = 512;
+  /** 复用同一块离屏 canvas 切瓦片，避免每片新建 */
+  private scratch: HTMLCanvasElement | null = null;
   private uAlpha: WebGLUniformLocation | null = null;
 
-  /** 纹理的实际像素尺寸（降采样后） */
-  private texWidth = 0;
-  private texHeight = 0;
   /** 图片的**原始**像素尺寸（用于布局计算，不能拿纹理尺寸顶替） */
   private srcWidth = 0;
   private srcHeight = 0;
@@ -123,9 +136,16 @@ export class WebglImageCanvas {
     return this.srcWidth > 0 ? { width: this.srcWidth, height: this.srcHeight } : null;
   }
 
-  /** 实际上传的纹理尺寸，仅供诊断 */
-  getTextureSize(): { width: number; height: number } | null {
-    return this.tex ? { width: this.texWidth, height: this.texHeight } : null;
+  /** 源位图尺寸与瓦片网格，仅供诊断 */
+  getTextureInfo(): { srcWidth: number; srcHeight: number; cols: number; rows: number; tiles: number } | null {
+    if (!this.source) return null;
+    return {
+      srcWidth: this.srcPixelW,
+      srcHeight: this.srcPixelH,
+      cols: this.cols,
+      rows: this.rows,
+      tiles: this.tiles.size,
+    };
   }
 
   isAvailable(): boolean {
@@ -160,11 +180,13 @@ export class WebglImageCanvas {
     gl.deleteShader(fs);
     this.program = prog;
 
-    this.uSize = gl.getUniformLocation(prog, 'u_size');
+    this.uTileCss = gl.getUniformLocation(prog, 'u_tileCss');
     this.uTranslate = gl.getUniformLocation(prog, 'u_translate');
     this.uScale = gl.getUniformLocation(prog, 'u_scale');
     this.uViewport = gl.getUniformLocation(prog, 'u_viewport');
     this.uTex = gl.getUniformLocation(prog, 'u_tex');
+    this.uUvOffset = gl.getUniformLocation(prog, 'u_uvOffset');
+    this.uUvScale = gl.getUniformLocation(prog, 'u_uvScale');
     this.uAlpha = gl.getUniformLocation(prog, 'u_alpha');
 
     // 单位四边形（两个三角形）
@@ -265,35 +287,78 @@ export class WebglImageCanvas {
       console.warn(`[webgl] 图片超过纹理上限 ${maxSide}，已降采样到 ${w}×${h}`);
     }
 
-    if (this.tex) gl.deleteTexture(this.tex);
-    const tex = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    // 关键：缩小用三线性 mipmap，放大用线性（mipmap 层都用得上）
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-    this.tex = tex;
-    this.texWidth = w;
-    this.texHeight = h;
-    bitmap.close?.();
+    // 不整图上传：只保存 source，瓦片在 draw 时按可见区域切。
+    // 这样显存只跟「可见瓦片数」有关，与图片总尺寸无关。
+    this.source?.close?.();
+    this.source = bitmap;
+    this.srcPixelW = w;
+    this.srcPixelH = h;
+    this.cols = Math.max(1, Math.ceil(w / WebglImageCanvas.TILE));
+    this.rows = Math.max(1, Math.ceil(h / WebglImageCanvas.TILE));
+    this.clearTiles();
 
     if (this.lastDraw) this.draw(this.lastDraw.camera, this.lastDraw.opts);
     return true;
   }
 
-  /** 每帧调用：只更新 uniform 与 viewport，不重建纹理。 */
+  /** 删除所有瓦片纹理 */
+  private clearTiles(): void {
+    const gl = this.gl;
+    if (gl) for (const t of this.tiles.values()) gl.deleteTexture(t);
+    this.tiles.clear();
+  }
+
+  /**
+   * 确保某片瓦片已有纹理。首次可见时才从 source 切出来上传，
+   * 上传时同样 `generateMipmap` —— 放大靠 MAG_FILTER、缩小靠 mipmap。
+   */
+  private ensureTile(col: number, row: number): WebGLTexture | null {
+    const gl = this.gl;
+    if (!gl || !this.source) return null;
+    const key = `${col},${row}`;
+    const hit = this.tiles.get(key);
+    if (hit) return hit;
+
+    const T = WebglImageCanvas.TILE;
+    const sx = col * T;
+    const sy = row * T;
+    const sw = Math.min(T, this.srcPixelW - sx);
+    const sh = Math.min(T, this.srcPixelH - sy);
+    if (sw <= 0 || sh <= 0) return null;
+
+    if (!this.scratch) this.scratch = document.createElement('canvas');
+    const cv = this.scratch;
+    cv.width = sw;
+    cv.height = sh;
+    const ctx = cv.getContext('2d');
+    if (!ctx) return null;
+    ctx.clearRect(0, 0, sw, sh);
+    ctx.drawImage(this.source, sx, sy, sw, sh, 0, 0, sw, sh);
+
+    const tex = gl.createTexture();
+    if (!tex) return null;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.tiles.set(key, tex);
+    return tex;
+  }
+
+  /**
+   * 每帧调用。**只画视口内可见的瓦片**：纹理按需从 source 切出并上传，
+   * 所以显存占用与图片总尺寸无关，只与当前可见瓦片数有关。
+   */
   draw(camera: CameraLike, opts: DrawOptions): void {
-    if (!this.isAvailable() || this.disposed || !this.tex) return;
+    if (!this.isAvailable() || this.disposed || !this.source) return;
     const gl = this.gl!;
     const { width, height, viewportWidth, viewportHeight, dpr } = opts;
     this.lastDraw = { camera, opts };
 
-    // 后备缓冲按物理像素分配（否则 HiDPI 上会糊）
     const bw = Math.max(1, Math.round(viewportWidth * dpr));
     const bh = Math.max(1, Math.round(viewportHeight * dpr));
     if (this.canvas.width !== bw || this.canvas.height !== bh) {
@@ -305,18 +370,47 @@ export class WebglImageCanvas {
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
+    // 图片在视口里的屏幕矩形（左上角 + 缩放后尺寸）
+    const imgW = width * camera.scale;
+    const imgH = height * camera.scale;
+    if (imgW <= 0 || imgH <= 0) return;
+
+    // 与视口求交，得到可见的归一化范围
+    const u0 = Math.max(0, -camera.x / imgW);
+    const v0 = Math.max(0, -camera.y / imgH);
+    const u1 = Math.min(1, (viewportWidth - camera.x) / imgW);
+    const v1 = Math.min(1, (viewportHeight - camera.y) / imgH);
+    if (u1 <= u0 || v1 <= v0) return; // 整图都在视口外
+
+    const c0 = Math.max(0, Math.floor(u0 * this.cols));
+    const c1 = Math.min(this.cols, Math.ceil(u1 * this.cols));
+    const r0 = Math.max(0, Math.floor(v0 * this.rows));
+    const r1 = Math.min(this.rows, Math.ceil(v1 * this.rows));
+
     gl.useProgram(this.program);
     gl.bindVertexArray(this.vao);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.tex);
-
-    gl.uniform2f(this.uSize, width, height);
     gl.uniform2f(this.uTranslate, camera.x, camera.y);
     gl.uniform1f(this.uScale, camera.scale);
     gl.uniform2f(this.uViewport, viewportWidth, viewportHeight);
     gl.uniform1f(this.uAlpha, 1);
+    gl.uniform1i(this.uTex, 0);
 
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // 每片在「图片局部坐标系」里的 CSS 尺寸
+    const tileW = width / this.cols;
+    const tileH = height / this.rows;
+
+    for (let r = r0; r < r1; r += 1) {
+      for (let c = c0; c < c1; c += 1) {
+        const tex = this.ensureTile(c, r);
+        if (!tex) continue;
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.uniform4f(this.uTileCss, c * tileW, r * tileH, tileW, tileH);
+        gl.uniform2f(this.uUvOffset, c / this.cols, r / this.rows);
+        gl.uniform2f(this.uUvScale, 1 / this.cols, 1 / this.rows);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+    }
   }
 
   dispose(): void {
@@ -324,10 +418,12 @@ export class WebglImageCanvas {
     this.disposed = true;
     const gl = this.gl;
     if (!gl) return;
-    if (this.tex) gl.deleteTexture(this.tex);
+    for (const t of this.tiles.values()) gl.deleteTexture(t);
+    this.tiles.clear();
+    this.source?.close?.();
+    this.source = null;
     if (this.vao) gl.deleteVertexArray(this.vao);
     if (this.program) gl.deleteProgram(this.program);
-    this.tex = null;
     this.vao = null;
     this.program = null;
     this.gl = null;
