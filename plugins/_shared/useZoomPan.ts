@@ -41,9 +41,15 @@ export interface ZoomPanOptions {
 }
 
 /** 一档滚轮对应的缩放倍率。 */
-export const ZOOM_NOTCH = 1.1;
+/**
+ * 滚轮每档的缩放倍率。
+ * 1.1 → 1.15（2026-11-07 用户反馈"滚轮太慢"）：配合 ZOOM_NOTCH_PX 100→70，
+ * 同样 100px 的滚动距离约放大 22%（原 10%），手感快约 2.2 倍。
+ */
+export const ZOOM_NOTCH = 1.15;
 /** 浏览器滚轮一档大约 100px；用于把 deltaY 换算成档数。 */
-export const ZOOM_NOTCH_PX = 100;
+/** 多少像素算「一档」；调小 = 更灵敏。100 → 70（同批调整） */
+export const ZOOM_NOTCH_PX = 70;
 /** 单档缓动的基准时长（ms）。 */
 const ZOOM_ANIM_MS = 110;
 /** 落后越多（连续滚轮把目标推得很远）时长越短，最先追回来。 */
