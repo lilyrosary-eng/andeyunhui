@@ -288,33 +288,14 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
         })
         .catch(() => null);
     setDisplaySrc('');
-    // **只先要 200px**：列表已经生成过同一张缩略图 ⇒ 磁盘缓存命中 ⇒ 几乎瞬时。
-    // 高清层（2560）推迟到用户真的放大时再要 —— 每多要一层就多一次**整图解码**
-    // （8000×6000 ≈ 192MB），那是"加载期间整机卡死"的直接来源。
-    void load(200);
+    // 直接要 2560px 显示层。之前试过"先 200px 再按需换高清"：
+    // 既没缓解卡顿（根因是整图解码，与缩略图尺寸无关），又让画面长期停在低清，
+    // 体验反而更差 —— 已回退。
+    void load(2560);
     return () => {
       alive = false;
     };
   }, [currentIndex, shuffledImages]);
-
-  // 放大超过 1.4× 时才要高清层（同样走 Rust 侧限流解码）
-  useEffect(() => {
-    if (!displaySrc || zoomCamera.scale <= 1.4) return;
-    const path = shuffledImages[currentIndex];
-    if (!path) return;
-    let alive = true;
-    void hostApi
-      .invoke<string>('generate_thumbnail', { imagePath: path, width: 2560 })
-      .then((src) => {
-        if (!alive || !src) return;
-        const url = safeFileSrc(src);
-        if (url) setDisplaySrc(url);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [zoomCamera.scale, currentIndex, shuffledImages, displaySrc]);
 
   // 翻页卡顿主要来自“下一张图首次解码”。提前在后台给相邻图片做 decode，
   // 用户翻过去时浏览器直接命中已解码缓存；保持少量引用，避免被立刻回收。
@@ -722,8 +703,10 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
   useEffect(() => {
     if (!IMAGE_WEBGL_ENABLED) { setWebglReady(false); return; }
     if (viewMode !== 'full') return;
-    // 用显示层（Rust 侧限流解码好的），不要原图 —— 原图解码会把 WebView 拖垮
-    const url = displaySrc || '';
+    // 用显示层（Rust 侧限流解码好的），不要原图 —— 原图解码会把 WebView 拖垮。
+    // 显示层是**异步**到的：还没就绪就直接不建渲染器，等 displaySrc 变化后再来。
+    const url = displaySrc;
+    if (!url) return;
     const isVectorOrAnimated = /\.svg($|\?)/i.test(url) || isGif(url);
     if (isVectorOrAnimated) {
       setWebglReady(false);
@@ -759,9 +742,12 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
       webglRef.current = null;
       setWebglReady(false);
     };
-    // zoomCamera 只用于首帧定位，故意不进依赖（否则每次缩放都重建纹理）
+    // zoomCamera 只用于首帧定位，故意不进依赖（否则每次缩放都重建纹理）。
+    // **依赖必须是 displaySrc**（真正用的图）：原先写的是 imgUrls，而 url 取自
+    // displaySrc —— displaySrc 异步到达时 effect 不会重跑，WebGL 拿到空 URL，
+    // 纹理压根没加载（表现为滚轮无反馈）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imgUrls, currentIndex, viewMode, handleCameraChange]);
+  }, [displaySrc, currentIndex, viewMode, handleCameraChange]);
 
 
   if (loading) {

@@ -397,6 +397,50 @@ static BIG_THUMB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 ///
 /// 用信号量把**所有**宽度的解码都限制在少数几个并发。
 /// 常量 2：既能利用多核，又不会把内存打爆。
+/// **JPEG 降采样解码**（2026-11-07）。
+///
+/// 背景：打开大图时整机卡死（点最小化都要等解码完）。根因是 `image::open`
+/// 必须把**整图**解进内存 —— 8000×6000 的 RGBA 约 192MB，且是全分辨率解码，
+/// CPU 与内存同时打满。
+///
+/// jpeg-decoder 支持在 **IDCT 阶段就按 1/2、1/4、1/8 缩放**（DC/AC 系数抽取），
+/// 解出来的像素量直接降到 1/4、1/16、1/64 —— 8000×6000 用 1/4 档只要约 12MB。
+///
+/// 返回 None 表示"这个文件不是可降采样的 JPEG"（PNG/CMYK 等），
+/// 调用方回退到整图解码。
+fn decode_jpeg_scaled(path: &std::path::Path, target_max: u32) -> Option<image::DynamicImage> {
+    use jpeg_decoder::{Decoder, PixelFormat};
+    let file = std::fs::File::open(path).ok()?;
+    let mut dec = Decoder::new(file);
+    let info = dec.info()?;
+    // 只支持 8 位 RGB / 灰度；CMYK、L16 等交给整图解码路径（罕见）。
+    if !matches!(info.pixel_format, PixelFormat::RGB24 | PixelFormat::L8) {
+        return None;
+    }
+    let (w0, h0) = (info.width, info.height);
+    if w0 == 0 || h0 == 0 {
+        return None;
+    }
+    // 按最长边算目标尺寸，保持比例，且**不放大**（原图比目标小就整图解）。
+    let ratio = (target_max as f64 / w0.max(h0) as f64).min(1.0);
+    let tw = ((w0 as f64 * ratio).round() as u16).max(1);
+    let th = ((h0 as f64 * ratio).round() as u16).max(1);
+    // scale() 在 IDCT 阶段按目标尺寸缩放，返回实际输出尺寸
+    let (aw, ah) = dec.scale(tw, th).ok()?;
+    let pixels = dec.decode().ok()?;
+    let after = dec.info()?;
+    let img = match after.pixel_format {
+        PixelFormat::RGB24 => {
+            image::RgbImage::from_raw(aw as u32, ah as u32, pixels).map(image::DynamicImage::ImageRgb8)
+        }
+        PixelFormat::L8 => {
+            image::GrayImage::from_raw(aw as u32, ah as u32, pixels).map(image::DynamicImage::ImageLuma8)
+        }
+        _ => None,
+    }?;
+    Some(img)
+}
+
 /// (当前占用数, 条件变量) —— 手工实现的信号量。
 /// 不用 tokio::sync::Semaphore：它的 new() 不是 const（不能放 static），
 /// 且本工程 Rust 版本上没有 blocking_acquire。std::sync::Semaphore 也还没有。
@@ -500,8 +544,13 @@ pub fn generate_thumbnail(app: &tauri::AppHandle, image_path: &str, width: u32) 
     unsafe {
         libc::setpriority(libc::PRIO_PROCESS, 0, 10);
     }
-    let img = image::open(&image_path)
-        .map_err(|e| format!("打开图片失败: {}", e))?;
+    // **优先走 JPEG 降采样解码**：在 IDCT 阶段就缩放，像素量降到 1/4~1/64，
+    // 不必整图解码 —— 这是"打开大图时整机卡死"的根治手段。
+    // 非 JPEG（或 CMYK/L16）回退整图解码。
+    let img = match decode_jpeg_scaled(std::path::Path::new(&image_path), width) {
+        Some(i) => i,
+        None => image::open(&image_path).map_err(|e| format!("打开图片失败: {}", e))?,
+    };
     let has_alpha = img.color().has_alpha();
     // 无损来源（PNG/BMP）保持 PNG，避免 JPEG 4:2:0 在截图/文字上产生块状发糊。
     let lossless_src = std::path::Path::new(image_path)

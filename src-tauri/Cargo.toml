@@ -82,6 +82,8 @@ gongfang-kit = { path = "../crates/gongfang-kit", default-features = false }
 ai-collab-kit = { path = "../crates/ai-collab-kit" }
 # image / base64 跨平台通用，保留在主 crate
 image = "0.25"
+# JPEG 降采样解码：支持 1/2、1/4、1/8 直接解出缩小像素，避免整图解码（内存降 4~64 倍）
+jpeg-decoder = "0.3"
 base64 = "0.22"
 # 以下两依赖仅桌面（非 Android/iOS）需要，已迁移至下方
 # [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]：
