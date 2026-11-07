@@ -46,17 +46,27 @@ export interface ZoomPanOptions {
  * 1.1 → 1.15（2026-11-07 用户反馈"滚轮太慢"）：配合 ZOOM_NOTCH_PX 100→70，
  * 同样 100px 的滚动距离约放大 22%（原 10%），手感快约 2.2 倍。
  */
-export const ZOOM_NOTCH = 1.18;
+/**
+ * 滚轮每档倍率。**对齐 GNOME Loupe**（`ZOOM_FACTOR_SCROLL_WHEEL = 1.3`）：
+ * 每档 30%。之前 1.1 → 1.15 → 1.18 一路加，本质是在补「每档太小」，
+ * 不如直接对齐参考实现。
+ */
+export const ZOOM_NOTCH = 1.3;
 /** 浏览器滚轮一档大约 100px；用于把 deltaY 换算成档数。 */
 /** 多少像素算「一档」；调小 = 更灵敏。100 → 70（同批调整） */
-export const ZOOM_NOTCH_PX = 55;
+/** 多少像素算一档。Loupe 是按「滚轮 detent」计数，这里近似为 100px 一档 */
+export const ZOOM_NOTCH_PX = 100;
 
 /**
  * 连续滚轮时「一档」走完的时长（毫秒）。
  * 越小越跟手、越大越平滑。改为固定值而非按事件间隔推算（2026-11-07，
  * 原推算方式在慢速滚动时会让动画明显滞后，用户反馈"黏滞"）。
  */
-export const ZOOM_FOLLOW_MS = 35;
+/**
+ * 一档动画时长（毫秒）。对齐 Loupe 的 `ZOOM_ANIMATION_DURATION = 200`，
+ * 但用 ease-out 而非匀速追随 —— 匀速追不上快速累乘的目标，会越滚越滞后。
+ */
+export const ZOOM_FOLLOW_MS = 160;
 /** 单档缓动的基准时长（ms）。 */
 const ZOOM_ANIM_MS = 110;
 /** 落后越多（连续滚轮把目标推得很远）时长越短，最先追回来。 */
@@ -272,15 +282,20 @@ export function useZoomPan(
 
     // 连续滚轮（同向、间隔 ≤ 80ms）：改走匀速跟随。每帧只前进固定对数速度，
     // 目标由事件累乘；事件落在两帧之间也不会出现“一帧不走、一帧猛走”的闪格。
+    // 连滚走 ease-out 到目标（Loupe 的 TimedAnimation 语义）：
+    // 每档都把「起点重置为当前值、终点设为最新累乘目标」，因此无论滚多快，
+    // 画面始终朝着最新目标快速逼近，而不是以固定匀速慢慢追。
     if (gapMs != null && gapMs > 0 && gapMs <= ZOOM_FOLLOW_GAP_MS) {
       const prevTarget = currentTarget > 0 ? currentTarget : 1;
       const logInc = Math.abs(Math.log(toScale / prevTarget));
       // 速度**固定**为一档 / ZOOM_FOLLOW_MS，不再按「变化量 ÷ 事件间隔」推算。
       // 原做法的问题：滚得慢 ⇒ gapMs 大 ⇒ rate 小 ⇒ 动画拖后腿，手感"黏"。
       // 固定速度后，无论滚快滚慢，每档都在同样的时间里走完，像 Loupe 那样跟手。
+      // 用 duration + ease-out（见下方 mode 分支），不再用对数速率匀速推进
       const rate = Math.log(ZOOM_NOTCH) / ZOOM_FOLLOW_MS;
       void logInc;
       void gapMs;
+      void rate;
       const now = performance.now();
       const prev = animRef.current;
       // 跟随动画已在跑：原地换目标/锚点，不重置时钟 —— 否则每来一档都重开一帧的
@@ -345,12 +360,12 @@ export function useZoomPan(
 
   /** 滚轮缩放：每档 ×1.1，deltaY 以 100px 为一档；同向连滚按间隔自适应时长。 */
   const zoomByWheel = useCallback((clientX: number, clientY: number, deltaY: number, direction: ZoomDirection) => {
-    const now = performance.now();
-    const prev = lastWheelRef.current;
-    const gap = prev && prev.dir === direction ? now - prev.t : null;
-    lastWheelRef.current = { t: now, dir: direction };
+    lastWheelRef.current = { t: performance.now(), dir: direction };
     const factor = clamp(Math.pow(ZOOM_NOTCH, -deltaY / ZOOM_NOTCH_PX), 0.5, 2);
-    zoomAt(clientX, clientY, factor, direction, gap ?? undefined);
+    // **不传 gap**：让每档走 duration + ease-out 分支（对齐 Loupe 的 TimedAnimation）。
+    // 之前传 gap 会进入 follow 匀速追随模式，目标被连续累乘后匀速追不上，
+    // 表现为「越滚越滞后」——这正是用户说的黏滞感。
+    zoomAt(clientX, clientY, factor, direction);
   }, [zoomAt]);
 
   /** 拖动平移：即时跟手；同时取消未完成的缩放动画。 */
