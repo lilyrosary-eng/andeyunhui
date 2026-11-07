@@ -211,6 +211,15 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
    * 200px 秒开 → 2560px 替换（够 4K 屏）。
    */
   const [displaySrc, setDisplaySrc] = useState('');
+  /** displaySrc 当前对应哪张图 —— 用来区分「同图刷新」与「切到新图」 */
+  const displayPathRef = useRef('');
+  /**
+   * 显示层的目标宽度：随缩放级别提升。
+   * 2560 够 1080p/2K 屏 1:1；放大到 >1.4×（比如在 4K 屏上看）换 4096；
+   * >3× 换 6144。缩小时可以降到 1280（更快）。
+   * 跨阈值才切换，避免滚动/缩放时频繁重解码。
+   */
+  const [layerWidth, setLayerWidth] = useState(2560);
 
   // camera 变化 → 直接重绘，不经过 React
   const handleCameraChange = useCallback((cam: { scale: number; x: number; y: number }) => {
@@ -268,12 +277,23 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
     return arr;
   }, [images, isRandomMode]);
 
+  // 缩放级别跨阈值时调整显示层宽度（只在跨阈值时变，避免频繁重解码）
+  useEffect(() => {
+    const s = zoomCamera.scale;
+    const want = s > 3 ? 6144 : s > 1.4 ? 4096 : s < 0.7 ? 1280 : 2560;
+    setLayerWidth((prev) => (prev === want ? prev : want));
+  }, [zoomCamera.scale]);
+
   // 取显示层：200px 秒开 → 2560px 替换。解码在 Rust 侧限流完成，前端只管贴。
   useEffect(() => {
     const path = shuffledImages[currentIndex];
     if (!path) {
       setDisplaySrc('');
       return;
+    }
+    if (displayPathRef.current !== path) {
+      displayPathRef.current = path;
+      setDisplaySrc('');
     }
     let alive = true;
     const load = (width: number) =>
@@ -287,37 +307,42 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
           return src;
         })
         .catch(() => null);
-    // **不要清空 displaySrc**：清空会让 <img> 短暂无图 → 表现为「滚动时重新加载」
-    // 的闪烁。保留上一张直到新显示层到达即可（key 变化会重挂载，肉眼无感）。
+    // **只在切到「新图」时清空**：
+    //   · 同图刷新 → 保留旧图，避免「滚动时重新加载」的闪烁
+    //   · 切到新图 → 必须清空，否则一直显示上一张的内容（用户反馈
+    //     「滚到下一张了但还是上一张的内容」）—— 用 path 区分这两种情况。
     // 直接要 2560px 显示层。之前试过"先 200px 再按需换高清"：
     // 既没缓解卡顿（根因是整图解码，与缩略图尺寸无关），又让画面长期停在低清，
     // 体验反而更差 —— 已回退。
-    void load(2560);
+    void load(layerWidth);
     return () => {
       alive = false;
     };
-  }, [currentIndex, shuffledImages]);
+  }, [currentIndex, shuffledImages, layerWidth]);
 
-  // 翻页卡顿主要来自“下一张图首次解码”。提前在后台给相邻图片做 decode，
-  // 用户翻过去时浏览器直接命中已解码缓存；保持少量引用，避免被立刻回收。
-  const preloadedRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  // 翻页卡顿主要来自"下一张图首次解码"。提前在后台把相邻图的**显示层**做出来。
+  //
+  // ⚠️ 关键：绝不能在前端 `new Image(); im.src = 原图` 预解码 ——
+  //    那是 8192×8192 ≈ 268MB，滚动时同时预解两张就能把内存打爆，
+  //    表现为「列表滚动非常卡」。这里改为调用 Rust 的 generate_thumbnail：
+  //    解码在 Rust 侧限流完成，结果落磁盘缓存，翻过去时直接命中。
+  const prefetchedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const neighbors = [currentIndex + 1, currentIndex - 1];
     for (const i of neighbors) {
-      const url = shuffledImages[i];
-      if (!url || isGif(url) || preloadedRef.current.has(url)) continue;
-      const im = new Image();
-      im.decoding = 'async';
-      im.src = url;
-      preloadedRef.current.set(url, im);
-      void im.decode?.().catch(() => {});
+      const p = shuffledImages[i];
+      if (!p || prefetchedRef.current.has(p)) continue;
+      prefetchedRef.current.add(p);
+      void hostApi
+        .invoke<string>('generate_thumbnail', { imagePath: p, width: layerWidth })
+        .catch(() => {});
     }
-    while (preloadedRef.current.size > 6) {
-      const first = preloadedRef.current.keys().next().value;
+    while (prefetchedRef.current.size > 8) {
+      const first = prefetchedRef.current.values().next().value;
       if (first === undefined) break;
-      preloadedRef.current.delete(first);
+      prefetchedRef.current.delete(first);
     }
-  }, [currentIndex, shuffledImages]);
+  }, [currentIndex, shuffledImages, layerWidth]);
 
 
   const getNextIndex = useCallback((current: number, total: number, random: boolean) => {

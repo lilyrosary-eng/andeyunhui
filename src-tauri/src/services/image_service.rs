@@ -1110,7 +1110,9 @@ pub fn generate_thumbnail(app: &tauri::AppHandle, image_path: &str, width: u32) 
     let thumb = if tw == ow && th == oh {
         img
     } else {
-        img.resize(tw, th, image::imageops::FilterType::Triangle)
+        // **Lanczos3**（原先是 Triangle）：Triangle 快但偏软，尤其在小图放大时。
+        // JPEG 路径的最终缩放质量直接决定观感，这里换掉。
+        img.resize(tw, th, image::imageops::FilterType::Lanczos3)
     };
     if width >= 1024 {
         log::info!(
