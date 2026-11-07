@@ -494,6 +494,12 @@ pub fn generate_thumbnail(app: &tauri::AppHandle, image_path: &str, width: u32) 
 
     // 限流：解码（含整图读入内存）是本进程最吃资源的动作，必须限并发。
     let _permit = acquire_decode_permit();
+    // 再把当前线程的优先级降下来：解码是纯后台工作，不该和 GTK 主线程抢 CPU。
+    // 之前解码一跑满，界面连"点最小化"都要等它做完（用户实测：加载期间整机卡死）。
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+    }
     let img = image::open(&image_path)
         .map_err(|e| format!("打开图片失败: {}", e))?;
     let has_alpha = img.color().has_alpha();

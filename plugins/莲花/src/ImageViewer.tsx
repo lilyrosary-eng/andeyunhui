@@ -85,6 +85,12 @@ const ZOOM_MAX = 16;
 const PRESET_INTERVALS = [0.1, 0.5, 1, 2, 3, 5, 10];
 
 // ========== 主组件 ==========
+/** 本地路径 → asset:// URL。给 <img src> / WebGL 用。
+ *  后端返回的是真实文件路径，直接塞 src 会加载失败（WebView 不认裸路径）。 */
+function safeFileSrc(p: string): string {
+  try { return hostApi.convertFileSrc(p); } catch { return ''; }
+}
+
 export function ImageViewer({ folderPath, folderName, onBack, initialPath, imagesOverride, favorites, onToggleFavorite }: ImageViewerProps) {
   useLang();
   const [images, setImages] = useState<string[]>([]);
@@ -274,17 +280,41 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
       hostApi
         .invoke<string>('generate_thumbnail', { imagePath: path, width })
         .then((src) => {
-          if (alive && src) setDisplaySrc(src);
+          if (alive && src) {
+            const url = safeFileSrc(src);
+            if (url) setDisplaySrc(url);
+          }
           return src;
         })
         .catch(() => null);
     setDisplaySrc('');
+    // **只先要 200px**：列表已经生成过同一张缩略图 ⇒ 磁盘缓存命中 ⇒ 几乎瞬时。
+    // 高清层（2560）推迟到用户真的放大时再要 —— 每多要一层就多一次**整图解码**
+    // （8000×6000 ≈ 192MB），那是"加载期间整机卡死"的直接来源。
     void load(200);
-    void load(2560);
     return () => {
       alive = false;
     };
   }, [currentIndex, shuffledImages]);
+
+  // 放大超过 1.4× 时才要高清层（同样走 Rust 侧限流解码）
+  useEffect(() => {
+    if (!displaySrc || zoomCamera.scale <= 1.4) return;
+    const path = shuffledImages[currentIndex];
+    if (!path) return;
+    let alive = true;
+    void hostApi
+      .invoke<string>('generate_thumbnail', { imagePath: path, width: 2560 })
+      .then((src) => {
+        if (!alive || !src) return;
+        const url = safeFileSrc(src);
+        if (url) setDisplaySrc(url);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [zoomCamera.scale, currentIndex, shuffledImages, displaySrc]);
 
   // 翻页卡顿主要来自“下一张图首次解码”。提前在后台给相邻图片做 decode，
   // 用户翻过去时浏览器直接命中已解码缓存；保持少量引用，避免被立刻回收。
