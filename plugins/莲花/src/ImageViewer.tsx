@@ -224,7 +224,11 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
     max: ZOOM_MAX,
     zoomOutAnchor: 'viewport',
     getBaseRect,
-    onCameraChange: handleCameraChange,
+    // **只在 WebGL 真正启用时才提供**：
+    // useZoomPan 拿到 onCameraChange 就不再 setState，而 DOM 渲染路径
+    // （<img> + CSS transform）恰恰依赖 setCamera 更新 transform ——
+    // 无条件传会让「滚轮缩放」在 WebGL 关闭时整个失效（2026-11-07 实测回归）。
+    onCameraChange: webglReady ? handleCameraChange : undefined,
   });
 
   // 随机模式 + 幻灯片模式
