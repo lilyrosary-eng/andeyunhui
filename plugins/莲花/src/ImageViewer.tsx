@@ -1174,8 +1174,10 @@ function FullView({
       ref={containerRef}
       className="w-full h-full flex items-center justify-center relative overflow-hidden"
     >
-      {/* 点击中间区：隐藏/唤出顶部工具栏与缩略图条（沉浸切换） */}
-      <div className="absolute left-1/3 top-0 w-1/3 h-full z-10" onClick={onToggleChrome} />
+      {/* 点击任意位置：隐藏/唤出顶部工具栏与缩略图条（沉浸切换）。
+          原先是中间 1/3，用户要求扩大到整块查看区域。
+          注意 z-10 低于放大后的拖动层（z-20），所以放大态拖拽仍优先。 */}
+      <div className="absolute inset-0 z-10" onClick={onToggleChrome} />
 
       {/* 放大后：整层可拖动平移 + 双击复位。覆盖在点击区之上，避免拖动时误触翻页/显隐。
           只认右键(2)/中键(1)：左键留给双击复位，且左键拖在 WebView2 里会出禁止光标。
