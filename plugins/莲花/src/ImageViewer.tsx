@@ -71,6 +71,14 @@ const ModeLabels: Record<ViewMode, string> = {
 
 const MODES: ViewMode[] = ['full', 'vertical', 'horizontal-forward', 'horizontal-reverse'];
 /** 完整模式滚轮缩放范围。 */
+/**
+ * WebGL 渲染开关。
+ * 2026-11-07 临时关闭：实测打开大图时内存暴涨（createImageBitmap 解码 + 纹理 + mipmap
+ * 三者叠加，一张 8000×6000 的图峰值可达数百 MB），触发系统 OOM 把进程杀掉。
+ * 待做「先降采样再上传」+ 释放时序修正后再打开。
+ */
+const IMAGE_WEBGL_ENABLED = false;
+
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 16;
 /** 幻灯片间隔预设（秒） */
@@ -221,6 +229,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
 
   // 纹理加载：图片/模式变化时重建渲染器。SVG/GIF 直接放弃 WebGL（走 <img>）。
   useEffect(() => {
+    if (!IMAGE_WEBGL_ENABLED) { setWebglReady(false); return; }
     if (viewMode !== 'full') return;
     const url = currentUrl || '';
     const isVectorOrAnimated = /\.svg($|\?)/i.test(url) || isGif(url);
