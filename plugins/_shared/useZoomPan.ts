@@ -252,7 +252,7 @@ export function useZoomPan(
    * @param direction in = 锚光标；out = 默认锚视口中心。
    * @param gapMs 距上一档同向滚轮的间隔；连续滚轮时用它推算匀速跟随的速度。
    */
-  const zoomAt = useCallback((clientX: number, clientY: number, factor: number, direction: ZoomDirection = 'in', gapMs?: number) => {
+  const zoomAt = useCallback((clientX: number, clientY: number, factor: number, direction: ZoomDirection = 'in', gapMs?: number, instant = false) => {
     if (!Number.isFinite(factor) || factor <= 0) return;
     setInteracting(true);
     const base = baseRect();
@@ -291,6 +291,17 @@ export function useZoomPan(
     // 连滚走 ease-out 到目标（Loupe 的 TimedAnimation 语义）：
     // 每档都把「起点重置为当前值、终点设为最新累乘目标」，因此无论滚多快，
     // 画面始终朝着最新目标快速逼近，而不是以固定匀速慢慢追。
+    // 瞬时缩放：任何调用方要求 instant 时都直接落地，不进入任何动画分支
+    if (instant) {
+      stop();
+      apply({
+        scale: toScale,
+        x: anchorX - base.left - rx * base.width * toScale,
+        y: anchorY - base.top - ry * base.height * toScale,
+      });
+      return;
+    }
+
     if (gapMs != null && gapMs > 0 && gapMs <= ZOOM_FOLLOW_GAP_MS) {
       const prevTarget = currentTarget > 0 ? currentTarget : 1;
       const logInc = Math.abs(Math.log(toScale / prevTarget));
@@ -368,10 +379,11 @@ export function useZoomPan(
   const zoomByWheel = useCallback((clientX: number, clientY: number, deltaY: number, direction: ZoomDirection) => {
     lastWheelRef.current = { t: performance.now(), dir: direction };
     const factor = clamp(Math.pow(ZOOM_NOTCH, -deltaY / ZOOM_NOTCH_PX), 0.5, 2);
-    // **不传 gap**：让每档走 duration + ease-out 分支（对齐 Loupe 的 TimedAnimation）。
-    // 之前传 gap 会进入 follow 匀速追随模式，目标被连续累乘后匀速追不上，
-    // 表现为「越滚越滞后」——这正是用户说的黏滞感。
-    zoomAt(clientX, clientY, factor, direction);
+    // 滚轮走 **instant**：直接到位，不做补间。
+    // 实测即便把补间压到 35ms，连续滚动时仍能感知到「画面落后半拍」；
+    // 鼠标滚轮是离散事件，用户期望的是"一格到位"，而不是"一格缓动过去"。
+    // 按钮/键盘缩放仍走缓动（见 zoomIn/zoomOut），那里动画才有意义。
+    zoomAt(clientX, clientY, factor, direction, undefined, true);
   }, [zoomAt]);
 
   /** 拖动平移：即时跟手；同时取消未完成的缩放动画。 */

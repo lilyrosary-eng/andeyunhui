@@ -77,7 +77,7 @@ const MODES: ViewMode[] = ['full', 'vertical', 'horizontal-forward', 'horizontal
  * 现已改为**解码阶段降采样**：按视口尺寸 ×2 ×dpr 解码，一张 8000×6000 的图
  * 纹理只剩几十 MB。设 false 可退回 <img> 路径（SVG/GIF 本来就走那条）。
  */
-const IMAGE_WEBGL_ENABLED = true;
+const IMAGE_WEBGL_ENABLED = false;
 
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 16;
@@ -1099,6 +1099,13 @@ function FullView({
   const dragRef = useRef<{ x: number; y: number; button: number } | null>(null);
   const [dragging, setDragging] = useState(false);
   const [imgError, setImgError] = useState(false);
+  /**
+   * 查看器实际显示的图源。
+   * 不再直接把原图喂给 <img>：8000×6000 的原图会让 WebKit 渲染进程解码整张
+   * （约 192MB），偶发把 WebProcess 顶崩（页面白屏 / 整个进程消失）。
+   * 改为「先 200px 秒开 → 后台生成 3072px 替换」，既不清真也不崩。
+   */
+  const [previewSrc, setPreviewSrc] = useState<string>('');
   // 结束拖动必须幂等且不依赖 pointerup 一定落在覆盖层上：
   // WebView2 里右键/中键的 pointerup 偶尔会被系统吞掉，只清状态不够，会在松开后继续拖。
   const endDrag = useCallback(() => {
@@ -1123,6 +1130,31 @@ function FullView({
   const currentUrl = imgUrls[currentIndex];
   const currentPath = imgPaths[currentIndex];
   const isCurrentGif = isGif(currentUrl);
+
+  // 渐进加载：200px 秒开 → 3072px 后台替换（GIF 走原逻辑，不能换成静态帧）
+  useEffect(() => {
+    if (isCurrentGif) return;
+    const path = imgPaths[currentIndex];
+    if (!path) {
+      setPreviewSrc('');
+      return;
+    }
+    let alive = true;
+    const load = (width: number) =>
+      hostApi
+        .invoke<string>('generate_thumbnail', { imagePath: path, width })
+        .then((src) => {
+          if (alive && src) setPreviewSrc(src);
+          return src;
+        })
+        .catch(() => null);
+    setPreviewSrc('');
+    void load(200);
+    void load(3072);
+    return () => {
+      alive = false;
+    };
+  }, [currentIndex, isCurrentGif, imgPaths]);
 
   useEffect(() => {
     setImgError(false);
@@ -1201,7 +1233,8 @@ function FullView({
       ) : (
         <img
           ref={imgRef}
-          src={isCurrentGif ? (gifDataUrl || currentUrl) : currentUrl}
+          // 注意：**不做「回退原图」兜底**。原图正是崩溃源，宁可空 200ms 等缩略图。
+          src={isCurrentGif ? gifDataUrl || currentUrl : previewSrc}
           alt={`${currentIndex + 1}/${imgUrls.length}`}
           key={currentIndex}
           onError={() => setImgError(true)}
