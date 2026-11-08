@@ -191,7 +191,9 @@ function TileImage({
     for (let i = info.levels.length - 1; i >= 0; i--) {
       if (info.levels[i].width >= targetPx) return i;
     }
-    return 0;
+    // 需要的像素超过最大层（放大到 1:1 以上）⇒ 用**最高层**。
+    // 之前这里 return 0（最低层）⇒ 放大到边界外时画面糊成一片。
+    return info.levels.length - 1;
   }, [info, zoomScale, getBaseRect]);
 
   // **裁剪用的去抖参数**。
@@ -283,7 +285,10 @@ function TileImage({
     if (info && onImageLoaded) {
       onImageLoaded({ width: info.width, height: info.height });
     }
-  }, [info, onImageLoaded]);
+    // 只依赖 info：onImageLoaded 通常是内联箭头函数（每次渲染新引用），
+    // 放进依赖会让这个 effect 每帧重跑。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [info]);
 
   if (failed || !info || tiles.length === 0) {
     return null;
@@ -368,7 +373,9 @@ const TileGrid = React.memo(function TileGrid({
           draggable={false}
           onLoad={i === 0 ? onFirstLoad : undefined}
           className="absolute select-none"
-          style={{ left: t.left, top: t.top, width: tileSize, height: tileSize }}
+          // 尺寸 +1px：放大后瓦片之间会出现一条 1px 的细缝（坐标舍入），
+          // 让相邻瓦片轻微重叠即可消掉。
+          style={{ left: t.left, top: t.top, width: tileSize + 1, height: tileSize + 1 }}
         />
       ))}
     </>
@@ -840,24 +847,11 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewMode, loading]);
 
-  // 预加载相邻图片
-  useEffect(() => {
-    if (viewMode !== 'full' || shuffledImages.length === 0) return;
-    const preload = (idx: number) => {
-      if (idx >= 0 && idx < shuffledImages.length) {
-        try {
-          const img = new Image();
-          img.src = hostApi.convertFileSrc(shuffledImages[idx]);
-        } catch (e) {
-          // 预加载失败不影响主流程
-        }
-      }
-    };
-    preload(currentIndex - 2);
-    preload(currentIndex - 1);
-    preload(currentIndex + 1);
-    preload(currentIndex + 2);
-  }, [currentIndex, images, viewMode]);
+  // 相邻图片预加载**已移除**。
+  // 它每次翻页都会 `new Image(); src = 原图` 预解码 **4 张**相邻图：
+  //   4 × 8192² × 4B ≈ 1GB 内存 + 全部解码开销
+  // ⇒ 表现就是「翻页卡、但软件不卡」（不是阻塞，是内存/解码被打满）。
+  // 现在清晰度由瓦片分层提供，不需要预解码原图。
 
 
   // 滚动比例（0~1）：按相对位置映射，图片加载把内容撑大后比例自动保持同步
@@ -1603,6 +1597,10 @@ function FullView({
           <TileImage
             imagePath={currentPath}
             onReady={() => setTilesReady(true)}
+            // **必须回填尺寸**：瓦片启用时底层 <img> 不渲染，getBaseRect 拿不到
+            // naturalWidth ⇒ base.width = 0 ⇒ 瓦片层把 8192 当成适配尺寸 ⇒
+            // 「一打开就是 1:1 放大、且缩不动」。这里把原图尺寸补给 loadedSize。
+            onImageLoaded={onImageLoaded}
             zoomScale={zoomScale}
             getBaseRect={getBaseRectProp}
             cameraX={cameraX}
