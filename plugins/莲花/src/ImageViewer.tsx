@@ -127,6 +127,7 @@ function TileImage({
   getBaseRect,
   containerRef,
   onReady,
+  onSmall,
   onImageLoaded,
 }: {
   imagePath: string;
@@ -144,6 +145,8 @@ function TileImage({
   zoomStyle: React.CSSProperties;
   /** 首批瓦片已渲染 —— 父级据此隐藏底层 <img>（避免两个大图层叠加合成） */
   onReady?: () => void;
+  /** 这张图不需要瓦片（尺寸够小）—— 父级改用原图 <img> */
+  onSmall?: () => void;
   onImageLoaded?: (size: { width: number; height: number }) => void;
 }) {
   const [info, setInfo] = useState<TilesInfo | null>(null);
@@ -186,7 +189,9 @@ function TileImage({
     const vh = typeof window !== 'undefined' ? window.innerHeight : 1080;
     const fit = Math.min(1, vw / info.width, vh / info.height);
     const cssWidth = br?.width ?? info.width * fit; // 适配时的 CSS 显示宽
-    const targetPx = Math.max(1, cssWidth * zoomScale * dpr);
+    // ×1.5 余量：宁可多加载一层，也不要"刚好够"导致放大后发软。
+    // 用户明确"清晰度不能妥协"，所以选层偏保守。
+    const targetPx = Math.max(1, cssWidth * zoomScale * dpr * 1.5);
     // 从大到小找第一个满足的（levels 是从小到大）
     for (let i = info.levels.length - 1; i >= 0; i--) {
       if (info.levels[i].width >= targetPx) return i;
@@ -290,6 +295,12 @@ function TileImage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [info]);
 
+  // **小图不做任何优化**：≤2560 直接用原图 <img>，不进瓦片路径
+  // （双层叠加/瓦片分层对小图纯属负担，用户明确要求）。
+  if (info && info.width <= 2560 && info.height <= 2560) {
+    onSmall?.();
+    return null;
+  }
   if (failed || !info || tiles.length === 0) {
     return null;
   }
@@ -331,15 +342,30 @@ function TileImage({
             transformOrigin: '0 0',
           }}
         >
+          {/* L0 占位：最小层先铺满整个层坐标系（秒开、先有内容）。
+              注意显示宽要用 lv.width / l0.cols，不是 l0 自己的像素宽 ——
+              否则它只盖住左上角一块，其余区域是低层瓦片被拉大。 */}
+          {levelIdx > 0 && dirUrl0 && (
+            <TileGrid
+              tiles={Array.from({ length: l0.rows * l0.cols }, (_, i) => {
+                const c = i % l0.cols;
+                const r = Math.floor(i / l0.cols);
+                const cw = Math.ceil(lv.width / l0.cols);
+                const ch = Math.ceil(lv.height / l0.rows);
+                return { url: `${dirUrl0}/L0/${r}_${c}.png`, left: c * cw, top: r * ch };
+              })}
+              tileSize={Math.ceil(lv.width / l0.cols)}
+            />
+          )}
           <TileGrid
-        tiles={tiles}
-        tileSize={info.tile_size}
-        onFirstLoad={() => {
-          if (readyRef.current) return;
-          readyRef.current = true;
-          onReady?.();
-        }}
-      />
+            tiles={tiles}
+            tileSize={info.tile_size}
+            onFirstLoad={() => {
+              if (readyRef.current) return;
+              readyRef.current = true;
+              onReady?.();
+            }}
+          />
         </div>
       </div>
     </div>
@@ -1452,6 +1478,8 @@ function FullView({
   const [imgError, setImgError] = useState(false);
   /** 瓦片层首批渲染完成 —— 完成后隐藏底层 <img>，避免两个大图层叠加合成 */
   const [tilesReady, setTilesReady] = useState(false);
+  /** 这张图太小，不需要瓦片 —— 直接用原图 <img> */
+  const [smallImage, setSmallImage] = useState(false);
   /** 瓦片开关（localStorage 'image.tiles' = '0' 可关闭，用于 A/B 对比） */
   const tilesEnabled = useMemo(() => {
     try {
@@ -1488,6 +1516,7 @@ function FullView({
   useEffect(() => {
     setImgError(false);
     setTilesReady(false);
+    setSmallImage(false);
     setGifDataUrl(null);
     if (isCurrentGif && currentPath) {
       let cancelled = false;
@@ -1552,7 +1581,7 @@ function FullView({
           ref={canvasRef}
           className="absolute inset-0 w-full h-full select-none"
         />
-      ) : tilesEnabled && !isCurrentGif ? null : !isCurrentGif && !displaySrc ? (
+      ) : tilesEnabled && !isCurrentGif && !smallImage ? null : !isCurrentGif && !displaySrc ? (
         // 显示层还没就绪：**绝不回退原图**。
         // 回退原图会让 WebView 解码 8192×8192（≈268MB）—— 表现就是
         // 「打开大图时整机卡死」+「画质在原图/降采样之间来回跳」。
@@ -1563,7 +1592,7 @@ function FullView({
           // **原图直出**：与系统图片查看器（Loupe）对齐 —— 解码交给 WebKit 的
           // WebProcess（独立进程），GTK 主循环不被占用；代价是内存（8192² ≈ 268MB）。
           // 这是刻意的取舍：清晰度不妥协，用内存换稳定与简单。
-          src={isCurrentGif ? gifDataUrl || currentUrl : currentUrl}
+          src={isCurrentGif ? gifDataUrl || currentUrl : smallImage ? currentUrl : displaySrc}
           alt={`${currentIndex + 1}/${imgUrls.length}`}
           key={currentIndex}
           onError={() => setImgError(true)}
@@ -1597,6 +1626,7 @@ function FullView({
           <TileImage
             imagePath={currentPath}
             onReady={() => setTilesReady(true)}
+            onSmall={() => setSmallImage(true)}
             // **必须回填尺寸**：瓦片启用时底层 <img> 不渲染，getBaseRect 拿不到
             // naturalWidth ⇒ base.width = 0 ⇒ 瓦片层把 8192 当成适配尺寸 ⇒
             // 「一打开就是 1:1 放大、且缩不动」。这里把原图尺寸补给 loadedSize。
