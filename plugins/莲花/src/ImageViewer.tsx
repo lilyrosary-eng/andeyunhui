@@ -189,6 +189,18 @@ function TileImage({
     return 0;
   }, [info, zoomScale, getBaseRect]);
 
+  // **裁剪用的去抖参数**。
+  // 视口裁剪依赖 zoomScale / cameraX / cameraY，若直接用实时值，
+  // 缩放/平移的每一帧都会重算 tiles 数组 ⇒ TileGrid 的 memo 失效 ⇒
+  // 几十个 <img> 反复重建 ⇒ 比不裁剪还卡（用户实测：视口裁剪没改善流畅度）。
+  // 这里延迟 220ms：缩放过程中瓦片列表保持不变，只更新 transform；
+  // 停下来后再补算一次裁剪。
+  const [crop, setCrop] = useState({ s: zoomScale, x: cameraX, y: cameraY });
+  useEffect(() => {
+    const t = setTimeout(() => setCrop({ s: zoomScale, x: cameraX, y: cameraY }), 220);
+    return () => clearTimeout(t);
+  }, [zoomScale, cameraX, cameraY]);
+
   // 查看区尺寸（跟随窗口/布局变化）
   const [viewSize, setViewSize] = useState({ w: 0, h: 0 });
   useEffect(() => {
@@ -231,13 +243,13 @@ function TileImage({
     let r0 = 0;
     let r1 = lv.rows - 1;
     const br = getBaseRect?.();
-    if (br && viewSize.w > 0 && viewSize.h > 0 && zoomScale > 0) {
+    if (br && viewSize.w > 0 && viewSize.h > 0 && crop.s > 0) {
       // 图像左上角的屏幕坐标 = 适配矩形左上角 + 相机平移
-      const imgLeft = br.left + cameraX;
-      const imgTop = br.top + cameraY;
+      const imgLeft = br.left + crop.x;
+      const imgTop = br.top + crop.y;
       // 屏幕 → 图像坐标 → 层像素坐标
       const toLayer = (screen: number, origin: number, cssSize: number, layerSize: number) =>
-        ((screen - origin) / zoomScale) * (layerSize / cssSize);
+        ((screen - origin) / crop.s) * (layerSize / cssSize);
       const x0 = toLayer(br.left - 60, imgLeft, br.width, lv.width);
       const x1 = toLayer(br.left + viewSize.w + 60, imgLeft, br.width, lv.width);
       const y0 = toLayer(br.top - 60, imgTop, br.height, lv.height);
@@ -259,7 +271,7 @@ function TileImage({
       }
     }
     return out;
-  }, [info, levelIdx, getBaseRect, viewSize, zoomScale, cameraX, cameraY]);
+  }, [info, levelIdx, getBaseRect, viewSize, crop]);
 
   // 回填尺寸（getBaseRect 依赖它）
   useEffect(() => {
@@ -286,16 +298,16 @@ function TileImage({
   // 内层（承载层像素尺寸）上。此前外层用 absolute inset-0 + 自己的定位，
   // 两层算法不同 ⇒ 错位成两个图。
   return (
-    <div
-      className="absolute inset-0 pointer-events-none flex items-center justify-center"
-      style={{ willChange: 'transform' }}
-    >
+    <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
       <div
         style={{
           ...zoomStyle,
           width: cssW,
           height: cssH,
           overflow: 'hidden',
+          // will-change 必须加在**带 transform 的这个元素**上（之前加在外层
+          // flex 容器上，提升的不是真正变换的那层，等于没生效）。
+          willChange: 'transform',
         }}
       >
         <div
