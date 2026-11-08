@@ -1290,8 +1290,13 @@ pub fn generate_tiles(
     let dir = tiles_dir(app, image_path)?;
     let done_marker = dir.join("done.json");
 
-    // 已生成完 ⇒ 直接复用
-    if done_marker.exists() {
+    // **完整检查**：done.json 存在**且**每层首块都在，才算完成。
+    // 只看 done.json 会踩坑：旧格式残留、或上次生成中途失败时标记可能已写，
+    // 目录里却缺层 ⇒ 前端请求 404 ⇒ 表现「永远加载中」，且拿不到高层 ⇒ 画质上不去。
+    let all_levels_ok = levels.iter().enumerate().all(|(i, _)| {
+        dir.join(format!("L{i}")).join("0_0.png").exists()
+    });
+    if done_marker.exists() && all_levels_ok {
         return Ok(TilesInfo {
             width: w0,
             height: h0,
@@ -1306,12 +1311,30 @@ pub fn generate_tiles(
     // **一次流式解码写出所有层**（不是逐级各解一次）：
     // 既省一半以上的解码时间，也保证各层来自同一份源数据（不会出现层间错位）。
     // 注意：必须整体调用 —— 单层调用时层索引会退化成 0，所有层都写进 L0。
-    let need = levels
-        .iter()
-        .enumerate()
-        .any(|(i, _)| !dir.join(format!("L{i}")).exists());
+    // **不能只看目录是否存在**：目录可能是早期 JPEG 格式留下的（现在写 PNG），
+    // 目录存在就跳过 ⇒ 前端请求 .png 全部 404 ⇒ 表现是「永远加载中」，
+    // 且拿不到高层瓦片 ⇒ 放大画质一直上不去（同一根因）。
+    // 改为检查每层第一块 png 是否真实存在。
+    let need = levels.iter().enumerate().any(|(i, _)| {
+        !dir.join(format!("L{i}")).join("0_0.png").exists()
+    });
     if need {
+        // 清掉可能残留的旧格式目录，避免新旧混放
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建瓦片目录失败: {e}"))?;
         generate_png_tiles(std::path::Path::new(image_path), &dir, &levels, TILE_SIZE)?;
+    // 逐层核对：哪层没写出来，日志里直接能看出来
+    for (i, lv) in levels.iter().enumerate() {
+        let first = dir.join(format!("L{i}")).join("0_0.png");
+        log::info!(
+            "[tiles] L{i} {}x{} cols={} rows={} first_block={}",
+            lv.width,
+            lv.height,
+            lv.cols,
+            lv.rows,
+            if first.exists() { "ok" } else { "MISSING" }
+        );
+    }
     }
     std::fs::write(&done_marker, "{}").map_err(|e| format!("写标记失败: {e}"))?;
 

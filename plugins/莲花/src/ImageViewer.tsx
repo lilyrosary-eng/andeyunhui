@@ -128,6 +128,7 @@ function TileImage({
   containerRef,
   onReady,
   onSmall,
+  onFallback,
   onImageLoaded,
 }: {
   imagePath: string;
@@ -147,18 +148,24 @@ function TileImage({
   onReady?: () => void;
   /** 这张图不需要瓦片（尺寸够小）—— 父级改用原图 <img> */
   onSmall?: () => void;
+  /** 瓦片不可用 —— 父级改用 200px 缩略图兜底 */
+  onFallback?: () => void;
   onImageLoaded?: (size: { width: number; height: number }) => void;
 }) {
   const [info, setInfo] = useState<TilesInfo | null>(null);
   const [failed, setFailed] = useState(false);
   /** 已上报过 ready（只报一次） */
   const readyRef = useRef(false);
+  /** 已上报过 fallback（只报一次，避免无限 IPC 循环） */
+  const fallbackNotifiedRef = useRef(false);
 
   // 懒生成瓦片（后端限流解码 + 磁盘缓存，重复调用直接命中）
   useEffect(() => {
     if (!imagePath) return;
     let alive = true;
     setFailed(false);
+    readyRef.current = false;
+    fallbackNotifiedRef.current = false;
     void hostApi
       .invoke<TilesInfo>('generate_tiles', { imagePath })
       .then((t) => {
@@ -301,8 +308,19 @@ function TileImage({
     onSmall?.();
     return null;
   }
-  if (failed || !info || tiles.length === 0) {
+  // **只有真失败才兜底，且只通知一次**。
+  // 之前把 `!info`（仍在加载中）也算进这个分支、并且每次渲染都调 onFallback，
+  // 而 onFallback 会发 2 个 IPC（查尺寸 + 生成缩略图）→ 返回后 setState →
+  // 重渲染 → 又调 onFallback ⇒ **无限 IPC 循环** ⇒ 冷启动就卡死。
+  if (failed) {
+    if (!fallbackNotifiedRef.current) {
+      fallbackNotifiedRef.current = true;
+      onFallback?.();
+    }
     return null;
+  }
+  if (!info || tiles.length === 0) {
+    return null; // 仍在加载中，不是失败
   }
   const lv = info.levels[levelIdx];
   // 最小层的瓦片：通常 1~2 块、几百 KB，用来在选层瓦片到达前先显示内容。
@@ -1480,6 +1498,8 @@ function FullView({
   const [tilesReady, setTilesReady] = useState(false);
   /** 这张图太小，不需要瓦片 —— 直接用原图 <img> */
   const [smallImage, setSmallImage] = useState(false);
+  /** 瓦片不可用 —— 回退到 200px 缩略图 */
+  const [tileFallback, setTileFallback] = useState<string>('');
   /** 瓦片开关（localStorage 'image.tiles' = '0' 可关闭，用于 A/B 对比） */
   const tilesEnabled = useMemo(() => {
     try {
@@ -1517,6 +1537,7 @@ function FullView({
     setImgError(false);
     setTilesReady(false);
     setSmallImage(false);
+    setTileFallback('');
     setGifDataUrl(null);
     if (isCurrentGif && currentPath) {
       let cancelled = false;
@@ -1581,7 +1602,7 @@ function FullView({
           ref={canvasRef}
           className="absolute inset-0 w-full h-full select-none"
         />
-      ) : tilesEnabled && !isCurrentGif && !smallImage ? null : !isCurrentGif && !displaySrc ? (
+      ) : tilesEnabled && !isCurrentGif && !smallImage && !tileFallback ? null : !isCurrentGif && !smallImage && !tileFallback && !displaySrc ? (
         // 显示层还没就绪：**绝不回退原图**。
         // 回退原图会让 WebView 解码 8192×8192（≈268MB）—— 表现就是
         // 「打开大图时整机卡死」+「画质在原图/降采样之间来回跳」。
@@ -1592,7 +1613,13 @@ function FullView({
           // **原图直出**：与系统图片查看器（Loupe）对齐 —— 解码交给 WebKit 的
           // WebProcess（独立进程），GTK 主循环不被占用；代价是内存（8192² ≈ 268MB）。
           // 这是刻意的取舍：清晰度不妥协，用内存换稳定与简单。
-          src={isCurrentGif ? gifDataUrl || currentUrl : smallImage ? currentUrl : displaySrc}
+          src={
+            isCurrentGif
+              ? gifDataUrl || currentUrl
+              : smallImage
+                ? currentUrl
+                : tileFallback || displaySrc
+          }
           alt={`${currentIndex + 1}/${imgUrls.length}`}
           key={currentIndex}
           onError={() => setImgError(true)}
@@ -1627,6 +1654,31 @@ function FullView({
             imagePath={currentPath}
             onReady={() => setTilesReady(true)}
             onSmall={() => setSmallImage(true)}
+            onFallback={() => {
+              // **先查尺寸**：小图直接用原图（秒开、清晰），不要走 200px 兜底
+              // （否则小图也变成模糊缩略图，用户明确要求排除）。
+              void hostApi
+                .invoke<{ width?: number; height?: number }>('get_image_metadata', {
+                  imagePath: currentPath,
+                })
+                .then((m) => {
+                  const w = m?.width ?? 0;
+                  const h = m?.height ?? 0;
+                  if (w > 0 && h > 0 && w <= 2560 && h <= 2560) {
+                    setSmallImage(true); // 小图走原图
+                    return;
+                  }
+                  return hostApi
+                    .invoke<string>('generate_thumbnail', {
+                      imagePath: currentPath,
+                      width: 200,
+                    })
+                    .then((t) => {
+                      if (t) setTileFallback(safeFileSrc(t));
+                    });
+                })
+                .catch(() => {});
+            }}
             // **必须回填尺寸**：瓦片启用时底层 <img> 不渲染，getBaseRect 拿不到
             // naturalWidth ⇒ base.width = 0 ⇒ 瓦片层把 8192 当成适配尺寸 ⇒
             // 「一打开就是 1:1 放大、且缩不动」。这里把原图尺寸补给 loadedSize。
