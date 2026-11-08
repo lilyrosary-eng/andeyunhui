@@ -313,65 +313,38 @@ function TileImage({
   // 之前外层直接用 lv.width（原图像素，8192）⇒ 瓦片以 1:1 像素铺开，
   // 看起来像「卡在最大缩放」，还和底层错位成两个图。
   const br = getBaseRect?.();
-  const cssW = br?.width ?? info.width;
-  const cssH = br?.height ?? info.height;
-  const innerScale = cssW / lv.width;
-  // **定位必须与底层 <img> 完全一致**：
-  // 底层是 `max-w-full max-h-full object-contain`（在容器内居中）+ zoomStyle，
-  // 所以瓦片层也用「flex 居中 + 同一个 zoomStyle」，只是把 transform 挂在
-  // 内层（承载层像素尺寸）上。此前外层用 absolute inset-0 + 自己的定位，
-  // 两层算法不同 ⇒ 错位成两个图。
+
+  // L0 打底 + 选层覆盖，一起交给 canvas。
+  // L0 每块在 lv 坐标系里的位置 = col * (lv.width / l0.cols)
+  const l0Tiles =
+    levelIdx > 0 && dirUrl0
+      ? Array.from({ length: l0.rows * l0.cols }, (_, i) => {
+          const c = i % l0.cols;
+          const r = Math.floor(i / l0.cols);
+          return {
+            url: `${dirUrl0}/L0/${r}_${c}.png`,
+            left: c * (lv.width / l0.cols),
+            top: r * (lv.height / l0.rows),
+          };
+        })
+      : [];
+
   return (
-    <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-      <div
-        style={{
-          ...zoomStyle,
-          width: cssW,
-          height: cssH,
-          overflow: 'hidden',
-          // will-change 必须加在**带 transform 的这个元素**上（之前加在外层
-          // flex 容器上，提升的不是真正变换的那层，等于没生效）。
-          willChange: 'transform',
-        }}
-      >
-        <div
-          style={{
-            width: lv.width,
-            height: lv.height,
-            transform: `scale(${innerScale})`,
-            transformOrigin: '0 0',
-          }}
-        >
-          {/* L0 占位：最小层先铺满整个层坐标系（秒开、先有内容）。
-              注意显示宽要用 lv.width / l0.cols，不是 l0 自己的像素宽 ——
-              否则它只盖住左上角一块，其余区域是低层瓦片被拉大。 */}
-          {levelIdx > 0 && dirUrl0 && (
-            <TileGrid
-              tiles={Array.from({ length: l0.rows * l0.cols }, (_, i) => {
-                const c = i % l0.cols;
-                const r = Math.floor(i / l0.cols);
-                const cw = Math.ceil(lv.width / l0.cols);
-                const ch = Math.ceil(lv.height / l0.rows);
-                return { url: `${dirUrl0}/L0/${r}_${c}.png`, left: c * cw, top: r * ch };
-              })}
-              tileSize={Math.ceil(lv.width / l0.cols)}
-            />
-          )}
-          <TileGrid
-            tiles={tiles}
-            tileSize={info.tile_size}
-            onFirstLoad={() => {
-              if (readyRef.current) return;
-              readyRef.current = true;
-              onReady?.();
-            }}
-          />
-        </div>
-      </div>
-    </div>
+    <TileCanvas
+      tiles={[...l0Tiles, ...tiles]}
+      lv={lv}
+      base={br ?? null}
+      zoomScale={zoomScale}
+      cameraX={cameraX}
+      cameraY={cameraY}
+      onReady={() => {
+        if (readyRef.current) return;
+        readyRef.current = true;
+        onReady?.();
+      }}
+    />
   );
 }
-
 /**
  * 瓦片网格（memo 化）。
  *
@@ -380,6 +353,101 @@ function TileImage({
  * （用户反馈"缩放很卡，拖动没问题"——拖动不触发 React 重渲染）。
  * 抽出来后，transform 变化只更新外层一个 div 的 style，网格完全不动。
  */
+/**
+ * **canvas 瓦片渲染**（2026-11-08）。
+ *
+ * 为什么必须用 canvas：DOM `<img>` 会缩放**两次**
+ *   瓦片 CSS 512(1:1) → 内层 scale(fit) 缩到适配尺寸 → 外层 scale(zoom) 放大
+ * 中间那次降采样不可逆（浏览器降到几十像素再放大，只能放大那几十像素）。
+ * 实测同一放大尺度下：原图直出不糊、系统查看器不糊、DOM 瓦片糊。
+ *
+ * canvas 的 drawImage(源, 目标) 是**源→目标一次重采样**，没有中间步骤，
+ * 所以任意缩放下都能达到与原图直出同等的清晰度。
+ */
+function TileCanvas({
+  tiles,
+  lv,
+  base,
+  zoomScale,
+  cameraX,
+  cameraY,
+  onReady,
+}: {
+  tiles: { url: string; left: number; top: number }[];
+  lv: { width: number; height: number };
+  base: { left: number; top: number; width: number; height: number } | null;
+  zoomScale: number;
+  cameraX: number;
+  cameraY: number;
+  onReady?: () => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const cacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  const readyRef = useRef(false);
+
+  useEffect(() => {
+    let alive = true;
+    for (const t of tiles) {
+      if (cacheRef.current.has(t.url)) continue;
+      const im = new Image();
+      im.decoding = 'async';
+      im.src = t.url;
+      cacheRef.current.set(t.url, im);
+      if (!readyRef.current) {
+        im.onload = () => {
+          if (!alive || readyRef.current) return;
+          readyRef.current = true;
+          onReady?.();
+        };
+      }
+    }
+    return () => {
+      alive = false;
+    };
+  }, [tiles, onReady]);
+
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv || !base) return;
+    const ctx = cv.getContext('2d');
+    if (!ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const cw = cv.clientWidth;
+    const ch = cv.clientHeight;
+    if (cw <= 0 || ch <= 0) return;
+    if (cv.width !== Math.round(cw * dpr) || cv.height !== Math.round(ch * dpr)) {
+      cv.width = Math.round(cw * dpr);
+      cv.height = Math.round(ch * dpr);
+    }
+
+    const cr = cv.getBoundingClientRect();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+
+    // 图像像素 → 屏幕 CSS 像素
+    const sf = (base.width / lv.width) * zoomScale;
+    const originX = base.left + cameraX - cr.left;
+    const originY = base.top + cameraY - cr.top;
+
+    for (const t of tiles) {
+      const im = cacheRef.current.get(t.url);
+      if (!im || !im.complete || im.naturalWidth === 0) continue;
+
+      const dx = originX + t.left * sf;
+      const dy = originY + t.top * sf;
+      const dw = im.naturalWidth * sf;
+      const dh = im.naturalHeight * sf;
+      if (dx + dw < 0 || dy + dh < 0 || dx > cw || dy > ch) continue;
+
+      // **一次重采样**：整块瓦片 → 屏幕矩形
+      ctx.drawImage(im, 0, 0, im.naturalWidth, im.naturalHeight, dx, dy, dw, dh);
+    }
+  }, [tiles, lv, base, zoomScale, cameraX, cameraY]);
+
+  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />;
+}
+
 const TileGrid = React.memo(function TileGrid({
   tiles,
   tileSize,
