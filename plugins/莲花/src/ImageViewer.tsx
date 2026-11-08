@@ -289,6 +289,9 @@ function TileImage({
     return null;
   }
   const lv = info.levels[levelIdx];
+  // 最小层的瓦片：通常 1~2 块、几百 KB，用来在选层瓦片到达前先显示内容。
+  const l0 = info.levels[0];
+  const dirUrl0 = safeFileSrc(info.dir);
   // **外层尺寸必须等于底层 <img> 的适配尺寸**（getBaseRect 的 width/height），
   // 内层再把「层的像素尺寸」缩放到它 —— 两层才严格重合。
   // 之前外层直接用 lv.width（原图像素，8192）⇒ 瓦片以 1:1 像素铺开，
@@ -565,41 +568,12 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
     setLayerWidth((prev) => (prev === want ? prev : want));
   }, [zoomCamera.scale]);
 
-  // 取显示层：200px 秒开 → 2560px 替换。解码在 Rust 侧限流完成，前端只管贴。
+  // 显示层已停用（原图直出）：不再调用 generate_thumbnail。
+  // 之前它会在 Rust 侧把 8192² 整图解码一遍（Lanczos 流式，数秒 CPU 满载），
+  // 而前端已经不用它的产物 —— 纯属白烧。
   useEffect(() => {
-    const path = shuffledImages[currentIndex];
-    if (!path) {
-      setDisplaySrc('');
-      return;
-    }
-    if (displayPathRef.current !== path) {
-      displayPathRef.current = path;
-      setDisplaySrc('');
-    }
-    let alive = true;
-    const load = (width: number) =>
-      hostApi
-        .invoke<string>('generate_thumbnail', { imagePath: path, width })
-        .then((src) => {
-          if (alive && src) {
-            const url = safeFileSrc(src);
-            if (url) setDisplaySrc(url);
-          }
-          return src;
-        })
-        .catch(() => null);
-    // **只在切到「新图」时清空**：
-    //   · 同图刷新 → 保留旧图，避免「滚动时重新加载」的闪烁
-    //   · 切到新图 → 必须清空，否则一直显示上一张的内容（用户反馈
-    //     「滚到下一张了但还是上一张的内容」）—— 用 path 区分这两种情况。
-    // 直接要 2560px 显示层。之前试过"先 200px 再按需换高清"：
-    // 既没缓解卡顿（根因是整图解码，与缩略图尺寸无关），又让画面长期停在低清，
-    // 体验反而更差 —— 已回退。
-    void load(layerWidth);
-    return () => {
-      alive = false;
-    };
-  }, [currentIndex, shuffledImages, layerWidth]);
+    setDisplaySrc('');
+  }, []);
 
   // 翻页卡顿主要来自"下一张图首次解码"。提前在后台把相邻图的**显示层**做出来。
   //
@@ -1584,7 +1558,7 @@ function FullView({
           ref={canvasRef}
           className="absolute inset-0 w-full h-full select-none"
         />
-      ) : !isCurrentGif && !displaySrc ? (
+      ) : tilesEnabled && !isCurrentGif ? null : !isCurrentGif && !displaySrc ? (
         // 显示层还没就绪：**绝不回退原图**。
         // 回退原图会让 WebView 解码 8192×8192（≈268MB）—— 表现就是
         // 「打开大图时整机卡死」+「画质在原图/降采样之间来回跳」。
@@ -1622,8 +1596,9 @@ function FullView({
         {/* Tile 金字塔层：瓦片就绪后盖在降采样显示层之上（更清晰，且可任意缩放）。
             底层始终是 2560px 降采样显示层，所以瓦片生成期间也有内容、也不会卡。
             pointer-events-none：避免这层拦截点击（点击用于切换工具栏 / 翻页）。 */}
-        {/* 瓦片层已停用：原图直出后不再需要（保留实现，将来若要支持
-            「原图也放不下」的超大图再启用）。
+        {/* 瓦片层：唯一可行的路径。
+            原图直出在 WebKitGTK 下跑不动（8192² 要完整解码 268MB 再缩放，
+            实测一直转圈出不来），所以清晰度只能靠瓦片分层提供。 */}
         {tilesEnabled && !isCurrentGif && currentPath && (
           <TileImage
             imagePath={currentPath}
@@ -1635,7 +1610,7 @@ function FullView({
             containerRef={containerRef}
             zoomStyle={zoomStyle}
           />
-        )} */}
+        )}
     </div>
   );
 }
