@@ -11,7 +11,21 @@ use super::*;
 
 /// 生成一份存档快照（content 为 base64 编码，支持二进制）。
 #[tauri::command]
-pub fn archive_snapshot(
+pub async fn archive_snapshot(
+    app: tauri::AppHandle,
+    kind: String,
+    source_id: String,
+    name: String,
+    content_base64: String,
+    ext: String,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || archive_snapshot_impl(app, kind, source_id, name, content_base64, ext))
+        .await
+        .map_err(|e| format!("archive_snapshot 任务失败: {e}"))?
+}
+
+/// 同步实现（内部用；不要直接作为命令暴露 —— 同步命令跑在主线程）
+fn archive_snapshot_impl(
     app: tauri::AppHandle,
     kind: String,
     source_id: String,

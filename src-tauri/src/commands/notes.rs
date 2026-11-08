@@ -196,7 +196,19 @@ pub(crate) fn note_excerpt(content: &str) -> (String, String) {
 }
 
 #[tauri::command]
-pub fn aiwork_context_aggregate(
+pub async fn aiwork_context_aggregate(
+    app: AppHandle,
+    note_ids: Option<Vec<String>>,
+    query: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<AiworkNoteContext>, String> {
+    tokio::task::spawn_blocking(move || aiwork_context_aggregate_impl(app, note_ids, query, limit))
+        .await
+        .map_err(|e| format!("aiwork_context_aggregate 任务失败: {e}"))?
+}
+
+/// 同步实现（内部用；不要直接作为命令暴露 —— 同步命令跑在主线程）
+fn aiwork_context_aggregate_impl(
     app: AppHandle,
     note_ids: Option<Vec<String>>,
     query: Option<String>,

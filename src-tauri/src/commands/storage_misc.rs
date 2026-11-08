@@ -382,7 +382,17 @@ pub fn adyh_conversations_load(project_root: String) -> serde_json::Value {
 
 /// 写入项目会话库（按会话目录 upsert，不删除未出现的会话）。
 #[tauri::command]
-pub fn adyh_conversations_save(
+pub async fn adyh_conversations_save(
+    project_root: String,
+    payload: serde_json::Value,
+) -> Result<usize, String> {
+    tokio::task::spawn_blocking(move || adyh_conversations_save_impl(project_root, payload))
+        .await
+        .map_err(|e| format!("adyh_conversations_save 任务失败: {e}"))?
+}
+
+/// 同步实现（内部用；不要直接作为命令暴露 —— 同步命令跑在主线程）
+fn adyh_conversations_save_impl(
     project_root: String,
     payload: serde_json::Value,
 ) -> Result<usize, String> {

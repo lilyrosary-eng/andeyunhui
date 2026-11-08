@@ -109,7 +109,14 @@ pub fn ai_get_conversations(app: AppHandle) -> AiConversations {
 /// 保存全部对话 + 当前激活 id。
 /// 前端防抖调用（约 500ms），避免流式增量触发频繁磁盘写入。
 #[tauri::command]
-pub fn ai_save_conversations(app: AppHandle, payload: AiConversations) -> Result<(), String> {
+pub async fn ai_save_conversations(app: AppHandle, payload: AiConversations) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || ai_save_conversations_impl(app, payload))
+        .await
+        .map_err(|e| format!("ai_save_conversations 任务失败: {e}"))?
+}
+
+/// 同步实现（内部用；不要直接作为命令暴露 —— 同步命令跑在主线程）
+fn ai_save_conversations_impl(app: AppHandle, payload: AiConversations) -> Result<(), String> {
     let path = conversations_path(&app)?;
     // 先写临时文件再 rename，避免写入中途崩溃导致 JSON 损坏（原子性近似）
     let tmp = path.with_extension("json.tmp");

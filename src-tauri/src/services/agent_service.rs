@@ -135,7 +135,14 @@ pub fn agent_tool_delete(app: tauri::AppHandle, kind: String, id: String) -> Res
 
 /// 列出某类记录（返回 Vec，按创建倒序）。
 #[tauri::command]
-pub fn agent_tool_list(app: tauri::AppHandle, kind: String) -> Result<Vec<AgentRecord>, String> {
+pub async fn agent_tool_list(app: tauri::AppHandle, kind: String) -> Result<Vec<AgentRecord>, String> {
+    tokio::task::spawn_blocking(move || agent_tool_list_impl(app, kind))
+        .await
+        .map_err(|e| format!("agent_tool_list 任务失败: {e}"))?
+}
+
+/// 同步实现（内部用；不要直接作为命令暴露 —— 同步命令跑在主线程）
+fn agent_tool_list_impl(app: tauri::AppHandle, kind: String) -> Result<Vec<AgentRecord>, String> {
     let d = load(&app);
     let list: &Vec<AgentRecord> = match kind.as_str() {
         "calendar" => &d.calendar,
