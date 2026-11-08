@@ -179,16 +179,30 @@ function TileImage({
     };
   }, [imagePath]);
 
-  // **永远用最高层**（step=1，与原图 1:1，完全无损）。
+  // 按缩放选层（**必须有层次变化**，这是金字塔的意义所在）。
   //
-  // 之前按「目标像素 × 1.5」选层，中等放大时会落到 step=2 的中间层 ——
-  // 那些层是 box 抽样得到的（有损），所以「放大后画质不够」。
-  // 现在视口裁剪已经把加载量限制在「可见瓦片数」（通常十几块），
-  // 直接用最高层既无损、内存也可控，不再需要按级别取舍。
+  // 为什么不能"永远用最高层"：canvas 的 drawImage **大幅缩小**比放大慢得多
+  // （放大是双线性一次采样，缩小要做面积平均、多次采样）。
+  // 用户实测「放大不卡、缩小卡」正是这个原因 —— 缩小时把 8192 的瓦片缩到
+  // 几十像素，每帧都在做高倍降采样。
+  //
+  // 选层规则：取「层分辨率 ≥ 屏幕所需像素 × 1.5」的最小层。
+  //   · ×1.5 余量保证放大后不发软（之前用 1.0 会选到有损的低层）
+  //   · 缩小时自然落到低层 ⇒ 避免高倍降采样 ⇒ 快
   const levelIdx = useMemo(() => {
     if (!info || info.levels.length === 0) return -1;
+    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    const br = getBaseRect?.();
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1920;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 1080;
+    const fit = Math.min(1, vw / info.width, vh / info.height);
+    const cssWidth = br?.width ?? info.width * fit;
+    const needPx = Math.max(1, cssWidth * zoomScale * dpr * 1.5);
+    for (let i = 0; i < info.levels.length; i++) {
+      if (info.levels[i].width >= needPx) return i;
+    }
     return info.levels.length - 1;
-  }, [info]);
+  }, [info, zoomScale, getBaseRect]);
 
   // **裁剪用的去抖参数**。
   // 视口裁剪依赖 zoomScale / cameraX / cameraY，若直接用实时值，
@@ -384,6 +398,10 @@ function TileCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const readyRef = useRef(false);
+  /** 上一次的缩放值（判断放大/缩小方向） */
+  const prevZoomRef = useRef(zoomScale);
+  /** 绘制耗时窗口统计 */
+  const drawStatRef = useRef({ n: 0, sum: 0, max: 0, outN: 0, slow: 0 });
 
   useEffect(() => {
     let alive = true;
@@ -414,6 +432,7 @@ function TileCanvas({
     // 直接同步重绘会画很多遍（用户观感是"瓦片一圈圈刷"）。
     // 用 requestAnimationFrame 合并成"每帧最多画一次"。
     const raf = requestAnimationFrame(() => {
+      const __t0 = performance.now();
       const ctx = cv.getContext('2d');
       if (!ctx) return;
 
@@ -428,6 +447,10 @@ function TileCanvas({
 
     const cr = cv.getBoundingClientRect();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // **缩小场景的采样质量**：日志显示 avg 与瓦片数强相关
+    // （10~16 块 → 1.8ms；73~81 块 → 40ms+），瓶颈是每块都要读 512² 源做降采样。
+    // 'low' 用更少的采样点，缩小场景肉眼几乎无差，但快 2~3 倍。
+    ctx.imageSmoothingQuality = 'low';
     ctx.clearRect(0, 0, cw, ch);
 
     // 图像像素 → 屏幕 CSS 像素
@@ -452,8 +475,48 @@ function TileCanvas({
       const x1 = Math.round(dx + dw);
       const y1 = Math.round(dy + dh);
       if (x1 <= x0 || y1 <= y0) continue;
-      ctx.drawImage(im, 0, 0, im.naturalWidth, im.naturalHeight, x0, y0, x1 - x0, y1 - y0);
+
+      // **把目标矩形裁剪到画布可见区**（关键性能修复）：
+      // drawImage 会把整个目标矩形画完，即使绝大部分在画面外。
+      // 放大时一块瓦片的目标尺寸 = 512×sf，sf=10 就是 5120² ≈ 2600 万像素，
+      // 其中几乎全部落在视口外 —— 这是「缩放卡」的主要来源。
+      // 裁掉不可见部分后，填充量恒等于视口面积。
+      const vx0 = Math.max(0, x0);
+      const vy0 = Math.max(0, y0);
+      const vx1 = Math.min(cw, x1);
+      const vy1 = Math.min(ch, y1);
+      if (vx1 <= vx0 || vy1 <= vy0) continue;
+
+      // 源矩形按同一比例裁剪（保持一一对应）
+      const kx = im.naturalWidth / (x1 - x0);
+      const ky = im.naturalHeight / (y1 - y0);
+      const sx0 = (vx0 - x0) * kx;
+      const sy0 = (vy0 - y0) * ky;
+      const sw = (vx1 - vx0) * kx;
+      const sh = (vy1 - vy0) * ky;
+
+      ctx.drawImage(im, sx0, sy0, sw, sh, vx0, vy0, vx1 - vx0, vy1 - vy0);
     }
+      // 临时诊断：窗口期汇总（每 30 帧输出一次），区分放大/缩小
+      {
+        const dt = performance.now() - __t0;
+        const dirOut = zoomScale < prevZoomRef.current;
+        prevZoomRef.current = zoomScale;
+        const st = drawStatRef.current;
+        st.n += 1;
+        st.sum += dt;
+        st.max = Math.max(st.max, dt);
+        if (dirOut) st.outN += 1;
+        if (dt > 25) st.slow += 1;
+        if (st.n >= 30) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[draw-stat] n=${st.n} avg=${(st.sum / st.n).toFixed(1)}ms max=${st.max.toFixed(0)}ms ` +
+              `slow(>25ms)=${st.slow} 缩小占比=${st.outN}/${st.n} tiles=${tiles.length} layerW=${lv.width}`,
+          );
+          st.n = 0; st.sum = 0; st.max = 0; st.outN = 0; st.slow = 0;
+        }
+      }
     });
 
     return () => cancelAnimationFrame(raf);
@@ -769,9 +832,15 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
     let cancelled = false;
     setLoading(true);
     setRestoreIdx(null);
+    const __t0 = performance.now();
     hostApi.invoke<string[]>('get_folder_images', { folderPath })
       .then((paths) => {
         if (cancelled) return;
+        // 临时诊断：冷启动各阶段耗时（日志里搜 [perf]）
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[perf] get_folder_images ${(performance.now() - __t0).toFixed(0)}ms count=${paths.length}`,
+        );
         setImages(paths);
         let idx = 0;
         if (initialPath) {
@@ -789,6 +858,8 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
         setCurrentIndex(idx);
         setRestoreIdx((initialPath || localStorage.getItem('image.rememberProgress') === '1') ? idx : null);
         setLoading(false);
+        // eslint-disable-next-line no-console
+        console.warn(`[perf] list ready total ${(performance.now() - __t0).toFixed(0)}ms`);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
