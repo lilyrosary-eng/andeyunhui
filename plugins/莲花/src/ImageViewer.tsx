@@ -409,8 +409,13 @@ function TileCanvas({
   useEffect(() => {
     const cv = canvasRef.current;
     if (!cv || !base) return;
-    const ctx = cv.getContext('2d');
-    if (!ctx) return;
+
+    // **rAF 合并**：缩放/平移时每帧可能触发多次 effect，
+    // 直接同步重绘会画很多遍（用户观感是"瓦片一圈圈刷"）。
+    // 用 requestAnimationFrame 合并成"每帧最多画一次"。
+    const raf = requestAnimationFrame(() => {
+      const ctx = cv.getContext('2d');
+      if (!ctx) return;
 
     const dpr = window.devicePixelRatio || 1;
     const cw = cv.clientWidth;
@@ -440,9 +445,18 @@ function TileCanvas({
       const dh = im.naturalHeight * sf;
       if (dx + dw < 0 || dy + dh < 0 || dx > cw || dy > ch) continue;
 
-      // **一次重采样**：整块瓦片 → 屏幕矩形
-      ctx.drawImage(im, 0, 0, im.naturalWidth, im.naturalHeight, dx, dy, dw, dh);
+      // **目标矩形按整数边界对齐**：相邻瓦片共享同一条整数边界，
+      // 否则每块各自栅格化会留下亚像素缝（放大后可见的细线）。
+      const x0 = Math.round(dx);
+      const y0 = Math.round(dy);
+      const x1 = Math.round(dx + dw);
+      const y1 = Math.round(dy + dh);
+      if (x1 <= x0 || y1 <= y0) continue;
+      ctx.drawImage(im, 0, 0, im.naturalWidth, im.naturalHeight, x0, y0, x1 - x0, y1 - y0);
     }
+    });
+
+    return () => cancelAnimationFrame(raf);
   }, [tiles, lv, base, zoomScale, cameraX, cameraY]);
 
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />;
@@ -1546,6 +1560,18 @@ function FullView({
   const [imgError, setImgError] = useState(false);
   /** 瓦片层首批渲染完成 —— 完成后隐藏底层 <img>，避免两个大图层叠加合成 */
   const [tilesReady, setTilesReady] = useState(false);
+  /**
+   * **渲染引擎开关**（便于对照/兜底，不是给日常使用选的）：
+   *   localStorage['image.engine'] = 'raw'  → 原图直出（8192² 会一直转圈，已知不可用）
+   *   默认 / 'tiles'                        → canvas 瓦片
+   */
+  const engine = useMemo(() => {
+    try {
+      return localStorage.getItem('image.engine') === 'raw' ? 'raw' : 'tiles';
+    } catch {
+      return 'tiles';
+    }
+  }, []);
   /** 这张图太小，不需要瓦片 —— 直接用原图 <img> */
   const [smallImage, setSmallImage] = useState(false);
   /** 瓦片不可用 —— 回退到 200px 缩略图 */
@@ -1652,7 +1678,9 @@ function FullView({
           ref={canvasRef}
           className="absolute inset-0 w-full h-full select-none"
         />
-      ) : tilesEnabled && !isCurrentGif && !smallImage && !tileFallback ? null : !isCurrentGif && !smallImage && !tileFallback && !displaySrc ? (
+      ) : tilesEnabled && engine === 'tiles' && !isCurrentGif && !smallImage && !tileFallback
+        ? null
+        : !isCurrentGif && !smallImage && !tileFallback && !displaySrc && engine !== 'raw' ? (
         // 显示层还没就绪：**绝不回退原图**。
         // 回退原图会让 WebView 解码 8192×8192（≈268MB）—— 表现就是
         // 「打开大图时整机卡死」+「画质在原图/降采样之间来回跳」。
@@ -1666,7 +1694,7 @@ function FullView({
           src={
             isCurrentGif
               ? gifDataUrl || currentUrl
-              : smallImage
+              : engine === 'raw' || smallImage
                 ? currentUrl
                 : tileFallback || displaySrc
           }
@@ -1699,7 +1727,7 @@ function FullView({
         {/* 瓦片层：唯一可行的路径。
             原图直出在 WebKitGTK 下跑不动（8192² 要完整解码 268MB 再缩放，
             实测一直转圈出不来），所以清晰度只能靠瓦片分层提供。 */}
-        {tilesEnabled && !isCurrentGif && currentPath && (
+        {tilesEnabled && engine === 'tiles' && !isCurrentGif && currentPath && (
           <TileImage
             imagePath={currentPath}
             onReady={() => setTilesReady(true)}
