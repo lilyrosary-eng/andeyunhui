@@ -179,34 +179,16 @@ function TileImage({
     };
   }, [imagePath]);
 
-  // 按当前缩放级别选层：取「分辨率 ≥ 屏幕实际需要像素」的最小层。
+  // **永远用最高层**（step=1，与原图 1:1，完全无损）。
   //
-  // 关键：需要的像素 = **适配时的 CSS 显示宽 × zoomScale × devicePixelRatio**。
-  //   · 适配时的 CSS 显示宽由**原图**与视口算出（fit = contain）
-  //   · zoomScale 是相对"适配"的倍率
-  //   · DPR 必须计入，否则在 Retina/4K 屏上会选到过低的层 → 放大后发糊
-  //   （之前误用显示层的像素宽做基准，导致目标系统性偏小 ⇒ 清晰度差一截）
+  // 之前按「目标像素 × 1.5」选层，中等放大时会落到 step=2 的中间层 ——
+  // 那些层是 box 抽样得到的（有损），所以「放大后画质不够」。
+  // 现在视口裁剪已经把加载量限制在「可见瓦片数」（通常十几块），
+  // 直接用最高层既无损、内存也可控，不再需要按级别取舍。
   const levelIdx = useMemo(() => {
     if (!info || info.levels.length === 0) return -1;
-    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-    // 适配宽：优先用 getBaseRect（与底层 <img> 的 object-contain 结果**完全一致**），
-    // 退化时用视口自己算 contain。
-    const br = getBaseRect?.();
-    const vw = typeof window !== 'undefined' ? window.innerWidth : 1920;
-    const vh = typeof window !== 'undefined' ? window.innerHeight : 1080;
-    const fit = Math.min(1, vw / info.width, vh / info.height);
-    const cssWidth = br?.width ?? info.width * fit; // 适配时的 CSS 显示宽
-    // ×1.5 余量：宁可多加载一层，也不要"刚好够"导致放大后发软。
-    // 用户明确"清晰度不能妥协"，所以选层偏保守。
-    const targetPx = Math.max(1, cssWidth * zoomScale * dpr * 1.5);
-    // 从大到小找第一个满足的（levels 是从小到大）
-    for (let i = info.levels.length - 1; i >= 0; i--) {
-      if (info.levels[i].width >= targetPx) return i;
-    }
-    // 需要的像素超过最大层（放大到 1:1 以上）⇒ 用**最高层**。
-    // 之前这里 return 0（最低层）⇒ 放大到边界外时画面糊成一片。
     return info.levels.length - 1;
-  }, [info, zoomScale, getBaseRect]);
+  }, [info]);
 
   // **裁剪用的去抖参数**。
   // 视口裁剪依赖 zoomScale / cameraX / cameraY，若直接用实时值，
