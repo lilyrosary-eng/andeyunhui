@@ -38,20 +38,38 @@ pub async fn scan_image_root(app: tauri::AppHandle, root_path: String) -> Result
 }
 
 /// 加载图片扫描缓存，比对源目录 mtime——若目录有新变化则返回 None 触发重扫
+/// 加载图片扫描缓存，比对源目录 mtime——若目录有新变化则返回 None 触发重扫
+///
+/// **必须 spawn_blocking**：同步 `#[tauri::command]` 会在**主线程**执行，
+/// 而这里要读一个可能几十 MB 的 JSON 并反序列化 ⇒ UI 线程被阻塞数秒
+/// ⇒ 表现就是「打开图片模块整个卡住、卡完一次性响应」。
+/// （音乐模块的命令是异步的，所以它冷启动秒开。）
 #[tauri::command]
-pub fn load_image_cache(app: tauri::AppHandle, root_path: String) -> Result<Option<Vec<image_service::ImageFolder>>, String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    // 获取源目录最新 mtime
-    let src_mtime = std::fs::metadata(&root_path)
-        .ok().and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    // 文件级缓存带有源 mtime 信封
-    match cache_service::load_file_cache::<Vec<image_service::ImageFolder>>(&app_data, "image_scan", &root_path) {
-        Some((data, cached_mtime)) if cached_mtime >= src_mtime => Ok(Some(data)),
-        _ => Ok(None),
-    }
+pub async fn load_image_cache(
+    app: tauri::AppHandle,
+    root_path: String,
+) -> Result<Option<Vec<image_service::ImageFolder>>, String> {
+    tokio::task::spawn_blocking(move || {
+        let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        // 获取源目录最新 mtime
+        let src_mtime = std::fs::metadata(&root_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // 文件级缓存带有源 mtime 信封
+        match cache_service::load_file_cache::<Vec<image_service::ImageFolder>>(
+            &app_data,
+            "image_scan",
+            &root_path,
+        ) {
+            Some((data, cached_mtime)) if cached_mtime >= src_mtime => Ok(Some(data)),
+            _ => Ok(None),
+        }
+    })
+    .await
+    .map_err(|e| format!("加载图片缓存任务失败: {e}"))?
 }
 
 /// 删除图片扫描缓存（重新扫描前调用）
@@ -95,7 +113,15 @@ pub fn cancel_open_book() -> Result<(), String> {
 
 /// 获取指定文件夹下所有图片的完整路径列表
 #[tauri::command]
-pub fn get_folder_images(folder_path: String) -> Result<Vec<String>, String> {
+pub async fn get_folder_images(folder_path: String) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || get_folder_images_impl(&folder_path))
+        .await
+        .map_err(|e| format!("读取目录任务失败: {e}"))?
+}
+
+/// 同步实现（内部用）：遍历目录读图片列表。**不要直接作为命令暴露** ——
+/// 同步命令跑在主线程，遍历大目录会阻塞 UI。
+fn get_folder_images_impl(folder_path: &str) -> Result<Vec<String>, String> {
     image_service::get_folder_images(&folder_path)
 }
 
