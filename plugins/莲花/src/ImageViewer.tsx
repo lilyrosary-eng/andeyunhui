@@ -77,7 +77,7 @@ const MODES: ViewMode[] = ['full', 'vertical', 'horizontal-forward', 'horizontal
  * 现已改为**解码阶段降采样**：按视口尺寸 ×2 ×dpr 解码，一张 8000×6000 的图
  * 纹理只剩几十 MB。设 false 可退回 <img> 路径（SVG/GIF 本来就走那条）。
  */
-const IMAGE_WEBGL_ENABLED = true;
+const IMAGE_WEBGL_ENABLED = false;
 
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 16;
@@ -607,23 +607,8 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
   //    那是 8192×8192 ≈ 268MB，滚动时同时预解两张就能把内存打爆，
   //    表现为「列表滚动非常卡」。这里改为调用 Rust 的 generate_thumbnail：
   //    解码在 Rust 侧限流完成，结果落磁盘缓存，翻过去时直接命中。
-  const prefetchedRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const neighbors = [currentIndex + 1, currentIndex - 1];
-    for (const i of neighbors) {
-      const p = shuffledImages[i];
-      if (!p || prefetchedRef.current.has(p)) continue;
-      prefetchedRef.current.add(p);
-      void hostApi
-        .invoke<string>('generate_thumbnail', { imagePath: p, width: layerWidth })
-        .catch(() => {});
-    }
-    while (prefetchedRef.current.size > 8) {
-      const first = prefetchedRef.current.values().next().value;
-      if (first === undefined) break;
-      prefetchedRef.current.delete(first);
-    }
-  }, [currentIndex, shuffledImages, layerWidth]);
+  // 预取已停用：原图直出时预取意味着同时解码两张 268MB 的图，
+  // 内存尖峰正是「加载时整机卡」的来源。宁可翻页时慢一点，也不要卡系统。
 
 
   const getNextIndex = useCallback((current: number, total: number, random: boolean) => {
@@ -1607,8 +1592,10 @@ function FullView({
       ) : (
         <img
           ref={imgRef}
-          // 只用显示层（Rust 侧限流解码的降采样图）。GIF 走原逻辑。
-          src={isCurrentGif ? gifDataUrl || currentUrl : displaySrc}
+          // **原图直出**：与系统图片查看器（Loupe）对齐 —— 解码交给 WebKit 的
+          // WebProcess（独立进程），GTK 主循环不被占用；代价是内存（8192² ≈ 268MB）。
+          // 这是刻意的取舍：清晰度不妥协，用内存换稳定与简单。
+          src={isCurrentGif ? gifDataUrl || currentUrl : currentUrl}
           alt={`${currentIndex + 1}/${imgUrls.length}`}
           key={currentIndex}
           onError={() => setImgError(true)}
@@ -1635,6 +1622,8 @@ function FullView({
         {/* Tile 金字塔层：瓦片就绪后盖在降采样显示层之上（更清晰，且可任意缩放）。
             底层始终是 2560px 降采样显示层，所以瓦片生成期间也有内容、也不会卡。
             pointer-events-none：避免这层拦截点击（点击用于切换工具栏 / 翻页）。 */}
+        {/* 瓦片层已停用：原图直出后不再需要（保留实现，将来若要支持
+            「原图也放不下」的超大图再启用）。
         {tilesEnabled && !isCurrentGif && currentPath && (
           <TileImage
             imagePath={currentPath}
@@ -1646,7 +1635,7 @@ function FullView({
             containerRef={containerRef}
             zoomStyle={zoomStyle}
           />
-        )}
+        )} */}
     </div>
   );
 }
