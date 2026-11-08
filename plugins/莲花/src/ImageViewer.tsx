@@ -126,6 +126,7 @@ function TileImage({
   zoomStyle,
   getBaseRect,
   containerRef,
+  onReady,
   onImageLoaded,
 }: {
   imagePath: string;
@@ -141,10 +142,14 @@ function TileImage({
   getBaseRect?: () => { left: number; top: number; width: number; height: number } | null;
   /** 与底层 <img> 完全相同的 transform，保证两层对齐 */
   zoomStyle: React.CSSProperties;
+  /** 首批瓦片已渲染 —— 父级据此隐藏底层 <img>（避免两个大图层叠加合成） */
+  onReady?: () => void;
   onImageLoaded?: (size: { width: number; height: number }) => void;
 }) {
   const [info, setInfo] = useState<TilesInfo | null>(null);
   const [failed, setFailed] = useState(false);
+  /** 已上报过 ready（只报一次） */
+  const readyRef = useRef(false);
 
   // 懒生成瓦片（后端限流解码 + 磁盘缓存，重复调用直接命中）
   useEffect(() => {
@@ -318,7 +323,15 @@ function TileImage({
             transformOrigin: '0 0',
           }}
         >
-          <TileGrid tiles={tiles} tileSize={info.tile_size} />
+          <TileGrid
+        tiles={tiles}
+        tileSize={info.tile_size}
+        onFirstLoad={() => {
+          if (readyRef.current) return;
+          readyRef.current = true;
+          onReady?.();
+        }}
+      />
         </div>
       </div>
     </div>
@@ -336,9 +349,11 @@ function TileImage({
 const TileGrid = React.memo(function TileGrid({
   tiles,
   tileSize,
+  onFirstLoad,
 }: {
   tiles: { url: string; left: number; top: number }[];
   tileSize: number;
+  onFirstLoad?: () => void;
 }) {
   return (
     <>
@@ -348,6 +363,7 @@ const TileGrid = React.memo(function TileGrid({
           src={t.url}
           alt=""
           draggable={false}
+          onLoad={i === 0 ? onFirstLoad : undefined}
           className="absolute select-none"
           style={{ left: t.left, top: t.top, width: tileSize, height: tileSize }}
         />
@@ -1481,6 +1497,16 @@ function FullView({
   const dragRef = useRef<{ x: number; y: number; button: number } | null>(null);
   const [dragging, setDragging] = useState(false);
   const [imgError, setImgError] = useState(false);
+  /** 瓦片层首批渲染完成 —— 完成后隐藏底层 <img>，避免两个大图层叠加合成 */
+  const [tilesReady, setTilesReady] = useState(false);
+  /** 瓦片开关（localStorage 'image.tiles' = '0' 可关闭，用于 A/B 对比） */
+  const tilesEnabled = useMemo(() => {
+    try {
+      return localStorage.getItem('image.tiles') !== '0';
+    } catch {
+      return true;
+    }
+  }, []);
   // 结束拖动必须幂等且不依赖 pointerup 一定落在覆盖层上：
   // WebView2 里右键/中键的 pointerup 偶尔会被系统吞掉，只清状态不够，会在松开后继续拖。
   const endDrag = useCallback(() => {
@@ -1508,6 +1534,7 @@ function FullView({
 
   useEffect(() => {
     setImgError(false);
+    setTilesReady(false);
     setGifDataUrl(null);
     if (isCurrentGif && currentPath) {
       let cancelled = false;
@@ -1593,7 +1620,14 @@ function FullView({
             });
           }}
           className="max-w-full max-h-full object-contain select-none"
-          style={{ opacity: 0, transition: 'opacity 0.15s ease', ...zoomStyle }}
+          style={{
+            // 瓦片就绪后彻底不渲染：opacity:0 仍会占一个合成层（继续吃 GPU 合成），
+            // display:none 才真正退出渲染树。两层同时合成是「缩放卡」的一大来源。
+            display: tilesEnabled && tilesReady ? 'none' : undefined,
+            opacity: 0,
+            transition: 'opacity 0.15s ease',
+            ...zoomStyle,
+          }}
           decoding="async"
           draggable={false}
         />
@@ -1601,9 +1635,10 @@ function FullView({
         {/* Tile 金字塔层：瓦片就绪后盖在降采样显示层之上（更清晰，且可任意缩放）。
             底层始终是 2560px 降采样显示层，所以瓦片生成期间也有内容、也不会卡。
             pointer-events-none：避免这层拦截点击（点击用于切换工具栏 / 翻页）。 */}
-        {!isCurrentGif && currentPath && (
+        {tilesEnabled && !isCurrentGif && currentPath && (
           <TileImage
             imagePath={currentPath}
+            onReady={() => setTilesReady(true)}
             zoomScale={zoomScale}
             getBaseRect={getBaseRectProp}
             cameraX={cameraX}
