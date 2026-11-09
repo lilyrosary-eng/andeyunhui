@@ -118,7 +118,17 @@ export function BrowserPanel({ platform }: Props) {
   }, [platform.id, openAt]);
 
   const focusBrowser = () => {
-    void hostApi.invoke('browser_focus').catch((e: unknown) => setError(String(e)));
+    void hostApi.invoke('browser_focus').catch((e: unknown) => {
+      // 窗口可能已被用户用系统的关闭按钮关掉：把状态复位，让按钮回到「打开」
+      const msg = typeof e === 'string' ? e : (e as any)?.message || String(e);
+      if (msg.includes('尚未打开')) {
+        setWindowOpen(false);
+        setCurrent('');
+        setNotice('浏览器窗口已关闭。点「重新加载」可重新打开。');
+      } else {
+        setError(msg);
+      }
+    });
   };
 
   const closeBrowser = () => {
