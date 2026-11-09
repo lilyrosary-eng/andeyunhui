@@ -1086,7 +1086,11 @@ fn main() {
             // 后台启动音频频谱采集（轻量级：256KB 栈 + 10ms 轮询 + 1024 点 FFT；
             // 无前端监听时自动进入休眠，仅在 musicPlayer 订阅后恢复采集）
             // 失败不阻塞启动，频谱功能自动降级为伪律动
-            #[cfg(windows)]
+            //
+            // **不再按平台门控**：原来这里套了 #[cfg(windows)]，导致 Linux 上
+            // 采集线程从不启动 —— 即使 pal/audio_spectrum.rs 已经用 PipeWire
+            // 实现了真实采集（2026-11-09）。前端只调 spectrum_set_listener
+            // （纯计数），没有别的地方会调 spectrum_start，所以必须在这里自动起。
             {
                 let spectrum_app = app.handle().clone();
                 tauri::async_runtime::spawn(async move {

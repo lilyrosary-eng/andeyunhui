@@ -84,13 +84,36 @@ pub fn get_spectrum() -> Vec<u8> {
 /// `pw-record --target` 接受节点名或 id。优先用**名字**（id 会随重启变化）。
 /// 解析 `pw-dump` 的 JSON（项目已有 serde_json，无需额外依赖）。
 fn find_sink_target() -> Option<String> {
+    // **优先读系统默认 sink**：`pw-metadata -n default` 会输出
+    //   update: id:0 key:'default.audio.sink' value:'{"name":"...Headphones__sink"}' ...
+    // 不能简单取第一个 Audio/Sink —— 本机有 HDMI1/2/3 + Headphones 四个，
+    // 第一个是 HDMI3，抓它会一直静音（用户实际输出在 Headphones）。
+    if let Ok(out) = Command::new("pw-metadata").args(["-n", "default"]).output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if !line.contains("default.audio.sink") {
+                continue;
+            }
+            // 从 value:'{"name":"XXX"}' 里抠出 name
+            if let Some(pos) = line.find("\"name\":\"") {
+                let rest = &line[pos + 8..];
+                if let Some(end) = rest.find('"') {
+                    let name = &rest[..end];
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // 回退：取第一个 Audio/Sink
     let out = Command::new("pw-dump").output().ok()?;
     if !out.status.success() {
         return None;
     }
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     let arr = json.as_array()?;
-
     for obj in arr {
         let props = match obj.get("info").and_then(|i| i.get("props")) {
             Some(p) => p,
@@ -129,7 +152,10 @@ fn spectrum_loop(app: tauri::AppHandle) {
             &CHANNELS.to_string(),
             "--target",
             &target,
-            "/dev/stdout",
+            // `-` = stdout（pw-record 明确支持 `[<文件>|-]`）。
+            // 之前写 /dev/stdout 会被 pw-record 当作普通文件重新 open，
+            // 拿不到 Stdio::piped() 的管道 ⇒ 立刻 EOF ⇒ 采集线程秒退。
+            "-",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
