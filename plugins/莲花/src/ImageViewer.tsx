@@ -118,91 +118,6 @@ interface TilesInfo {
  * 每块 512² 解码后约 0.75MB ⇒ 整层约 190MB 偏大，因此**只取当前缩放
  * 需要的层**，且优先用较小层。后续可加视口裁剪进一步降内存。
  */
-// ===================== 模块级瓦片缓存（跨图片共享）=====================
-//
-// 需求（用户 2026-11-09 明确）：**一次浏览里所有大图的瓦片都留着**，
-// 只有在**切到别的模块**时才清，且保留当时正在看的那张；
-// 小图（≤2560²）本来就不走瓦片，天然不进缓存。
-//
-// 为什么必须放到模块级：`TileImage` 在换图时是**同一个组件实例**（props 变、不重挂），
-// 所以原来放在组件内的 Map 一旦按图清理就会白丢；而放组件内又跨不了图。
-//
-// 内存账（512² RGBA = 1MiB/块）：
-//   L2 一层 16 块 ≈ 16MB，L3 一层 64 块 ≈ 64MB，8192² 全金字塔 341 块 ≈ 341MB。
-//   所以"全留"必须有预算兜底：默认 384MB，可用 localStorage['image.cacheMB'] 改。
-//   超预算时按**整张图**（整个瓦片目录）淘汰最久未用的那张，避免留下碎块。
-type TileStoreEntry = { im: HTMLImageElement; bytes: number; dir: string; used: number };
-const tileStore = new Map<string, TileStoreEntry>();
-let tileStoreBytes = 0;
-/** 最近真正绘制过的瓦片目录 —— 切模块时按它保留当前这张 */
-let lastActiveDir = '';
-
-function tileCacheBudget(): number {
-  try {
-    const mb = Number(localStorage.getItem('image.cacheMB'));
-    if (Number.isFinite(mb) && mb > 0) return mb * 1048576;
-  } catch {
-    /* localStorage 不可用时用默认值 */
-  }
-  return 384 * 1048576;
-}
-
-/** `…/tiles/<hash>/L2/3_4.png` → `…/tiles/<hash>` */
-function dirOfTileUrl(url: string): string {
-  const i = url.lastIndexOf('/L');
-  return i > 0 ? url.slice(0, i) : url;
-}
-
-/** 切模块：只留 keepDir，其余整张图丢掉。返回释放字节数。 */
-function pruneTileStore(keepDir: string): number {
-  let freed = 0;
-  for (const [url, e] of tileStore) {
-    if (keepDir && e.dir === keepDir) continue;
-    tileStore.delete(url);
-    tileStoreBytes -= e.bytes;
-    freed += e.bytes;
-  }
-  if (freed > 0) {
-    console.info(
-      `[莲花/tiles] 切模块：清掉 ${(freed / 1048576).toFixed(1)}MB，`
-      + `保留当前图 ${(tileStoreBytes / 1048576).toFixed(1)}MB / ${tileStore.size} 块`,
-    );
-  }
-  return freed;
-}
-
-/** 超预算：按整目录淘汰最久未用的（protectDir 不淘汰）。 */
-function evictTileStore(protectDir: string): void {
-  const budget = tileCacheBudget();
-  if (tileStoreBytes <= budget) return;
-  const dirs = new Map<string, { bytes: number; used: number }>();
-  for (const e of tileStore.values()) {
-    const d = dirs.get(e.dir) ?? { bytes: 0, used: 0 };
-    d.bytes += e.bytes;
-    if (e.used > d.used) d.used = e.used;
-    dirs.set(e.dir, d);
-  }
-  const order = [...dirs.entries()]
-    .filter(([d]) => d !== protectDir)
-    .sort((a, b) => a[1].used - b[1].used);
-  let freed = 0;
-  for (const [d] of order) {
-    if (tileStoreBytes <= budget) break;
-    for (const [url, e] of tileStore) {
-      if (e.dir !== d) continue;
-      tileStore.delete(url);
-      tileStoreBytes -= e.bytes;
-      freed += e.bytes;
-    }
-  }
-  if (freed > 0) {
-    console.info(
-      `[莲花/tiles] 缓存超预算(${(budget / 1048576).toFixed(0)}MB)，`
-      + `淘汰最久未用的图 ${(freed / 1048576).toFixed(1)}MB，现 ${(tileStoreBytes / 1048576).toFixed(1)}MB`,
-    );
-  }
-}
-
 function TileImage({
   imagePath,
   zoomScale,
@@ -211,7 +126,6 @@ function TileImage({
   getBaseRect,
   containerRef,
   onReady,
-  onNeedsBase,
   onSmall,
   onFallback,
   onImageLoaded,
@@ -228,10 +142,8 @@ function TileImage({
    *  瓦片层必须用它来定尺寸，否则两层坐标系不一致（会看到两个图 / 尺寸错位） */
   getBaseRect?: () => { left: number; top: number; width: number; height: number } | null;
   /** 与底层 <img> 完全相同的 transform，保证两层对齐 */
-  /** 视口内瓦片全部就绪 —— 父级据此隐藏底层 <img>（避免两个大图层叠加合成） */
+  /** 首批瓦片已渲染 —— 父级据此隐藏底层 <img>（避免两个大图层叠加合成） */
   onReady?: () => void;
-  /** 视口内瓦片又不够了（平移进未加载区）—— 父级据此把底图放回来，别露白 */
-  onNeedsBase?: () => void;
   /** 这张图不需要瓦片（尺寸够小）—— 父级改用原图 <img> */
   onSmall?: () => void;
   /** 瓦片不可用 —— 父级改用 200px 缩略图兜底 */
@@ -405,11 +317,6 @@ function TileImage({
     return null; // 仍在加载中，不是失败
   }
   const lv = info.levels[levelIdx];
-  // 瓦片 URL 基址（= safeFileSrc(info.dir)）：缓存按它归类，
-  // 必须和 tiles 里的 url 前缀一致，否则 dirOfTileUrl 归不到同一张图。
-  const dirUrl = safeFileSrc(info.dir);
-  // 下一（更细）层：用来做视口范围内的空闲预取
-  const nextLv = info.levels[levelIdx + 1];
   // 最小层的瓦片：通常 1~2 块、几百 KB，用来在选层瓦片到达前先显示内容。
   const l0 = info.levels[0];
   const dirUrl0 = safeFileSrc(info.dir);
@@ -442,22 +349,10 @@ function TileImage({
       zoomScale={zoomScale}
       cameraX={cameraX}
       cameraY={cameraY}
-      cacheKey={dirUrl}
-      underlayCount={l0Tiles.length}
-      prefetchDir={dirUrl || undefined}
-      prefetchLevel={nextLv ? levelIdx + 1 : undefined}
-      prefetchCols={nextLv?.cols}
-      prefetchRows={nextLv?.rows}
-      prefetchRatio={nextLv ? nextLv.width / Math.max(1, lv.width) : undefined}
       onReady={() => {
         if (readyRef.current) return;
         readyRef.current = true;
         onReady?.();
-      }}
-      onNeedsBase={() => {
-        if (!readyRef.current) return;
-        readyRef.current = false;
-        onNeedsBase?.();
       }}
     />
   );
@@ -488,15 +383,7 @@ function TileCanvas({
   zoomScale,
   cameraX,
   cameraY,
-  cacheKey,
-  underlayCount = 0,
-  prefetchDir,
-  prefetchLevel,
-  prefetchCols,
-  prefetchRows,
-  prefetchRatio,
   onReady,
-  onNeedsBase,
 }: {
   tiles: { url: string; left: number; top: number }[];
   lv: { width: number; height: number };
@@ -504,49 +391,14 @@ function TileCanvas({
   zoomScale: number;
   cameraX: number;
   cameraY: number;
-  /** 瓦片目录（= info.dir）。变化即「换了图」⇒ 必须清缓存，否则上一张的
-   *  已解码位图会一直躺在 Map 里（组件实例在换图时是复用的，不会重挂） */
-  cacheKey: string;
-  /** tiles 数组前多少块是 L0 打底块（不算进"视口就绪"判定） */
-  underlayCount?: number;
-  /** 下一（更细）层的预取参数；缺一项就不预取 */
-  prefetchDir?: string;
-  prefetchLevel?: number;
-  prefetchCols?: number;
-  prefetchRows?: number;
-  /** 下一层 / 当前层 的宽度比（把视口坐标换算到下一层） */
-  prefetchRatio?: number;
   onReady?: () => void;
-  /** 可见区域又缺瓦片了（平移进未加载区）⇒ 请把底图放回来，别露白 */
-  onNeedsBase?: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  /**
-   * 已解码瓦片缓存。
-   *
-   * 之前是 `Map<string, HTMLImageElement>`，两个问题：
-   *   ① **没有上限**：同一张图切层会累积 L0..L4 全部块（8192² 全金字塔
-   *      341 块 × 512²×4B = 341MB），换图也不清（组件实例复用）；
-   *   ② **只有第一块挂了 onload**（见下），后面的块加载完不触发重绘
-   *      ⇒ 画面停在"第一块 + 底图"，你得平移一下才把剩下的画出来
-   *      —— 这才是"瓦片一块块/一圈圈加载"的真正原因（不是网络慢，是没重画）。
-   * 现在：带字节记账 + 换图清空 + 超限淘汰旧层。
-   */
-  /** 最近一帧的几何（供空闲预取换算视口在下一层的坐标，不必重算） */
-  const geomRef = useRef<{ sf: number; originX: number; originY: number; cw: number; ch: number } | null>(null);
-  /** 已预取过的「图+层」，避免每帧重复排期 */
-  const prefetchedRef = useRef<Set<string>>(new Set());
+  const cacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const readyRef = useRef(false);
+  /** 唯一的重绘入口：所有触发（props 变化 / 某块瓦片解码完成）都走它，rAF 合并 */
   const drawRef = useRef<() => void>(() => {});
   const rafRef = useRef<number | null>(null);
-  const onReadyRef = useRef(onReady);
-  onReadyRef.current = onReady;
-  const onNeedsBaseRef = useRef(onNeedsBase);
-  onNeedsBaseRef.current = onNeedsBase;
-  /** 由下方的预取 effect 填充；draw 里只负责"现在可以预取了"这个信号 */
-  const schedulePrefetchRef = useRef<(() => void) | null>(null);
-
-  /** 所有重绘都走这里：rAF 合并成每帧最多一次（缩放/平移时每帧会触发多次）。 */
   const scheduleDraw = useCallback(() => {
     if (rafRef.current != null) return;
     rafRef.current = requestAnimationFrame(() => {
@@ -580,91 +432,45 @@ function TileCanvas({
       return false;
     }
   }, []);
-  // 换图：缓存**留着**（一次浏览全部保留），但"就绪"状态必须重置 ——
-  // 否则上一张的 ready 会带过来，新图在第一块瓦片到达前就被撤掉底图（白屏一下）。
-  useEffect(() => {
-    readyRef.current = false;
-  }, [cacheKey]);
-
-  // 换图：缓存**留着**（一次浏览全部保留），但"就绪"状态必须重置 ——
-  // 否则上一张的 ready 会带过来，新图在第一块瓦片到达前就被撤掉底图（白屏一下）。
-  useEffect(() => {
-    readyRef.current = false;
-  }, [cacheKey]);
-
-  // **切模块才清缓存**（宿主的模块是 display:none 保活，不会卸载 ⇒ 用 IntersectionObserver 感知）。
-  //
-  // 用户 2026-11-09 明确要求：一次浏览里所有大图都留着，切模块时清、但保留当前这张。
-  // 所以这里**不按换图清**（之前的 cacheKey 清理是错的，等于每翻一张就白丢）。
-  // 迟滞 1s：切模块时会有一瞬不可见，立刻清会导致来回切时反复重解码。
-  useEffect(() => {
-    const cv = canvasRef.current;
-    if (!cv || typeof IntersectionObserver === 'undefined') return;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const io = new IntersectionObserver((entries) => {
-      const visible = entries.some((e) => e.isIntersecting);
-      if (visible) {
-        if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
-        return;
-      }
-      if (timer) return;
-      timer = setTimeout(() => {
-        timer = null;
-        pruneTileStore(lastActiveDir);
-      }, 1000);
-    }, { threshold: 0 });
-    io.observe(cv);
-    return () => {
-      io.disconnect();
-      if (timer) clearTimeout(timer);
-    };
-  }, []);
-
-  // 载入瓦片：**每块都挂 onload → 就绪即重绘**（缓存命中则直接重绘）
   useEffect(() => {
     let alive = true;
-    let added = 0;
-    const now = performance.now();
     for (const t of tiles) {
-      const hit = tileStore.get(t.url);
-      if (hit) {
-        hit.used = now;
-        continue;
-      }
+      if (cacheRef.current.has(t.url)) continue;
       const im = new Image();
       im.decoding = 'async';
-      const entry: TileStoreEntry = { im, bytes: 0, dir: dirOfTileUrl(t.url), used: now };
+      cacheRef.current.set(t.url, im);
+      // **每一块都要在解码完成后触发一次重绘**（2026-11-09）。
+      // 之前只给"第一块"挂 onload，其余块解码完成后没有任何重绘触发，
+      // 画面要等你平移/缩放一次才把已经加载好的瓦片画出来 —— 表现为"一块块/一圈圈补"。
       im.onload = () => {
         if (!alive) return;
-        // 记账（512² RGBA ≈ 1MiB）：没有这个数就不知道缓存吃多少内存
-        entry.bytes = im.naturalWidth * im.naturalHeight * 4;
-        tileStoreBytes += entry.bytes;
         scheduleDraw();
+        if (!readyRef.current) {
+          readyRef.current = true;
+          onReady?.();
+        }
       };
       im.onerror = () => {
         if (!alive) return;
         console.warn('[莲花/tiles] 瓦片加载失败:', t.url);
         scheduleDraw();
       };
+      // **先挂 handler 再给 src**：图在小缓存里时个别内核会同步完成，
+      // 先给 src 有概率漏掉 load 事件（那就是"永远不重绘"）。
       im.src = t.url;
-      tileStore.set(t.url, entry);
-      added += 1;
     }
-    if (added > 0) evictTileStore(dirOfTileUrl(tiles[0]?.url ?? ''));
     return () => {
       alive = false;
     };
-  }, [tiles, scheduleDraw]);
+  }, [tiles, onReady, scheduleDraw]);
 
   const draw = useCallback(() => {
     const cv = canvasRef.current;
     if (!cv || !base) return;
-    const __t0 = performance.now();
-    const ctx = cv.getContext('2d');
-    if (!ctx) return;
+    {
+      const __t0 = performance.now();
+      const ctx = cv.getContext('2d');
+      if (!ctx) return;
 
     const dpr = window.devicePixelRatio || 1;
     const cw = cv.clientWidth;
@@ -688,31 +494,15 @@ function TileCanvas({
     const originX = base.left + cameraX - cr.left;
     const originY = base.top + cameraY - cr.top;
 
-    lastActiveDir = cacheKey;
-    geomRef.current = { sf, originX, originY, cw, ch };
-    const nowTs = performance.now();
     let drawn = 0;
-    // 视口内瓦片计数：用来决定「什么时候可以撤底图」与「什么时候要放回来」。
-    // 只统计当前层，**排除 L0 打底块**（它只是一整张缩略图，早就 ready，
-    // 把它算进来会让底图在真正细节到达前就被撤掉 —— 那正是"一块块补"的观感来源）。
-    let visible = 0;
-    let visibleReady = 0;
-    for (let ti = 0; ti < tiles.length; ti++) {
-      const t = tiles[ti];
-      const entry = tileStore.get(t.url);
-      const im = entry?.im;
-      const isReady = !!(im && im.complete && im.naturalWidth > 0);
-      // **按下标判定打底块**：levelIdx=0 时当前层本身就叫 L0，
-      // 按 URL 判断会把整层都当打底块 ⇒ visible 恒 0 ⇒ 底图永不撤（画面糊）
-      const isUnderlay = ti < underlayCount;
-      // 未解码时用标称边长占位（瓦片是 512；边缘块略小，只影响 1px 级判断）
-      const nw = isReady ? im!.naturalWidth : 512;
-      const nh = isReady ? im!.naturalHeight : 512;
+    for (const t of tiles) {
+      const im = cacheRef.current.get(t.url);
+      if (!im || !im.complete || im.naturalWidth === 0) continue;
 
       const dx = originX + t.left * sf;
       const dy = originY + t.top * sf;
-      const dw = nw * sf;
-      const dh = nh * sf;
+      const dw = im.naturalWidth * sf;
+      const dh = im.naturalHeight * sf;
       if (dx + dw < 0 || dy + dh < 0 || dx > cw || dy > ch) continue;
 
       // **目标矩形按整数边界对齐**：相邻瓦片共享同一条整数边界，
@@ -734,144 +524,48 @@ function TileCanvas({
       const vy1 = Math.min(ch, y1);
       if (vx1 <= vx0 || vy1 <= vy0) continue;
 
-      if (!isUnderlay) {
-        visible += 1;
-        if (isReady) visibleReady += 1;
-      }
-      if (!isReady) continue;
-
       // 源矩形按同一比例裁剪（保持一一对应）
-      const kx = nw / (x1 - x0);
-      const ky = nh / (y1 - y0);
+      const kx = im.naturalWidth / (x1 - x0);
+      const ky = im.naturalHeight / (y1 - y0);
       const sx0 = (vx0 - x0) * kx;
       const sy0 = (vy0 - y0) * ky;
       const sw = (vx1 - vx0) * kx;
       const sh = (vy1 - vy0) * ky;
 
-      ctx.drawImage(im!, sx0, sy0, sw, sh, vx0, vy0, vx1 - vx0, vy1 - vy0);
-      if (entry) entry.used = nowTs;
+      ctx.drawImage(im, sx0, sy0, sw, sh, vx0, vy0, vx1 - vx0, vy1 - vy0);
       drawn += 1;
     }
 
-    // —— 底图（displaySrc 那张 2560px）什么时候撤/放 ——
-    // 撤：视口内当前层**全部**就绪。放：掉到 60% 以下（ hysteresis，避免来回闪）。
-    if (visible > 0) {
-      if (!readyRef.current && visibleReady === visible) {
-        readyRef.current = true;
-        onReadyRef.current?.();
-      } else if (readyRef.current && visibleReady < visible * 0.6) {
-        readyRef.current = false;
-        onNeedsBaseRef.current?.();
+      // —— 绘制耗时落账（超阈值显式打印，便于抓"哪一帧慢"）——
+      const ms = performance.now() - __t0;
+      const st = perfRef.current;
+      st.frames += 1;
+      st.totalMs += ms;
+      st.lastTiles = drawn;
+      if (ms > st.peakMs) st.peakMs = ms;
+      if (ms > 24) st.slow += 1;
+      const now = performance.now();
+      if (perfLog && ms > 24 && now - st.lastLog > 500) {
+        st.lastLog = now;
+        console.info(
+          `[莲花/perf] 慢帧 ${ms.toFixed(1)}ms 瓦片=${drawn}/${tiles.length} `
+          + `dpr=${dpr} sf=${sf.toFixed(3)} 画布=${cw}x${ch} `
+          + `累计 ${st.frames} 帧/慢 ${st.slow}/峰值 ${st.peakMs.toFixed(1)}ms`,
+        );
       }
+      // 供随时取一份：控制台执行 __imgPerf()
+      (window as unknown as Record<string, unknown>).__imgPerf = () => ({
+        frames: st.frames,
+        slowFrames: st.slow,
+        avgMs: st.frames ? +(st.totalMs / st.frames).toFixed(2) : 0,
+        peakMs: +st.peakMs.toFixed(2),
+        lastTiles: st.lastTiles,
+        dpr: window.devicePixelRatio || 1,
+      });
     }
-    // 当前视口已经画满 ⇒ 可以偷偷准备下一层了（真正加载在 scroll 结束后）
-    if (readyRef.current) schedulePrefetchRef.current?.();
-
-    // —— 绘制耗时落账（超阈值显式打印，便于抓"哪一帧慢"）——
-    const ms = performance.now() - __t0;
-    const st = perfRef.current;
-    st.frames += 1;
-    st.totalMs += ms;
-    st.lastTiles = drawn;
-    if (ms > st.peakMs) st.peakMs = ms;
-    if (ms > 24) st.slow += 1;
-    const now = performance.now();
-    if (perfLog && ms > 24 && now - st.lastLog > 500) {
-      st.lastLog = now;
-      console.info(
-        `[莲花/perf] 慢帧 ${ms.toFixed(1)}ms 瓦片=${drawn}/${tiles.length} `
-        + `可见就绪=${visibleReady}/${visible} dpr=${dpr} sf=${sf.toFixed(3)} 画布=${cw}x${ch} `
-        + `累计 ${st.frames} 帧/慢 ${st.slow}/峰值 ${st.peakMs.toFixed(1)}ms`,
-      );
-    }
-    // 供随时取一份：控制台执行 __imgPerf()
-    (window as unknown as Record<string, unknown>).__imgPerf = () => ({
-      frames: st.frames,
-      slowFrames: st.slow,
-      avgMs: st.frames ? +(st.totalMs / st.frames).toFixed(2) : 0,
-      peakMs: +st.peakMs.toFixed(2),
-      lastTiles: st.lastTiles,
-      // 全局（跨图片）缓存规模：一次浏览里所有大图的瓦片都在这里，切模块才清
-      cachedTiles: tileStore.size,
-      cachedMB: +(tileStoreBytes / 1048576).toFixed(1),
-      cacheBudgetMB: +(tileCacheBudget() / 1048576).toFixed(0),
-      dpr: window.devicePixelRatio || 1,
-    });
   }, [tiles, lv, base, zoomScale, cameraX, cameraY, perfLog]);
 
-  /**
-   * **相邻层预取**（用户要求：可以做，但不能阻塞、不能感到卡）。
-   *
-   * 做法：当前视口全部画满之后，隔 400ms（让缩放/平移的手先停下来），
-   * 用 requestIdleCallback 把「下一（更细）层」里**视口覆盖的那几块**提前解码好。
-   * 只看视口 ±1 格，最多 16 块（≈16MB），所以不会像"整层预取"那样炸内存/吃带宽。
-   * 预取只填 tileStore，不触发绘制 —— 真正切层时缓存命中，直接画。
-   */
-  useEffect(() => {
-    if (!prefetchDir || prefetchLevel == null || !prefetchCols || !prefetchRows || !prefetchRatio) {
-      schedulePrefetchRef.current = null;
-      return;
-    }
-    const key = `${prefetchDir}#${prefetchLevel}`;
-    const timer = { id: null as ReturnType<typeof setTimeout> | null };
-    schedulePrefetchRef.current = () => {
-      if (prefetchedRef.current.has(key) || timer.id != null) return;
-      timer.id = setTimeout(() => {
-        timer.id = null;
-        if (prefetchedRef.current.has(key)) return;
-        const g = geomRef.current;
-        if (!g || g.sf <= 0) return;
-        // 快满预算就不预取（预取的目的是"更快"，不是把内存吃光）
-        if (tileStoreBytes > tileCacheBudget() * 0.8) return;
-        prefetchedRef.current.add(key);
-
-        const T = 512;
-        const x0 = (-g.originX / g.sf) * prefetchRatio!;
-        const y0 = (-g.originY / g.sf) * prefetchRatio!;
-        const x1 = ((g.cw - g.originX) / g.sf) * prefetchRatio!;
-        const y1 = ((g.ch - g.originY) / g.sf) * prefetchRatio!;
-        const c0 = Math.max(0, Math.floor(x0 / T) - 1);
-        const c1 = Math.min(prefetchCols! - 1, Math.floor(x1 / T) + 1);
-        const r0 = Math.max(0, Math.floor(y0 / T) - 1);
-        const r1 = Math.min(prefetchRows! - 1, Math.floor(y1 / T) + 1);
-
-        const urls: string[] = [];
-        for (let r = r0; r <= r1 && urls.length < 16; r++) {
-          for (let c = c0; c <= c1 && urls.length < 16; c++) {
-            urls.push(`${prefetchDir}/L${prefetchLevel}/${r}_${c}.png`);
-          }
-        }
-        if (!urls.length) return;
-        const load = () => {
-          let n = 0;
-          for (const url of urls) {
-            if (tileStore.has(url)) continue;
-            const im = new Image();
-            im.decoding = 'async';
-            const e: TileStoreEntry = { im, bytes: 0, dir: prefetchDir, used: performance.now() };
-            im.onload = () => {
-              e.bytes = im.naturalWidth * im.naturalHeight * 4;
-              tileStoreBytes += e.bytes;
-            };
-            im.src = url;
-            tileStore.set(url, e);
-            n += 1;
-          }
-          // 只在真预取了东西时打一行，方便在日志里确认"预取有没有跑"
-          if (n > 0) console.info(`[莲花/tiles] 预取 L${prefetchLevel} ${n} 块（视口±1 格）`);
-        };
-        const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => void }).requestIdleCallback;
-        if (typeof ric === 'function') ric(load, { timeout: 1500 });
-        else setTimeout(load, 200);
-      }, 400);
-    };
-    return () => {
-      schedulePrefetchRef.current = null;
-      if (timer.id != null) clearTimeout(timer.id);
-    };
-  }, [prefetchDir, prefetchLevel, prefetchCols, prefetchRows, prefetchRatio]);
-
-  // 每次 props 变化都重画（经 rAF 合并）
+  // props 变化 → 重画（rAF 合并）
   drawRef.current = draw;
   useEffect(() => {
     scheduleDraw();
@@ -2110,7 +1804,6 @@ function FullView({
           <TileImage
             imagePath={currentPath}
             onReady={() => setTilesReady(true)}
-            onNeedsBase={() => setTilesReady(false)}
             onSmall={() => setSmallImage(true)}
             onFallback={() => {
               // **先查尺寸**：小图直接用原图（秒开、清晰），不要走 200px 兜底
