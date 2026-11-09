@@ -146,23 +146,17 @@ pub fn init_logger(app_data: &std::path::Path) -> Result<(), String> {
         .open(&session_path)
         .map_err(|e| format!("重新打开日志文件失败: {}", e))?;
 
-    // panic hook：release profile 用 panic="abort"，默认只有 stderr 输出（桌面启动时基本丢失）。
-    // 装上钩子先把消息 + 位置写进会话日志，再让 abort 继续 —— 否则崩溃现场永远查不到。
-    std::panic::set_hook(Box::new(|info| {
-        let loc = info
-            .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "<unknown>".to_string());
-        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
-            (*s).to_string()
-        } else if let Some(s) = info.payload().downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "<non-string panic>".to_string()
-        };
-        log::error!("[panic] {msg} @ {loc}");
-        eprintln!("[panic] {msg} @ {loc}");
-    }));
+    // panic hook **不在这里装**（2026-11-09 血案）。
+    //
+    // 原来这里有一次 `std::panic::set_hook`，而 `set_hook` 是全局唯一槽位、后装者赢：
+    // main.rs 里那个带 `Backtrace::force_capture()` 的 hook 会被这里顶掉，
+    // 于是两次 `rc.rs:3743`（Rc 计数归零后又被 clone）崩溃都只留下
+    // `[panic] ... @ rc.rs:3743` 一行、没有栈 —— 排查等于原地踏步。
+    //
+    // 现在统一由 `main.rs` 装唯一一个 hook，它自己负责：
+    //   ① eprintln（终端） ② 独立 panic.log（不依赖日志系统就写得了）
+    //   ③ 若日志系统已起来，再 log::error! 进会话日志（时间线统一）
+    // 这里只留一句提醒：**不要再往这个文件里加 set_hook**。
 
     // 设置全局状态
     {

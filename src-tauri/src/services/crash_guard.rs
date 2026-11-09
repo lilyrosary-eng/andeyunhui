@@ -34,6 +34,8 @@ mod imp {
         GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
     };
+    use winapi::um::processthreadsapi::GetCurrentThreadId;
+    use winapi::um::sysinfoapi::GetLocalTime;
     use winapi::um::winnt::EXCEPTION_POINTERS;
 
     /// `EXCEPTION_CONTINUE_SEARCH`（值为 0）。
@@ -74,6 +76,34 @@ mod imp {
             tmp[n] = HEX[(v & 0xF) as usize];
             v >>= 4;
             n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            if *offset < buf.len() {
+                buf[*offset] = tmp[n];
+                *offset += 1;
+            }
+        }
+    }
+
+    /// 十进制写入（固定宽度左侧补 0），不分配
+    fn write_dec(buf: &mut [u8], offset: &mut usize, v: u32, width: usize) {
+        let mut tmp = [0u8; 10];
+        let mut n = 0usize;
+        let mut x = v;
+        loop {
+            tmp[n] = b'0' + (x % 10) as u8;
+            x /= 10;
+            n += 1;
+            if x == 0 || n == 10 {
+                break;
+            }
+        }
+        for _ in n..width {
+            if *offset < buf.len() {
+                buf[*offset] = b'0';
+                *offset += 1;
+            }
         }
         while n > 0 {
             n -= 1;
@@ -143,9 +173,28 @@ mod imp {
             }
 
             // —— 组装一行（栈上缓冲，不分配堆）——
-            let mut buf = [0u8; 512];
+            let mut buf = [0u8; 768];
             let mut o = 0usize;
-            write_str(&mut buf, &mut o, b"[CRASH] code=0x");
+            // **时间戳**（2026-11-09 补）：上一版没时间，crash.log 里三条记录分不清
+            // 是哪次运行的 —— 而"和 session 日志对时"是排除巧合的唯一手段。
+            let mut st: winapi::um::minwinbase::SYSTEMTIME = std::mem::zeroed();
+            GetLocalTime(&mut st);
+            write_dec(&mut buf, &mut o, st.wYear as u32, 4);
+            write_str(&mut buf, &mut o, b"-");
+            write_dec(&mut buf, &mut o, st.wMonth as u32, 2);
+            write_str(&mut buf, &mut o, b"-");
+            write_dec(&mut buf, &mut o, st.wDay as u32, 2);
+            write_str(&mut buf, &mut o, b" ");
+            write_dec(&mut buf, &mut o, st.wHour as u32, 2);
+            write_str(&mut buf, &mut o, b":");
+            write_dec(&mut buf, &mut o, st.wMinute as u32, 2);
+            write_str(&mut buf, &mut o, b":");
+            write_dec(&mut buf, &mut o, st.wSecond as u32, 2);
+            write_str(&mut buf, &mut o, b".");
+            write_dec(&mut buf, &mut o, st.wMilliseconds as u32, 3);
+            write_str(&mut buf, &mut o, b" tid=");
+            write_dec(&mut buf, &mut o, GetCurrentThreadId(), 1);
+            write_str(&mut buf, &mut o, b" [CRASH] code=0x");
             write_hex(&mut buf, &mut o, code as u64);
             write_str(&mut buf, &mut o, b" addr=0x");
             write_hex(&mut buf, &mut o, addr as u64);

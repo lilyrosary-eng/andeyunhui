@@ -778,6 +778,12 @@ fn main() {
         );
         eprintln!("{text}");
 
+        // 若日志系统已经起来（setup 之后），同一份文本也进会话日志 ——
+        // 让崩溃与业务日志落在同一条时间线上，不用两个文件对时。
+        // catch_unwind：日志后端本身出问题（比如锁被同一线程持有）不能把 hook 也带崩。
+        let for_log = text.clone();
+        let _ = std::panic::catch_unwind(move || log::error!("{for_log}"));
+
         // **Windows 分支**（2026-11-09 修）：原来只认 $HOME/.local/share，
         // 而 GUI 启动的进程通常没有 HOME ⇒ panic 日志静默丢失，等于没有。
         // 改写到与业务日志同目录的 %APPDATA%\com.rosary.andengyuanhua\logs\panic.log。

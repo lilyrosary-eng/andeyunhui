@@ -182,7 +182,7 @@ windows = { version = "0.62", features = [
 drag = "2.1.1"
 winapi = { version = "0.3", features = ["winuser", "wingdi", "processthreadsapi", "shellscalingapi", "dwmapi", "winbase", "objbase", "combaseapi", "jobapi2", "objidl", "unknwnbase", "winerror", "ole2", "wtypes", "minwindef", "windef", "guiddef",
   # crash_guard：首轮异常取证需要 AddVectoredExceptionHandler / GetModuleHandleExW
-  "errhandlingapi", "libloaderapi", "winnt"] }
+  "errhandlingapi", "libloaderapi", "winnt", "sysinfoapi"] }
 windows-capture = "2.0"
 # WebView2 COM 透明窗：必须与 wry 内部 webview2-com 同版本（0.38），且实现 windows-core 0.61 的 Interface trait
 webview2-com-sys = "0.38"
