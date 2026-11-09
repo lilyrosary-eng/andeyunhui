@@ -327,118 +327,120 @@ pub fn set_overlay_transparent(webview: tauri::Webview, app: tauri::AppHandle) {
                 //    故动画档将 Notify 节流到 ~30fps（脉冲为 1.4s 慢动画，视觉无差），静态档(100ms)照常每次调。
                 // 间隔由 REPAINT_INTERVALS 按窗动态读取；轻量 CSS 动画（金点脉冲）在失焦窗口下
                 // 须把定时器提到 ~16ms（60fps）才能丝滑。
-                fn schedule(app: tauri::AppHandle, mut st: RepaintState) {
-                    let _ = app.run_on_main_thread({
-                        let app = app.clone();
-                        move || {
-                            // 第二重保险：销毁标志
-                            if REPAINT_STOP.lock().unwrap().remove(&st.label) {
-                                REPAINT_INTERVALS.lock().unwrap().remove(&st.label);
-                                return;
-                            }
-                            // 第三重保险（胶囊专防）：胶囊渲染进程失效（崩溃后 mark_dead）时立即停止重绘，
-                            // 杜绝在崩溃→窗口真正销毁（Destroyed 才置 REPAINT_STOP）的窗口期内，对已失效
-                            // controller 持续调用 SetIsVisible/Notify（穿越到已死 renderer → 0xcfffffff 宿主崩溃）。
-                            if st.label == "capsule" && !crate::services::window_manager::capsule_is_alive() {
-                                REPAINT_INTERVALS.lock().unwrap().remove(&st.label);
-                                REPAINT_STOP.lock().unwrap().remove(&st.label);
-                                return;
-                            }
-                            let t0 = std::time::Instant::now();
-                            let interval = REPAINT_INTERVALS
-                                .lock()
-                                .unwrap()
-                                .get(&st.label)
-                                .cloned()
-                                .unwrap_or(Duration::from_millis(100));
-                            // 暂停模式（interval==0）：收起态已静态化，不再持续 Notify，仅维持 rAF 暖机，
-                            // 屏幕停在最后一帧；内容变化由前端 present_overlay_now 按需上屏，避免与外部媒体
-                            // 抢 DWM 重定向呈现导致卡顿。非空值：动画档（≤30ms）节流 Notify 到 ~30fps。
-                            let paused = interval.is_zero();
-                            // DComp 窗走 DWM 常规合成、自动上屏，无需（且不应）再 Notify 分层窗。
-                            let dcomp = crate::dcomp_overlay::is_active(&st.label);
-                            let notify_due = !paused
-                                && !dcomp
-                                && (interval > Duration::from_millis(30)
-                                    || st.last_notify.elapsed() >= Duration::from_millis(33));
-                            // 第一重保险：with_webview 在 webview 已销毁时安全返回 Err，立即停止。
-                            // 控制器每帧重新取（不再跨线程持有裸 COM 指针），闭包仅捕获 Copy 的 notify_due，
-                            // 且闭包必须返回 ()（tauri::Webview::with_webview 的签名约束）。
-                            let repaint_res = st.webview.with_webview(move |raw| {
-                                if let Ok(ctrl) = raw.controller().cast::<ICoreWebView2Controller>() {
-                                    let _ = unsafe { ctrl.SetIsVisible(true) };
-                                    if notify_due {
-                                        unsafe {
-                                            let _ = ctrl.NotifyParentWindowPositionChanged();
-                                        }
-                                    }
-                                }
-                            });
-                            match repaint_res {
-                                Ok(()) => {
-                                    if probe_enabled() {
-                                        let ms = interval.as_millis() as u64;
-                                        let mut last = LAST_PROBE_RATE.lock().unwrap();
-                                        if last.get(&st.label).copied() != Some(ms) {
-                                            last.insert(st.label.clone(), ms);
-                                            eprintln!(
-                                                "[RUST-RATE] label={} interval_ms={} branch={}",
-                                                st.label,
-                                                ms,
-                                                if interval > Duration::from_millis(30) { "static" } else { "anim" }
-                                            );
-                                        }
-                                        let c = PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
-                                        if c % 200 == 0 {
-                                            eprintln!(
-                                                "[RUST-PROBE] label={} interval_ms={} branch={} visible=ok cb_us={}",
-                                                st.label,
-                                                ms,
-                                                if interval > Duration::from_millis(30) { "static" } else { "anim" },
-                                                t0.elapsed().as_micros()
-                                            );
-                                        }
-                                    }
-                                    if notify_due {
-                                        st.last_notify = std::time::Instant::now();
-                                    }
-                                    spawn_timer(app, st);
-                                }
-                                Err(_) => {
-                                    // webview 已销毁/不可达：停止常驻重绘，避免对已失效控制器持续调用。
-                                    REPAINT_INTERVALS.lock().unwrap().remove(&st.label);
-                                    REPAINT_STOP.lock().unwrap().remove(&st.label);
-                                }
-                            }
-                        }
-                    });
-                }
-                fn spawn_timer(app: tauri::AppHandle, st: RepaintState) {
-                    std::thread::spawn(move || {
-                        let interval = REPAINT_INTERVALS
+                // 常驻重绘循环：睡够间隔 → 判停 → with_webview 续命 → 读下一拍间隔。
+                //
+                // ★ 这里**刻意完全不碰 `AppHandle`**，这是修「跑一段时间必崩」的关键。
+                //   `AppHandle::clone()` 会一路克隆到 tao 的 `EventLoopRunnerShared<T>`，那是
+                //   **非原子**的 `Rc`。旧实现在每拍新建的后台线程里做 `app.clone()`（外加线程退出时
+                //   在后台 drop），与主线程对同一 `Rc` 的计数变更构成数据竞争：
+                //     · debug：`alloc/src/rc.rs:3743` 的 `assert_unchecked` 命中「强计数为 0」→ panic；
+                //     · release：计数错乱 → 提前释放 → use-after-free → 0xe06d7363 / 0x8001010d 崩溃。
+                //   由于重绘每 16~100ms 一拍，这个竞态的表现正是「运行一段时间后突然崩」。
+                //   现改为：
+                //     · 停止靠 REPAINT_STOP（WindowEvent::Destroyed 置位）+ webview 不可达；
+                //     · 派发用 `Webview::with_webview`（内部经 send_user_message 投递到主线程，
+                //       任意线程可调，且不会克隆 Rc）；
+                //     · `Webview` 自身是 `Arc` 包裹，跨线程持有/丢弃都是原子操作，安全。
+                //   顺带把「每拍新建一个线程」改成「一个长命线程」，避免 10~60 次/秒的线程创建开销。
+                fn spawn_timer(mut st: RepaintState) {
+                    std::thread::spawn(move || loop {
+                        let interval_before = REPAINT_INTERVALS
                             .lock()
                             .unwrap()
                             .get(&st.label)
                             .cloned()
                             .unwrap_or(Duration::from_millis(100));
                         // 暂停模式（interval==0）不以 0ms 自旋（会 100% 占 CPU），改为 250ms 低耗暖机。
-                        let sleep = if interval.is_zero() {
+                        std::thread::sleep(if interval_before.is_zero() {
                             Duration::from_millis(250)
                         } else {
-                            interval
-                        };
-                        std::thread::sleep(sleep);
-                        schedule(app, st);
+                            interval_before
+                        });
+
+                        // 第二重保险：销毁标志
+                        if REPAINT_STOP.lock().unwrap().remove(&st.label) {
+                            REPAINT_INTERVALS.lock().unwrap().remove(&st.label);
+                            return;
+                        }
+                        // 第三重保险（胶囊专防）：胶囊渲染进程失效（崩溃后 mark_dead）时立即停止重绘，
+                        // 杜绝在崩溃→窗口真正销毁（Destroyed 才置 REPAINT_STOP）的窗口期内，对已失效
+                        // controller 持续调用 SetIsVisible/Notify（穿越到已死 renderer → 0xcfffffff 宿主崩溃）。
+                        if st.label == "capsule" && !crate::services::window_manager::capsule_is_alive() {
+                            REPAINT_INTERVALS.lock().unwrap().remove(&st.label);
+                            REPAINT_STOP.lock().unwrap().remove(&st.label);
+                            return;
+                        }
+                        let t0 = std::time::Instant::now();
+                        let interval = REPAINT_INTERVALS
+                            .lock()
+                            .unwrap()
+                            .get(&st.label)
+                            .cloned()
+                            .unwrap_or(Duration::from_millis(100));
+                        // 暂停模式（interval==0）：收起态已静态化，不再持续 Notify，仅维持 rAF 暖机，
+                        // 屏幕停在最后一帧；内容变化由前端 present_overlay_now 按需上屏，避免与外部媒体
+                        // 抢 DWM 重定向呈现导致卡顿。非空值：动画档（≤30ms）节流 Notify 到 ~30fps。
+                        let paused = interval.is_zero();
+                        // DComp 窗走 DWM 常规合成、自动上屏，无需（且不应）再 Notify 分层窗。
+                        let dcomp = crate::dcomp_overlay::is_active(&st.label);
+                        let notify_due = !paused
+                            && !dcomp
+                            && (interval > Duration::from_millis(30)
+                                || st.last_notify.elapsed() >= Duration::from_millis(33));
+                        // 第一重保险：with_webview 在 webview 已销毁时安全返回 Err，立即停止。
+                        // 控制器每帧重新取（不再跨线程持有裸 COM 指针），闭包仅捕获 Copy 的 notify_due，
+                        // 且闭包必须返回 ()（tauri::Webview::with_webview 的签名约束）。
+                        let repaint_res = st.webview.with_webview(move |raw| {
+                            if let Ok(ctrl) = raw.controller().cast::<ICoreWebView2Controller>() {
+                                let _ = unsafe { ctrl.SetIsVisible(true) };
+                                if notify_due {
+                                    unsafe {
+                                        let _ = ctrl.NotifyParentWindowPositionChanged();
+                                    }
+                                }
+                            }
+                        });
+                        if repaint_res.is_err() {
+                            // webview 已销毁/不可达：停止常驻重绘，避免对已失效控制器持续调用。
+                            REPAINT_INTERVALS.lock().unwrap().remove(&st.label);
+                            REPAINT_STOP.lock().unwrap().remove(&st.label);
+                            return;
+                        }
+                        if probe_enabled() {
+                            let ms = interval.as_millis() as u64;
+                            {
+                                let mut last = LAST_PROBE_RATE.lock().unwrap();
+                                if last.get(&st.label).copied() != Some(ms) {
+                                    last.insert(st.label.clone(), ms);
+                                    eprintln!(
+                                        "[RUST-RATE] label={} interval_ms={} branch={}",
+                                        st.label,
+                                        ms,
+                                        if interval > Duration::from_millis(30) { "static" } else { "anim" }
+                                    );
+                                }
+                            }
+                            let c = PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+                            if c % 200 == 0 {
+                                eprintln!(
+                                    "[RUST-PROBE] label={} interval_ms={} branch={} visible=ok cb_us={}",
+                                    st.label,
+                                    ms,
+                                    if interval > Duration::from_millis(30) { "static" } else { "anim" },
+                                    t0.elapsed().as_micros()
+                                );
+                            }
+                        }
+                        if notify_due {
+                            st.last_notify = std::time::Instant::now();
+                        }
                     });
                 }
-                spawn_timer(
-                    app.clone(),
-                    RepaintState {
-                        webview: repaint_webview,
-                        label,
-                        last_notify: std::time::Instant::now(),
-                    },
-                );
+                spawn_timer(RepaintState {
+                    webview: repaint_webview,
+                    label,
+                    last_notify: std::time::Instant::now(),
+                });
             }
         });
     });
