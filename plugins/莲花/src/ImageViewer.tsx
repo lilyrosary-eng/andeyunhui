@@ -398,11 +398,6 @@ function TileCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const readyRef = useRef(false);
-  /** 上一次的缩放值（判断放大/缩小方向） */
-  const prevZoomRef = useRef(zoomScale);
-  /** 绘制耗时窗口统计 */
-  const drawStatRef = useRef({ n: 0, sum: 0, max: 0, outN: 0, slow: 0 });
-
   useEffect(() => {
     let alive = true;
     for (const t of tiles) {
@@ -497,26 +492,6 @@ function TileCanvas({
 
       ctx.drawImage(im, sx0, sy0, sw, sh, vx0, vy0, vx1 - vx0, vy1 - vy0);
     }
-      // 临时诊断：窗口期汇总（每 30 帧输出一次），区分放大/缩小
-      {
-        const dt = performance.now() - __t0;
-        const dirOut = zoomScale < prevZoomRef.current;
-        prevZoomRef.current = zoomScale;
-        const st = drawStatRef.current;
-        st.n += 1;
-        st.sum += dt;
-        st.max = Math.max(st.max, dt);
-        if (dirOut) st.outN += 1;
-        if (dt > 25) st.slow += 1;
-        if (st.n >= 30) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[draw-stat] n=${st.n} avg=${(st.sum / st.n).toFixed(1)}ms max=${st.max.toFixed(0)}ms ` +
-              `slow(>25ms)=${st.slow} 缩小占比=${st.outN}/${st.n} tiles=${tiles.length} layerW=${lv.width}`,
-          );
-          st.n = 0; st.sum = 0; st.max = 0; st.outN = 0; st.slow = 0;
-        }
-      }
     });
 
     return () => cancelAnimationFrame(raf);
@@ -832,15 +807,9 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
     let cancelled = false;
     setLoading(true);
     setRestoreIdx(null);
-    const __t0 = performance.now();
     hostApi.invoke<string[]>('get_folder_images', { folderPath })
       .then((paths) => {
         if (cancelled) return;
-        // 临时诊断：冷启动各阶段耗时（日志里搜 [perf]）
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[perf] get_folder_images ${(performance.now() - __t0).toFixed(0)}ms count=${paths.length}`,
-        );
         setImages(paths);
         let idx = 0;
         if (initialPath) {
@@ -858,8 +827,6 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
         setCurrentIndex(idx);
         setRestoreIdx((initialPath || localStorage.getItem('image.rememberProgress') === '1') ? idx : null);
         setLoading(false);
-        // eslint-disable-next-line no-console
-        console.warn(`[perf] list ready total ${(performance.now() - __t0).toFixed(0)}ms`);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
