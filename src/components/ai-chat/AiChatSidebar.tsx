@@ -5,7 +5,7 @@
 //   - 产物区：二者共用同一份专属产物库列表
 // chat 子模块为纯会话列表，不显示该切换。全部逻辑由宿主（Root）托管，侧栏只负责展示与触发。
 import { memo, useState } from 'react';
-import { Bot, Users, MessageSquare, Trash2, Pencil, LayoutGrid, FileText, Workflow, Save, Star, Clock, Image as ImageIcon, Video as VideoIcon, Network, Sparkles, BarChart3 } from 'lucide-react';
+import { Bot, Users, MessageSquare, Trash2, Pencil, LayoutGrid, FileText, Workflow, Save, Star, Clock, Image as ImageIcon, Video as VideoIcon, Network, BarChart3 } from 'lucide-react';
 import { ModuleSidebarShell } from '@/components/ModuleSidebarShell';
 import { NestedNavList, type NavLayerItem } from '@/components/NestedNavList';
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu';
@@ -63,10 +63,8 @@ export interface AiChatSidebarProps {
     rooms: CollabRoom[];
     activeRoomId: string | null;
     onSelectRoom: (roomId: string) => void;
+    /** 打开「新建房间」配置弹窗（与视图内入口同一条路径） */
     onNewRoom: () => void;
-    /** 新建使用 DeepSeek Harness 的房间（不可用时传 undefined，不显示入口） */
-    onNewDeepSeekRoom?: () => void;
-    deepseekAvailable?: boolean;
     onDeleteRoom: (roomId: string) => void;
   };
 }
@@ -298,9 +296,7 @@ export const AiChatSidebar = memo(function AiChatSidebar({
       secondaryActions={
         isChat
           ? [{ icon: <Users size={15} />, label: '新群聊', onClick: () => setShowGroupDialog(true) }]
-          : isCollab && collab?.deepseekAvailable && collab.onNewDeepSeekRoom
-            ? [{ icon: <Sparkles size={15} />, label: 'DeepSeek', onClick: collab.onNewDeepSeekRoom }]
-            : undefined
+          : undefined
       }
       titleActions={onOpenSubmoduleSwitcher ? (
         <button

@@ -3,7 +3,7 @@
 // 只做「看得见的闭环」：房间成员、事件时间线、任务看板、运行演示。
 // 不在这里做组态画布 —— 那是 P3 的事，先把任务分派与真实 harness 执行验证透。
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CheckCircle2, Clock, Copy, Download, FolderOpen, Loader2, Network, Play, Plug, Send, Square, Users,
   X, XCircle, type LucideIcon,
@@ -14,6 +14,7 @@ import type {
   CollabMemberInput, CollabPermissionRequest, CollabRoom, DshSessionSummary,
 } from '@/core/ai/aiCollab';
 import { DshSessionImportDialog } from '@/components/ai-chat/DshSessionImportDialog';
+import { TurnRail } from '@/components/chat/TurnRail';
 
 interface AiCollabViewProps {
   room: CollabRoom | null;
@@ -21,33 +22,22 @@ interface AiCollabViewProps {
   assignments: CollabAssignment[];
   busy: boolean;
   error: string | null;
-  onCreateRoom: () => void;
-  /** 新建 DeepSeek Harness 房间；不可用时为空 */
-  onCreateDeepSeekRoom?: () => void;
-  /** 新建 MCP 房间：任务只入队，交给外部 harness 认领 */
-  onCreateMcpRoom?: () => void;
-  /** 新建应用内置模型房间：直接用设置页的 AI 配置执行 */
-  onCreateNativeRoom?: () => void;
-  nativeAvailable?: boolean;
-  /** harness 目录（混编房间按它列可选项） */
+  /** harness 目录：新建房间时按它列可选项（只列可用的） */
   harnesses?: CollabHarnessInfo[];
-  /** 混编房间：成员各自选 harness 与模型 */
-  onCreateCustomRoom?: (members: CollabMemberInput[]) => void;
-  /** 新建 stream-json 房间（需要先配置 stream-json.json） */
-  onCreateStreamJsonRoom?: () => void;
-  streamJsonAvailable?: boolean;
-  /** 新建 .Talk 信箱房间（需绑定工作目录后任务才会投递） */
-  onCreateMailboxRoom?: () => void;
-  mailboxAvailable?: boolean;
-  /** 同一 harness 内多模型房间：models 按成员顺序传入，空串表示用默认模型 */
-  onCreateMultiModelRoom?: (models: string[]) => void;
+  /** 新建房间：成员各自选 harness 与模型，主导由成员里指定 */
+  onCreateRoom?: (members: CollabMemberInput[], name: string) => void;
+  /** 新建房间弹窗开关由宿主控制：侧栏「新建房间」与空状态按钮走同一条路径 */
+  builderOpen: boolean;
+  onOpenBuilder: () => void;
+  onCloseBuilder: () => void;
   deepseekAvailable?: boolean;
   dshSessions: DshSessionSummary[];
   dshSessionsLoading: boolean;
   onLoadDshSessions: () => void;
   onImportDshSession: (sessionId: string) => void;
   onSetWorkspace: (workspace: string | null) => void;
-  onSend: (text: string) => void;
+  /** 发消息；assigneeId 指定派给谁，省略时发主导 */
+  onSend: (text: string, assigneeId?: string) => void;
   onDemo: () => void;
   onCancel: (assignmentId: string) => void;
   /** 等待用户确认的 ACP 权限请求 */
@@ -94,19 +84,62 @@ function StatusLine({ event, room }: { event: CollabEvent; room: CollabRoom | nu
 
 function Timeline({ room, events }: { room: CollabRoom; events: CollabEvent[] }) {
   const scroller = useRef<HTMLDivElement>(null);
+  const [activeTurn, setActiveTurn] = useState<number | null>(null);
+
+  // 一轮 = 一条用户消息。导轨的 messageIndex 用 events 下标，跳转时直接按它定位。
+  const railItems = useMemo(
+    () =>
+      events.flatMap((event, index) => {
+        if (event.kind !== 'message' || !event.text) return [];
+        const role = event.data?.role ?? (event.agentId ? 'agent' : 'user');
+        if (role !== 'user') return [];
+        return [{ id: `evt-${event.seq}`, messageIndex: index, label: event.text }];
+      }),
+    [events],
+  );
+
+  // 非虚拟列表：按滚动位置找「阅读线」上方最后一轮；导轨需要的是轮次下标本身。
+  const syncActiveTurn = useCallback(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const line = el.scrollTop + Math.min(96, el.clientHeight * 0.2);
+    let next: number | null = null;
+    el.querySelectorAll<HTMLElement>('[data-turn]').forEach((node) => {
+      const index = Number(node.dataset.turn);
+      if (Number.isFinite(index) && node.offsetTop <= line) next = index;
+    });
+    setActiveTurn(next);
+  }, []);
+
   useEffect(() => {
     const el = scroller.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [events.length]);
+    syncActiveTurn();
+  }, [events.length, syncActiveTurn]);
+
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const onScroll = () => syncActiveTurn();
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [syncActiveTurn]);
+
+  const jumpToTurn = useCallback((messageIndex: number) => {
+    scroller.current
+      ?.querySelector<HTMLElement>(`[data-turn="${messageIndex}"]`)
+      ?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }, []);
 
   return (
-    <div ref={scroller} className="flex-1 min-w-0 overflow-y-auto px-5 py-4 space-y-3">
+    <div className="relative flex min-h-0 flex-1">
+    <div ref={scroller} className="relative min-w-0 flex-1 overflow-y-auto px-5 py-4 space-y-3">
       {events.length === 0 && (
         <div className="flex h-full items-center justify-center text-xs text-neutral-400 dark:text-stone-500">
           还没有协作记录。发一条消息，或点「运行演示」。
         </div>
       )}
-      {events.map((event) => {
+      {events.map((event, index) => {
         if (event.kind.startsWith('assignment.')) {
           return <StatusLine key={event.seq} event={event} room={room} />;
         }
@@ -129,10 +162,16 @@ function Timeline({ room, events }: { room: CollabRoom; events: CollabEvent[] })
           );
         }
         return (
-          <div key={event.seq} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+          <div
+            key={event.seq}
+            data-turn={isUser ? index : undefined}
+            className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}
+          >
             <div className={`max-w-[78%] ${isUser ? 'items-end' : 'items-start'} flex flex-col gap-1`}>
               <span className="text-[10px] text-neutral-400 dark:text-stone-500">
-                {isUser ? '我' : agentName(room, event.agentId)}
+                {isUser
+                  ? (event.data?.target ? `我 → ${agentName(room, String(event.data.target))}` : '我')
+                  : agentName(room, event.agentId)}
               </span>
               <div
                 className={`whitespace-pre-wrap rounded-2xl px-3.5 py-2 text-sm leading-relaxed ${
@@ -147,6 +186,14 @@ function Timeline({ room, events }: { room: CollabRoom; events: CollabEvent[] })
           </div>
         );
       })}
+    </div>
+      <TurnRail
+        items={railItems}
+        activeMessageIndex={activeTurn}
+        onJump={jumpToTurn}
+        accent="#6366f1"
+        markScope={`collab:${room.id}`}
+      />
     </div>
   );
 }
@@ -374,27 +421,32 @@ function McpDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-/// 混编房间：每个成员各自选 harness 与模型。
+/// 新建房间：成员、harness、模型、主导都在这里一次配完。
 /// 只列可用 harness —— 选了不可用项会在第一次派单时失败，比在建房间时就挡住更晚也更难懂。
-function MixedRoomDialog({
+function RoomBuilderDialog({
   harnesses,
   onClose,
   onCreate,
 }: {
   harnesses: CollabHarnessInfo[];
   onClose: () => void;
-  onCreate: (members: CollabMemberInput[]) => void;
+  onCreate: (members: CollabMemberInput[], name: string) => void;
 }) {
   const options = harnesses.filter((harness) => harness.available);
   const ids = options.map((harness) => harness.id);
   const pick = (...wanted: string[]) => wanted.find((id) => ids.includes(id)) ?? ids[0] ?? 'echo';
+  const [name, setName] = useState('');
   const [members, setMembers] = useState<CollabMemberInput[]>(() => [
-    { name: '主导', harnessId: pick('native', 'dsh'), model: '' },
+    { name: '主导', harnessId: pick('native', 'dsh'), model: '', lead: true },
     { name: '执行', harnessId: pick('dsh', 'mcp', 'native'), model: '' },
   ]);
 
   const update = (index: number, patch: Partial<CollabMemberInput>) => {
     setMembers((prev) => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)));
+  };
+  // 主导单选：同一时刻只有一个默认接单成员。
+  const setLead = (index: number) => {
+    setMembers((prev) => prev.map((item, i) => ({ ...item, lead: i === index })));
   };
   // 模型只对「按模型调用」的 harness 有意义；echo / mcp / 信箱的模型字段会被忽略。
   const usesModel = (harnessId: string) => ['native', 'dsh', 'acp'].includes(harnessId);
@@ -405,23 +457,44 @@ function MixedRoomDialog({
       onClick={onClose}
     >
       <div
-        className="w-[520px] max-w-full rounded-2xl border border-neutral-200 bg-white shadow-2xl dark:border-stone-700 dark:bg-stone-900"
+        className="w-[560px] max-w-full rounded-2xl border border-neutral-200 bg-white shadow-2xl dark:border-stone-700 dark:bg-stone-900"
         onClick={(event) => event.stopPropagation()}
       >
         <header className="flex items-center gap-2 border-b border-neutral-200 px-5 py-3 dark:border-stone-700">
           <Network size={18} className="text-indigo-600 dark:text-indigo-400" />
           <div>
-            <div className="text-sm font-semibold text-neutral-800 dark:text-stone-100">混编协作房间</div>
+            <div className="text-sm font-semibold text-neutral-800 dark:text-stone-100">新建协作房间</div>
             <div className="mt-0.5 text-[11px] text-neutral-400 dark:text-stone-500">
-              每个成员独立选择 harness 与模型，第一位成员负责主导。
+              成员各自选 harness 与模型；主导只是「默认接单」的那一位。
             </div>
           </div>
+          <button
+            onClick={onClose}
+            className="btn-press ml-auto rounded-lg p-1.5 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-stone-800"
+            title="关闭"
+          >
+            <X size={16} />
+          </button>
         </header>
         <div className="space-y-3 p-5 text-xs">
+          <label className="block">
+            <span className="font-medium text-neutral-700 dark:text-stone-200">房间名称</span>
+            <input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="留空则按成员自动命名"
+              className="mt-1 w-full rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-indigo-400 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-100"
+            />
+          </label>
+
           {members.map((member, index) => (
             <div
               key={index}
-              className="space-y-1.5 rounded-xl border border-neutral-200 p-3 dark:border-stone-700"
+              className={`space-y-1.5 rounded-xl border p-3 ${
+                member.lead
+                  ? 'border-indigo-400/60 bg-indigo-500/5 dark:border-indigo-400/40'
+                  : 'border-neutral-200 dark:border-stone-700'
+              }`}
             >
               <div className="flex items-center gap-2">
                 <input
@@ -445,9 +518,21 @@ function MixedRoomDialog({
                     </option>
                   ))}
                 </select>
-                <span className="shrink-0 text-[11px] text-neutral-400 dark:text-stone-500">
-                  {index === 0 ? 'lead' : '执行'}
-                </span>
+                <label
+                  className={`flex shrink-0 cursor-pointer items-center gap-1 rounded-lg px-1.5 py-1 text-[11px] ${
+                    member.lead ? 'text-indigo-600 dark:text-indigo-400' : 'text-neutral-400 dark:text-stone-500'
+                  }`}
+                  title="主导：发消息不指定对象时的默认接单成员"
+                >
+                  <input
+                    type="radio"
+                    name="collab-lead"
+                    checked={!!member.lead}
+                    onChange={() => setLead(index)}
+                    className="accent-indigo-600"
+                  />
+                  主导
+                </label>
                 {members.length > 2 && (
                   <button
                     onClick={() => setMembers((prev) => prev.filter((_, i) => i !== index))}
@@ -471,9 +556,12 @@ function MixedRoomDialog({
               />
             </div>
           ))}
+
           <div className="text-[11px] leading-relaxed text-neutral-400 dark:text-stone-500">
-            应用内置模型、DeepSeek、MCP 与 .Talk 信箱可以同室；发消息默认派给首位成员。
+            任何可用 harness 都能当主导，没有优先级；应用内置模型、DeepSeek、MCP 与 .Talk 信箱可以同室。
+            外部 harness 的任务只入队/投递，由对方认领。
           </div>
+
           <div className="flex items-center justify-between pt-1">
             <button
               onClick={() =>
@@ -496,7 +584,7 @@ function MixedRoomDialog({
                 取消
               </button>
               <button
-                onClick={() => onCreate(members)}
+                onClick={() => onCreate(members, name)}
                 className="btn-press rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
               >
                 创建房间
@@ -516,17 +604,10 @@ export const AiCollabView = memo(function AiCollabView({
   busy,
   error,
   onCreateRoom,
-  onCreateDeepSeekRoom,
-  onCreateMcpRoom,
-  onCreateNativeRoom,
-  nativeAvailable,
+  builderOpen,
+  onOpenBuilder,
+  onCloseBuilder,
   harnesses,
-  onCreateCustomRoom,
-  onCreateStreamJsonRoom,
-  streamJsonAvailable,
-  onCreateMailboxRoom,
-  mailboxAvailable,
-  onCreateMultiModelRoom,
   deepseekAvailable,
   dshSessions,
   dshSessionsLoading,
@@ -542,10 +623,13 @@ export const AiCollabView = memo(function AiCollabView({
   const [draft, setDraft] = useState('');
   const [importOpen, setImportOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
-  const [multiOpen, setMultiOpen] = useState(false);
-  const [mixedOpen, setMixedOpen] = useState(false);
-  const [leadModel, setLeadModel] = useState('');
-  const [workerModel, setWorkerModel] = useState('');
+  /** 本条消息派给谁；null = 跟随房间主导。 */
+  const [targetId, setTargetId] = useState<string | null>(null);
+
+  // 切房间时回到「派给主导」，避免把上一个房间的成员 id 带过来。
+  useEffect(() => {
+    setTargetId(null);
+  }, [room?.id]);
 
   const importDialog = importOpen ? (
     <DshSessionImportDialog
@@ -557,6 +641,18 @@ export const AiCollabView = memo(function AiCollabView({
         setImportOpen(false);
       }}
       onClose={() => setImportOpen(false)}
+    />
+  ) : null;
+
+  // 新建房间弹窗在「空状态」和「已有房间」两个分支里都要能开：侧栏入口不区分有没有房间。
+  const builder = builderOpen ? (
+    <RoomBuilderDialog
+      harnesses={harnesses ?? []}
+      onClose={onCloseBuilder}
+      onCreate={(members, name) => {
+        onCreateRoom?.(members, name);
+        onCloseBuilder();
+      }}
     />
   ) : null;
 
@@ -573,72 +669,11 @@ export const AiCollabView = memo(function AiCollabView({
           </p>
           <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
             <button
-              onClick={onCreateRoom}
+              onClick={onOpenBuilder}
               className="btn-press rounded-full bg-indigo-600 px-5 py-2 text-sm font-medium text-white hover:bg-indigo-500"
             >
-              Echo 演示房间
+              新建房间
             </button>
-            {onCreateCustomRoom && (harnesses?.length ?? 0) > 0 && (
-              <button
-                onClick={() => setMixedOpen(true)}
-                title="每个成员各自选择 harness 与模型"
-                className="btn-press rounded-full border border-indigo-500/40 bg-indigo-500/10 px-5 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-500/20 dark:text-indigo-300"
-              >
-                混编房间
-              </button>
-            )}
-            {deepseekAvailable && onCreateDeepSeekRoom && (
-              <button
-                onClick={onCreateDeepSeekRoom}
-                className="btn-press rounded-full border border-emerald-500/40 bg-emerald-500/10 px-5 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300"
-              >
-                DeepSeek 本地房间
-              </button>
-            )}
-            {deepseekAvailable && onCreateMultiModelRoom && (
-              <button
-                onClick={() => setMultiOpen(true)}
-                title="同一个 DeepSeek harness 里，成员用不同模型"
-                className="btn-press rounded-full border border-emerald-500/40 bg-emerald-500/10 px-5 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300"
-              >
-                多模型房间
-              </button>
-            )}
-            {onCreateMcpRoom && (
-              <button
-                onClick={onCreateMcpRoom}
-                className="btn-press rounded-full border border-sky-500/40 bg-sky-500/10 px-5 py-2 text-sm font-medium text-sky-700 hover:bg-sky-500/20 dark:text-sky-300"
-              >
-                MCP 协作房间
-              </button>
-            )}
-            {nativeAvailable && onCreateNativeRoom && (
-              <button
-                onClick={onCreateNativeRoom}
-                title="直接用设置页里的 AI 模型执行，不依赖外部 CLI"
-                className="btn-press rounded-full border border-violet-500/40 bg-violet-500/10 px-5 py-2 text-sm font-medium text-violet-700 hover:bg-violet-500/20 dark:text-violet-300"
-              >
-                应用内置模型房间
-              </button>
-            )}
-            {streamJsonAvailable && onCreateStreamJsonRoom && (
-              <button
-                onClick={onCreateStreamJsonRoom}
-                title="先编辑 ai-collab/stream-json.json 指定 CLI 命令"
-                className="btn-press rounded-full border border-neutral-300 px-5 py-2 text-sm font-medium text-neutral-600 hover:bg-neutral-100 dark:border-stone-600 dark:text-stone-300 dark:hover:bg-stone-800"
-              >
-                stream-json 房间
-              </button>
-            )}
-            {mailboxAvailable && onCreateMailboxRoom && (
-              <button
-                onClick={onCreateMailboxRoom}
-                title="创建后先在房间绑定工作目录，任务才会投递到 .adyh/collab/.../tasks/"
-                className="btn-press rounded-full border border-neutral-300 px-5 py-2 text-sm font-medium text-neutral-600 hover:bg-neutral-100 dark:border-stone-600 dark:text-stone-300 dark:hover:bg-stone-800"
-              >
-                .Talk 信箱房间
-              </button>
-            )}
             {deepseekAvailable && (
               <button
                 onClick={() => {
@@ -658,88 +693,17 @@ export const AiCollabView = memo(function AiCollabView({
             </button>
           </div>
           <p className="mt-3 text-[11px] leading-relaxed text-neutral-400 dark:text-stone-500">
+            一个房间就是一组成员：每个成员选 harness 与模型，主导只是「默认接单」的那一位。
+            外部成员（MCP / 信箱）的任务只入队或投递，由对方认领。
+            <br />
             {deepseekAvailable
-              ? 'DeepSeek 房间使用本机 LM Studio 小模型；导入会话优先 ACP 原位恢复，失败回退 headless，并镜像到项目的 .adyh/collab/。'
-              : 'P2 未检测到 DeepSeek Harness；设置 ANDY_DSH_BIN 后可新建本地房间。'}
-            <br />
-            应用内置模型房间直接用设置页的 AI 配置，可与 dsh / MCP / 信箱成员同室协作；成员模型留空即跟随当前选中模型。
-            <br />
-            MCP 接入让 Trae / WorkBuddy 等外部 harness 直接读写同一份共享会话。
+              ? 'DeepSeek 房间优先 ACP 原位恢复，失败回退 headless；事件同时镜像到项目的 .adyh/collab/。'
+              : '未检测到 DeepSeek Harness；设置 ANDY_DSH_BIN 后可在成员里选它。'}
           </p>
         </div>
         {importDialog}
         {mcpOpen && <McpDialog onClose={() => setMcpOpen(false)} />}
-        {mixedOpen && onCreateCustomRoom && (
-          <MixedRoomDialog
-            harnesses={harnesses ?? []}
-            onClose={() => setMixedOpen(false)}
-            onCreate={(members) => {
-              onCreateCustomRoom(members);
-              setMixedOpen(false);
-            }}
-          />
-        )}
-        {multiOpen && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-            onClick={() => setMultiOpen(false)}
-          >
-            <div
-              className="w-[480px] max-w-full rounded-2xl border border-neutral-200 bg-white shadow-2xl dark:border-stone-700 dark:bg-stone-900"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <header className="flex items-center gap-2 border-b border-neutral-200 px-5 py-3 dark:border-stone-700">
-                <Users size={18} className="text-emerald-600 dark:text-emerald-400" />
-                <div>
-                  <div className="text-sm font-semibold text-neutral-800 dark:text-stone-100">多模型协作房间</div>
-                  <div className="mt-0.5 text-[11px] text-neutral-400 dark:text-stone-500">
-                    同一个 DeepSeek harness，两个成员各自独立会话与模型。
-                  </div>
-                </div>
-              </header>
-              <div className="space-y-3 p-5 text-xs">
-                <label className="block">
-                  <span className="font-medium text-neutral-700 dark:text-stone-200">主导模型</span>
-                  <input
-                    value={leadModel}
-                    onChange={(e) => setLeadModel(e.target.value)}
-                    placeholder="留空用默认；支持 provider/model 或纯模型名"
-                    className="mt-1 w-full rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-emerald-400 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-100"
-                  />
-                </label>
-                <label className="block">
-                  <span className="font-medium text-neutral-700 dark:text-stone-200">执行模型</span>
-                  <input
-                    value={workerModel}
-                    onChange={(e) => setWorkerModel(e.target.value)}
-                    placeholder="例如 lmstudio/qwen3-4b 或 deepseek-v4-pro-qwen3.5-4b-i1"
-                    className="mt-1 w-full rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-emerald-400 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-100"
-                  />
-                </label>
-                <div className="text-[11px] leading-relaxed text-neutral-400 dark:text-stone-500">
-                  计划、派单与结果仍走同一条事件流；如果两个模型都留空，就等价于普通 DeepSeek 房间。
-                </div>
-                <div className="flex justify-end gap-2 pt-1">
-                  <button
-                    onClick={() => setMultiOpen(false)}
-                    className="btn-press rounded-lg border border-neutral-300 px-3 py-1.5 text-xs text-neutral-600 hover:bg-neutral-100 dark:border-stone-600 dark:text-stone-300 dark:hover:bg-stone-800"
-                  >
-                    取消
-                  </button>
-                  <button
-                    onClick={() => {
-                      onCreateMultiModelRoom?.([leadModel, workerModel]);
-                      setMultiOpen(false);
-                    }}
-                    className="btn-press rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
-                  >
-                    创建房间
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
+        {builder}
       </div>
     );
   }
@@ -747,9 +711,12 @@ export const AiCollabView = memo(function AiCollabView({
   const submit = () => {
     const text = draft.trim();
     if (!text || busy) return;
-    onSend(text);
+    onSend(text, targetId ?? undefined);
     setDraft('');
   };
+
+  // 派单对象：未选就是房间主导；切换后本条消息交给该成员。
+  const target = room.agents.find((agent) => agent.id === targetId) ?? room.agents.find((agent) => agent.id === room.leadId);
 
   return (
     <div className="flex flex-1 overflow-hidden">
@@ -864,6 +831,28 @@ export const AiCollabView = memo(function AiCollabView({
         )}
 
         <footer className="shrink-0 border-t border-neutral-200/70 p-3 dark:border-stone-700/60">
+          {/* 派单对象：混编房间里「发给谁」是一等公民，默认跟随主导。 */}
+          <div className="mb-2 flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] text-neutral-400 dark:text-stone-500">派给</span>
+            {room.agents.map((agent) => {
+              const selected = agent.id === (target?.id ?? room.leadId);
+              return (
+                <button
+                  key={agent.id}
+                  onClick={() => setTargetId(agent.id === room.leadId ? null : agent.id)}
+                  title={`${agent.harnessId}${agent.model ? ` · ${agent.model}` : ''}`}
+                  className={`btn-press rounded-full border px-2 py-0.5 text-[10px] transition-colors ${
+                    selected
+                      ? 'border-indigo-500/60 bg-indigo-500/10 text-indigo-600 dark:text-indigo-300'
+                      : 'border-neutral-200 text-neutral-500 hover:bg-neutral-100 dark:border-stone-700 dark:text-stone-400 dark:hover:bg-stone-800'
+                  }`}
+                >
+                  {agent.name}
+                  {agent.id === room.leadId ? ' · 主导' : ''}
+                </button>
+              );
+            })}
+          </div>
           <div className="flex items-end gap-2 rounded-2xl border border-neutral-200 bg-white px-3 py-2 shadow-sm focus-within:border-indigo-400/60 dark:border-stone-700 dark:bg-stone-800">
             <textarea
               value={draft}
@@ -875,7 +864,11 @@ export const AiCollabView = memo(function AiCollabView({
                 }
               }}
               rows={1}
-              placeholder="发给主导成员，或点上方「运行协作演示」…"
+              placeholder={
+                target && target.id !== room.leadId
+                  ? `发给「${target.name}」…`
+                  : `发给主导「${target?.name ?? '成员'}」…`
+              }
               className="max-h-32 min-h-[24px] flex-1 resize-none bg-transparent text-sm outline-none placeholder:text-neutral-400 dark:text-stone-100 dark:placeholder:text-stone-500"
             />
             <button
@@ -888,13 +881,14 @@ export const AiCollabView = memo(function AiCollabView({
             </button>
           </div>
           <div className="mt-1.5 text-center text-[10px] text-neutral-400 dark:text-stone-500">
-            P0：未 @ 的消息交给 lead；任务与事件全部落盘，可重开回放
+            任务派给所选成员并落盘；事件可重开回放，外部 harness 通过 MCP / 信箱接单
           </div>
         </footer>
       </div>
 
       <Board assignments={assignments} room={room} onCancel={onCancel} />
       {importDialog}
+      {builder}
     </div>
   );
 });

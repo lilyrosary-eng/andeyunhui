@@ -489,17 +489,28 @@ pub fn collab_events(
     store::read_events(&base, &room_id, after_seq)
 }
 
+/// 发一条消息并派单。
+/// `assignee_id` 为空时交给房间主导（lead）；指定时派给该成员 ——
+/// 混编房间靠它把任务交给「执行」而不是永远交给主导。
 #[tauri::command]
 pub fn collab_room_send(
     app: AppHandle,
     room_id: String,
     text: String,
+    assignee_id: Option<String>,
 ) -> Result<CollabEvent, String> {
     let base = store::base_dir(&app)?;
     let room = find_room(&app, &room_id)?;
     let text = text.trim();
     if text.is_empty() {
         return Err("消息不能为空".to_string());
+    }
+    let target = assignee_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| room.lead_id.clone());
+    if !room.agents.iter().any(|agent| agent.id == target) {
+        return Err(format!("成员不存在: {target}"));
     }
 
     let user_event = runtime::emit_event(
@@ -511,12 +522,10 @@ pub fn collab_room_send(
         None,
         Some(text.to_string()),
         None,
-        Some(json!({ "role": "user" })),
+        Some(json!({ "role": "user", "target": target })),
     )?;
 
-    // P0：未 @ 的消息交给 lead；P1 换成「@优先 → decider → 回落 lead」。
-    let lead = room.lead_id.clone();
-    let assignment = runtime::create_assignment(&app, &base, &room, None, &lead, text)?;
+    let assignment = runtime::create_assignment(&app, &base, &room, None, &target, text)?;
     runtime::spawn_assignment(app.clone(), base, room, assignment);
     Ok(user_event)
 }

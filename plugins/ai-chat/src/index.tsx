@@ -229,6 +229,8 @@ const Root = memo(function Root() {
   const productStore = useAiWorkProducts();
   // AI 协作（P0）：房间列表 + 事件流由独立 crate 提供，前端只消费快照与事件。
   const collab = useAiCollab();
+  // 新建房间弹窗放在宿主：侧栏「新建房间」与视图内空状态按钮共用同一个入口。
+  const [roomBuilderOpen, setRoomBuilderOpen] = useState(false);
   const changeArea = useCallback((t: AiWorkTab) => {
     setArea(t);
     if (t === 'task') productStore.back(); // 切回任务区时清空查看态
@@ -338,9 +340,7 @@ const Root = memo(function Root() {
           rooms: collab.rooms,
           activeRoomId: collab.activeRoom?.id ?? null,
           onSelectRoom: (id) => void collab.selectRoom(id),
-          onNewRoom: () => void collab.createRoom(),
-          deepseekAvailable: collab.harnesses.find((h) => h.id === 'dsh')?.available ?? false,
-          onNewDeepSeekRoom: () => void collab.createRoom(undefined, 'dsh'),
+          onNewRoom: () => setRoomBuilderOpen(true),
           onDeleteRoom: (id) => void collab.deleteRoom(id),
         }}
       />
@@ -535,27 +535,20 @@ const Root = memo(function Root() {
         assignments={collab.assignments}
         busy={collab.busy}
         error={collab.error}
-        onCreateRoom={() => void collab.createRoom()}
-        onCreateDeepSeekRoom={() => void collab.createRoom(undefined, 'dsh')}
-        onCreateMcpRoom={() => void collab.createRoom(undefined, 'mcp')}
-        onCreateNativeRoom={() => void collab.createRoom(undefined, 'native')}
-        nativeAvailable={collab.harnesses.find((harness) => harness.id === 'native')?.available ?? false}
+        onCreateRoom={(members, name) => void collab.createRoomWithAgents(members, name)}
+        builderOpen={roomBuilderOpen}
+        onOpenBuilder={() => setRoomBuilderOpen(true)}
+        onCloseBuilder={() => setRoomBuilderOpen(false)}
         harnesses={collab.harnesses}
-        onCreateCustomRoom={(members) => void collab.createRoomWithAgents(members)}
-        onCreateStreamJsonRoom={() => void collab.createRoom(undefined, 'stream-json')}
-        streamJsonAvailable={collab.harnesses.find((harness) => harness.id === 'stream-json')?.available ?? false}
-        onCreateMailboxRoom={() => void collab.createRoom(undefined, 'mailbox')}
-        mailboxAvailable={collab.harnesses.find((harness) => harness.id === 'mailbox')?.available ?? false}
         permission={collab.permission}
         onReplyPermission={(optionId) => void collab.replyPermission(optionId)}
-        onCreateMultiModelRoom={(models) => void collab.createRoom(undefined, 'dsh', models)}
         deepseekAvailable={collab.harnesses.find((h) => h.id === 'dsh')?.available ?? false}
         dshSessions={collab.dshSessions}
         dshSessionsLoading={collab.dshSessionsLoading}
         onLoadDshSessions={() => void collab.loadDshSessions()}
         onImportDshSession={(id) => void collab.importDshSession(id)}
         onSetWorkspace={(path) => void collab.setWorkspace(path)}
-        onSend={(text) => void collab.send(text)}
+        onSend={(text, assigneeId) => void collab.send(text, assigneeId)}
         onDemo={() => void collab.runDemo()}
         onCancel={(id) => void collab.cancel(id)}
       />

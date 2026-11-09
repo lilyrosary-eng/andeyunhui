@@ -35,13 +35,15 @@ export interface CollabRoomSource {
   sessionId?: string | null;
 }
 
-/** 新建混编房间时的成员草稿：一个房间可以同时用不同 harness 与模型。 */
+/** 新建房间时的成员草稿：一个房间可以同时用不同 harness 与模型。 */
 export interface CollabMemberInput {
   name?: string;
   harnessId: string;
   /** 成员级模型（native / dsh 生效）；空串跟随默认 */
   model?: string;
   persona?: string;
+  /** 是否由该成员主导（默认接单）；多个标记时取第一个，全不标则取第一位 */
+  lead?: boolean;
 }
 
 export interface CollabRoom {
@@ -178,13 +180,12 @@ export interface UseAiCollabResult {
   importDshSession: (sessionId: string, name?: string) => Promise<void>;
   /** 绑定 / 解绑当前房间的工作目录（绑定后事件流镜像到项目 .adyh/collab） */
   setWorkspace: (workspace: string | null) => Promise<void>;
-  /** models：按成员顺序指定模型（可空）；同一 harness 内可用不同模型 */
-  createRoom: (name?: string, harnessId?: string, models?: string[]) => Promise<void>;
-  /** 混编房间：成员各自指定 harness 与模型（native / dsh / mcp / 信箱可同室） */
+  /** 新建房间：成员各自指定 harness 与模型（native / dsh / mcp / 信箱可同室） */
   createRoomWithAgents: (members: CollabMemberInput[], name?: string) => Promise<void>;
   deleteRoom: (roomId: string) => Promise<void>;
   selectRoom: (roomId: string) => Promise<void>;
-  send: (text: string) => Promise<void>;
+  /** assigneeId 省略时发给主导成员 */
+  send: (text: string, assigneeId?: string) => Promise<void>;
   assign: (assigneeId: string, brief: string) => Promise<void>;
   /** 当前等待用户确认的 ACP 权限请求（可为空） */
   permission: CollabPermissionRequest | null;
@@ -473,10 +474,12 @@ export function useAiCollab(): UseAiCollabResult {
       return;
     }
     try {
+      // 主导由成员草稿显式指定（builder 里的单选），都没标就取第一位。
+      const leadIndex = Math.max(0, members.findIndex((member) => member.lead));
       const room = await invoke<CollabRoom>('collab_room_create', {
-        name: name?.trim() || '混编协作房间',
+        name: name?.trim() || '协作房间',
         agents,
-        leadId: 'lead',
+        leadId: agents[leadIndex]?.id ?? agents[0].id,
       });
       await refreshRooms();
       await selectRoom(room.id);
@@ -484,27 +487,6 @@ export function useAiCollab(): UseAiCollabResult {
       setError(String(err));
     }
   }, [refreshRooms, selectRoom]);
-
-  const createRoom = useCallback(async (name?: string, harnessId = 'echo', models?: string[]) => {
-    const fallbackName = harnessId === 'dsh'
-      ? 'DeepSeek 本地协作'
-      : harnessId === 'mcp'
-        ? 'MCP 协作房间'
-        : harnessId === 'stream-json'
-          ? 'stream-json 协作'
-          : harnessId === 'mailbox'
-            ? '.Talk 信箱协作'
-            : harnessId === 'native'
-              ? '应用内置模型协作'
-              : '协作房间';
-    await createRoomWithAgents(
-      [
-        { name: '主导', harnessId, model: models?.[0] },
-        { name: '执行', harnessId, model: models?.[1] },
-      ],
-      name?.trim() || fallbackName,
-    );
-  }, [createRoomWithAgents]);
 
   const deleteRoom = useCallback(async (roomId: string) => {
     setError(null);
@@ -523,24 +505,29 @@ export function useAiCollab(): UseAiCollabResult {
     }
   }, [refreshRooms, selectRoom]);
 
-  /** 该成员是否由外部 harness 执行：这类任务只入队，不占用本应用的 busy 状态。 */
+  /** 该成员是否由外部 harness 执行：这类任务只入队/投递，不占用本应用的 busy 状态。 */
   const waitsForExternal = useCallback((agentId?: string) => {
     const room = activeRoomRef.current;
     if (!room) return false;
     const id = agentId ?? room.leadId;
-    return room.agents.find((agent) => agent.id === id)?.harnessId === 'mcp';
+    const harnessId = room.agents.find((agent) => agent.id === id)?.harnessId;
+    return harnessId === 'mcp' || harnessId === 'mailbox';
   }, []);
 
-  const send = useCallback(async (text: string) => {
+  const send = useCallback(async (text: string, assigneeId?: string) => {
     const roomId = activeIdRef.current;
     const body = text.trim();
     if (!roomId || !body) return;
-    // MCP 房间的任务要等外部 harness 认领，锁住输入框只会让人以为卡住。
-    const external = waitsForExternal();
+    // MCP / 信箱成员的任务要等外部认领或写回，锁住输入框只会让人以为卡住。
+    const external = waitsForExternal(assigneeId);
     if (!external) setBusy(true);
     setError(null);
     try {
-      await invoke('collab_room_send', { roomId, text: body });
+      await invoke('collab_room_send', {
+        roomId,
+        text: body,
+        assigneeId: assigneeId ?? null,
+      });
     } catch (err) {
       if (!external) setBusy(false);
       setError(String(err));
@@ -618,7 +605,6 @@ export function useAiCollab(): UseAiCollabResult {
     loadDshSessions,
     importDshSession,
     setWorkspace,
-    createRoom,
     createRoomWithAgents,
     deleteRoom,
     selectRoom,
