@@ -13,7 +13,7 @@ window.__PLUGIN_REGISTRY__.register({
   visible: false,
   parent: 'niaoluo',
   category: '加密安全',
-  desc: '本地密码库：主密码解锁 / 本机免密 / 备用码兜底 / 自动锁定',
+  desc: '本地密码库：主密码解锁 / 本机免密 / 生物识别 / 备用码兜底 / 自动锁定',
   component: VaultModule,
   sidebar: VaultSidebar,
 });

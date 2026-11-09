@@ -174,7 +174,9 @@ pub struct VaultStatus {
     pub min_password_chars: usize,
     /// 本机解锁是否强制经过生物识别（策略文件，锁定态也可读）
     pub biometric_required: bool,
-    /// 当前平台是否支持生物识别（Windows Hello 等）
+    /// 进入锁屏后是否自动触发一次生物识别
+    pub biometric_auto_prompt: bool,
+    /// 当前平台是否支持系统生物识别
     pub biometric_supported: bool,
     /// 生物识别可用性说明（不可用时给出原因）
     pub biometric_detail: String,
@@ -182,10 +184,21 @@ pub struct VaultStatus {
 
 /// 明文策略文件：只放「本机解锁是否要求生物识别」这类非机密开关。
 /// 不放进 VaultMeta 是因为锁定态读不到 meta（meta 由 DK 解密），而门闸必须锁定态可判定。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase", default)]
 pub struct VaultPolicy {
     pub biometric_required: bool,
+    /// 进入锁屏后自动触发一次生物识别（无需用户再点按钮）
+    pub biometric_auto_prompt: bool,
+}
+
+impl Default for VaultPolicy {
+    fn default() -> Self {
+        Self {
+            biometric_required: false,
+            biometric_auto_prompt: true,
+        }
+    }
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -460,6 +473,7 @@ fn status_from(m: &mut VaultMemory) -> VaultStatus {
             updated_at_ms: env.updated_at_ms,
             min_password_chars: min_master_password_chars(),
             biometric_required: m.policy.biometric_required,
+            biometric_auto_prompt: m.policy.biometric_auto_prompt,
             biometric_supported: availability_cached().supported,
             biometric_detail: availability_cached().detail.clone(),
         },
@@ -475,6 +489,7 @@ fn status_from(m: &mut VaultMemory) -> VaultStatus {
             updated_at_ms: 0,
             min_password_chars: min_master_password_chars(),
             biometric_required: m.policy.biometric_required,
+            biometric_auto_prompt: m.policy.biometric_auto_prompt,
             biometric_supported: availability_cached().supported,
             biometric_detail: availability_cached().detail.clone(),
         },
@@ -595,8 +610,26 @@ fn unlock_device_inner(
     refresh_unlock_after_meta_write(app, m, unlocked, meta, "vault.unlock", audit_detail)
 }
 
-/// 生物识别解锁：先由 Rust 调系统验证（Windows Hello），通过后才解 device 槽位。
-/// 前端无法绕过：没有「先验证再调用解锁」的分离步骤，验证与解槽在同一个后端命令里。
+/// 把主窗口拉到前台并取 HWND：系统验证框以窗口为父，用户可直接按指纹；
+/// 无窗口版的提示在桌面应用里可能被压在后面（实机踩过）。
+fn main_window_hwnd(app: &AppHandle) -> isize {
+    #[cfg(windows)]
+    {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.show();
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+            if let Ok(h) = w.hwnd() {
+                return h.0 as isize;
+            }
+        }
+    }
+    let _ = app;
+    0
+}
+
+/// 生物识别解锁：先由 Rust 调系统验证，通过后才解 device 槽位。
+/// 前端无法绕过：验证与解槽在同一个后端命令里。
 pub fn unlock_biometric(app: &AppHandle) -> Result<VaultStatus, String> {
     let mut m = lock_memory();
     load_into_memory(app, &mut m)?;
@@ -607,11 +640,11 @@ pub fn unlock_biometric(app: &AppHandle) -> Result<VaultStatus, String> {
     if !availability_cached().supported {
         return Err(availability_cached().detail.clone());
     }
-    let verified = biometric::request_verification("解锁安得云荟密码库")?;
+    let verified = biometric::verify(main_window_hwnd(app), "解锁安得云荟密码库")?;
     if !verified {
         return Err("生物识别未通过，请重试或改用主密码".to_string());
     }
-    unlock_device_inner(app, &mut m, "Windows Hello 解锁")
+    unlock_device_inner(app, &mut m, "生物识别解锁")
 }
 
 /// 开关「本机解锁必须经过生物识别」。开启前先做一次真实验证，避免开了却用不了。
@@ -628,12 +661,27 @@ pub fn set_biometric_required(app: &AppHandle, required: bool) -> Result<VaultSt
         if !availability_cached().supported {
             return Err(availability_cached().detail.clone());
         }
-        let verified = biometric::request_verification("启用密码库生物识别解锁")?;
+        let verified = biometric::verify(main_window_hwnd(app), "启用密码库生物识别解锁")?;
         if !verified {
             return Err("生物识别未通过，未开启".to_string());
         }
     }
-    let policy = VaultPolicy { biometric_required: required };
+    let mut policy = m.policy.clone();
+    policy.biometric_required = required;
+    write_policy(app, &policy)?;
+    m.policy = policy;
+    Ok(status_from(&mut m))
+}
+
+/// 开关「进入锁屏自动触发一次生物识别」。
+pub fn set_biometric_auto_prompt(app: &AppHandle, enabled: bool) -> Result<VaultStatus, String> {
+    let mut m = lock_memory();
+    load_into_memory(app, &mut m)?;
+    if m.envelope.is_none() {
+        return Err("密码库不存在".to_string());
+    }
+    let mut policy = m.policy.clone();
+    policy.biometric_auto_prompt = enabled;
     write_policy(app, &policy)?;
     m.policy = policy;
     Ok(status_from(&mut m))

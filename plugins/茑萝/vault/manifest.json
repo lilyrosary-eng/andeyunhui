@@ -11,7 +11,7 @@
   "codename": "茑萝",
   "requiredAssets": [],
   "category": "加密安全",
-  "desc": "本地密码库：主密码解锁 / 本机免密 / 备用码兜底 / 自动锁定 / 导入导出",
+  "desc": "本地密码库：主密码解锁 / 本机免密 / 生物识别 / 备用码兜底 / 自动锁定 / 导入导出",
   "permissions": {
     "commands": [
       "vault_status",
@@ -20,6 +20,7 @@
       "vault_unlock_device",
       "vault_unlock_biometric",
       "vault_set_biometric_required",
+      "vault_set_biometric_auto_prompt",
       "vault_lock",
       "vault_change_password",
       "vault_rotate_recovery_codes",

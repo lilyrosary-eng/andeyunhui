@@ -1,7 +1,7 @@
 /// <reference path="../../../global.d.ts" />
 // 解锁 / 首次创建 / 备用码兜底。三件事共用一张居中卡片：未建库 → 创建；已建库未解锁 → 解锁。
 const React = window.__HOST_REACT__;
-const { useState } = React;
+const { useEffect, useRef, useState } = React;
 
 import { datedFileName, vaultApi, type VaultStatus } from './api';
 import type { VaultHook } from './useVault';
@@ -216,6 +216,17 @@ export function UnlockScreen({
   const [code, setCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
+  const autoTried = useRef(false);
+
+  // 进入锁屏即触发一次系统生物识别：只看「自动触发」开关本身，
+  // 与「本机解锁必须生物识别」解耦（required 只决定是否还允许免密按钮）。
+  useEffect(() => {
+    if (autoTried.current) return;
+    if (!status.hasDeviceSlot || !status.biometricSupported) return;
+    if (!status.biometricAutoPrompt) return;
+    autoTried.current = true;
+    void run(() => vaultApi.unlockBiometric());
+  }, [status.hasDeviceSlot, status.biometricSupported, status.biometricAutoPrompt, run]);
 
   const unlock = async () => {
     setNotice(null);
@@ -278,7 +289,7 @@ export function UnlockScreen({
               <div className="flex flex-col gap-1">
                 {status.biometricRequired && status.hasDeviceSlot ? (
                   <button onClick={unlockByBiometric} disabled={busy} className={ghostBtn}>
-                    🖐 Windows Hello 解锁
+                    🖐 生物识别解锁
                   </button>
                 ) : status.hasDeviceSlot ? (
                   <button onClick={unlockByDevice} disabled={busy} className={ghostBtn}>
@@ -291,7 +302,7 @@ export function UnlockScreen({
                 )}
                 {!status.biometricRequired && status.hasDeviceSlot && status.biometricSupported && (
                   <button onClick={unlockByBiometric} disabled={busy} className={ghostBtn}>
-                    🖐 Windows Hello 解锁
+                    🖐 生物识别解锁
                   </button>
                 )}
               </div>

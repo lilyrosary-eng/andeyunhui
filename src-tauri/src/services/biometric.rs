@@ -1,16 +1,20 @@
-//! Windows Hello 生物识别（WinRT `UserConsentVerifier`）。
+//! 系统生物识别（跨平台抽象）。
 //!
-//! 为什么不用 WebAuthn：本应用 webview 的源是 localhost / tauri.localhost，平台认证器会拒绝
-//! （实测还导致 WebView2 崩溃 0xc0000409）。这里直接调系统 API，指纹 / 人脸 / PIN 都走
-//! Windows Hello 已登记的凭据，与网页源无关。
+//! 各平台走各自的系统级设施，不直接对接硬件 SDK：
+//!  - Windows：WinRT `UserConsentVerifier`（Windows Hello：指纹 / 人脸 / 系统 PIN）。
+//!    可执行文件版必须用 `RequestVerificationForWindowAsync(hwnd)`：无窗口版在桌面应用里
+//!    可能抢不到前台，用户按指纹没反应（实机踩过）。
+//!  - Linux：fprintd（D-Bus，`net.reactivated.Fprint`）——尚未接入，返回明确原因。
+//!  - Android：BiometricPrompt——尚未接入，返回明确原因。
 //!
-//! 语义：生物识别只作为**本机设备槽位的门闸**，不参与 KDF。验证成功后才允许解 device 槽位。
-//! 非 Windows 平台返回 supported=false，由 UI 自然降级（不伪装可用）。
+//! 语义：生物识别只作为**本机设备槽位的门闸**，不参与 KDF；验证成功后才允许解 device 槽位。
+//! 文案一律用「生物识别 / 系统生物识别」，不把平台名写死到 UI。
 
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct BiometricAvailability {
     pub supported: bool,
+    /// 后端标识（windows-hello / linux-fprintd / android-biometric / none），仅诊断用
     pub platform: String,
     pub detail: String,
 }
@@ -30,55 +34,92 @@ pub fn availability() -> BiometricAvailability {
         Ok(state) if state == UserConsentVerifierAvailability::Available => BiometricAvailability {
             supported: true,
             platform: "windows-hello".to_string(),
-            detail: "Windows Hello 可用（指纹 / 人脸 / PIN）".to_string(),
+            detail: "系统生物识别可用（指纹 / 人脸 / 系统 PIN）".to_string(),
         },
-        Ok(state) => {
-            let reason = if state == UserConsentVerifierAvailability::DeviceNotPresent {
-                "未检测到 Windows Hello 设备"
+        Ok(state) => BiometricAvailability {
+            supported: false,
+            platform: "windows-hello".to_string(),
+            detail: if state == UserConsentVerifierAvailability::DeviceNotPresent {
+                "未检测到系统生物识别设备"
             } else if state == UserConsentVerifierAvailability::NotConfiguredForUser {
-                "当前用户尚未在系统设置里注册 Windows Hello"
+                "当前用户尚未在系统设置里注册生物识别"
             } else if state == UserConsentVerifierAvailability::DisabledByPolicy {
-                "Windows Hello 被策略禁用"
+                "系统生物识别被策略禁用"
             } else if state == UserConsentVerifierAvailability::DeviceBusy {
-                "Windows Hello 设备忙"
+                "系统生物识别设备忙"
             } else {
-                "Windows Hello 当前不可用"
-            };
-            BiometricAvailability {
-                supported: false,
-                platform: "windows-hello".to_string(),
-                detail: reason.to_string(),
+                "系统生物识别当前不可用"
             }
-        }
+            .to_string(),
+        },
         Err(e) => BiometricAvailability {
             supported: false,
             platform: "windows-hello".to_string(),
-            detail: format!("检查 Windows Hello 失败: {e}"),
+            detail: format!("检查系统生物识别失败: {e}"),
         },
     }
 }
 
 #[cfg(windows)]
-pub fn request_verification(reason: &str) -> Result<bool, String> {
+fn verify_without_window(reason: &str) -> Result<bool, String> {
     use windows::core::HSTRING;
     use windows::Security::Credentials::UI::{UserConsentVerificationResult, UserConsentVerifier};
     ensure_winrt();
     let op = UserConsentVerifier::RequestVerificationAsync(&HSTRING::from(reason))
-        .map_err(|e| format!("发起 Windows Hello 验证失败: {e}"))?;
-    let result = op.join().map_err(|e| format!("Windows Hello 验证未完成: {e}"))?;
+        .map_err(|e| format!("发起系统验证失败: {e}"))?;
+    let result = op.join().map_err(|e| format!("系统验证未完成: {e}"))?;
     Ok(result == UserConsentVerificationResult::Verified)
+}
+
+/// `hwnd` 为主窗口句柄（0 表示取不到，回退到无窗口版）。调用前调用方应先让窗口到前台。
+#[cfg(windows)]
+pub fn verify(hwnd: isize, reason: &str) -> Result<bool, String> {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::WinRT::{IUserConsentVerifierInterop, RoGetActivationFactory};
+    use windows::Security::Credentials::UI::UserConsentVerificationResult;
+    use windows_future::IAsyncOperation;
+
+    ensure_winrt();
+    if hwnd != 0 {
+        let factory = unsafe {
+            RoGetActivationFactory::<IUserConsentVerifierInterop>(&HSTRING::from(
+                "Windows.Security.Credentials.UI.UserConsentVerifier",
+            ))
+        };
+        if let Ok(factory) = factory {
+            let op = unsafe {
+                factory.RequestVerificationForWindowAsync::<IAsyncOperation<UserConsentVerificationResult>>(
+                    HWND(hwnd as *mut core::ffi::c_void),
+                    &HSTRING::from(reason),
+                )
+            };
+            if let Ok(op) = op {
+                let result = op.join().map_err(|e| format!("系统验证未完成: {e}"))?;
+                return Ok(result == UserConsentVerificationResult::Verified);
+            }
+        }
+    }
+    verify_without_window(reason)
 }
 
 #[cfg(not(windows))]
 pub fn availability() -> BiometricAvailability {
     BiometricAvailability {
         supported: false,
-        platform: std::env::consts::OS.to_string(),
-        detail: "当前平台尚未接入生物识别（Windows 走 Windows Hello；其它平台需单独实现）".to_string(),
+        platform: "none".to_string(),
+        detail: if cfg!(target_os = "linux") {
+            "当前平台尚未接入系统生物识别（Linux 计划走 fprintd / D-Bus）"
+        } else if cfg!(target_os = "android") {
+            "当前平台尚未接入系统生物识别（Android 计划走 BiometricPrompt）"
+        } else {
+            "当前平台尚未接入系统生物识别"
+        }
+        .to_string(),
     }
 }
 
 #[cfg(not(windows))]
-pub fn request_verification(_reason: &str) -> Result<bool, String> {
-    Err("当前平台尚未接入生物识别".to_string())
+pub fn verify(_hwnd: isize, _reason: &str) -> Result<bool, String> {
+    Err("当前平台尚未接入系统生物识别".to_string())
 }

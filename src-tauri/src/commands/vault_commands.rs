@@ -72,6 +72,17 @@ pub async fn vault_set_biometric_required(
 }
 
 #[tauri::command]
+pub async fn vault_set_biometric_auto_prompt(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<VaultStatus, String> {
+    blocking("vault_set_biometric_auto_prompt", move || {
+        svc::set_biometric_auto_prompt(&app, enabled)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn vault_lock(app: AppHandle) -> Result<VaultStatus, String> {
     blocking("vault_lock", move || svc::lock(&app)).await
 }

@@ -388,15 +388,24 @@ export function SettingsPanel({
       </div>
 
       <div className={sectionCls}>
-        <div className="text-sm font-medium">生物识别（Windows Hello）</div>
+        <div className="text-sm font-medium">生物识别</div>
         <p className="mt-1 text-xs text-neutral-500 dark:text-stone-400">{status.biometricDetail}</p>
         <p className="mt-1 text-[11px] text-neutral-400 dark:text-stone-500">
-          状态每 30 秒自动重测：在系统「设置 → 账户 → 登录选项」里注册指纹/人脸后，无需重启应用。
+          状态每 30 秒自动重测：在系统里注册指纹/人脸后，无需重启应用。
         </p>
         <p className="mt-1 text-xs text-neutral-500 dark:text-stone-400">
-          开启后「本机免密解锁」会被禁用，必须通过 Windows Hello（指纹 / 人脸 / PIN）或主密码解锁。
-          生物识别只作为本机槽位的门闸，不参与密钥派生。
+          由操作系统统一验证（Windows 走系统生物识别，Linux 计划对接 fprintd，Android 计划对接 BiometricPrompt）。
+          开启后「本机免密解锁」会被禁用，只能生物识别或主密码解锁；生物识别只作为本机槽位的门闸，不参与密钥派生。
         </p>
+        <label className="mt-2 flex items-center gap-2 text-xs text-neutral-600 dark:text-stone-300">
+          <input
+            type="checkbox"
+            checked={status.biometricAutoPrompt}
+            disabled={!status.biometricSupported}
+            onChange={(e) => void run(() => vaultApi.setBiometricAutoPrompt(e.target.checked))}
+          />
+          进入解锁页自动触发（无需再点按钮）
+        </label>
         <div className="mt-2 flex items-center gap-2">
           <button
             disabled={

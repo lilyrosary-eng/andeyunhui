@@ -50,7 +50,9 @@ export interface VaultStatus {
   minPasswordChars: number;
   /** 本机解锁是否必须经过生物识别 */
   biometricRequired: boolean;
-  /** 当前平台是否支持生物识别（Windows Hello） */
+  /** 进入锁屏后是否自动触发一次生物识别 */
+  biometricAutoPrompt: boolean;
+  /** 当前平台是否支持系统生物识别 */
   biometricSupported: boolean;
   /** 生物识别可用性说明（不可用时给出原因） */
   biometricDetail: string;
@@ -85,6 +87,8 @@ export const vaultApi = {
   unlockBiometric: () => invoke<VaultStatus>('vault_unlock_biometric'),
   setBiometricRequired: (required: boolean) =>
     invoke<VaultStatus>('vault_set_biometric_required', { required }),
+  setBiometricAutoPrompt: (enabled: boolean) =>
+    invoke<VaultStatus>('vault_set_biometric_auto_prompt', { enabled }),
   lock: () => invoke<VaultStatus>('vault_lock'),
   changePassword: (currentPassword: string, newPassword: string) =>
     invoke<VaultStatus>('vault_change_password', { currentPassword, newPassword }),

@@ -745,7 +745,17 @@ fn main() {
     // panic = "abort"（Cargo.toml:288）：panic 会直接 abort，默认什么都不打印，
     // 排查时只能看到进程凭空消失。这里装一个 hook，在 abort 前把位置和信息写出来
     // （同时写日志文件，便于崩溃后回看）。
+    //
+    // **2026-11-09 追加 backtrace**：`rc.rs:3743 hint::assert_unchecked`
+    // （= `Rc::clone` 时强引用计数已经是 0，说明有个 Rc 在其最后一个持有者 drop 之后还被 clone）
+    // 已经出现两次，但每次只有一行消息，**根本看不出是谁在 clone**。
+    // 这类 UB 断言不带栈等于没有信息，所以在这里强制抓一份栈。
     std::panic::set_hook(Box::new(|info| {
+        // 防重入：一次 UB 可能被多个线程同时命中，日志写成多份没有意义，
+        // 但栈要每个线程各一份 —— 所以只对"第一次"写文件，其余只打 stderr。
+        static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+        let first = FIRST.swap(false, std::sync::atomic::Ordering::SeqCst);
+
         let loc = info
             .location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
@@ -757,7 +767,17 @@ fn main() {
         } else {
             "非字符串 payload".to_string()
         };
-        eprintln!("[PANIC] {loc} :: {msg}");
+        // 线程名/ID：这类崩溃常发生在非主线程，没有它就不知道是哪条线
+        let cur = std::thread::current();
+        let tname = cur.name().unwrap_or("<unnamed>").to_string();
+        // force_capture 不看 RUST_BACKTRACE 环境变量，debug 构建有符号 ⇒ 能直接看到函数名
+        let bt = std::backtrace::Backtrace::force_capture();
+        let text = format!(
+            "[PANIC] {loc} :: {msg}\n  线程 {tname} {:?}\n{bt}",
+            cur.id()
+        );
+        eprintln!("{text}");
+
         // **Windows 分支**（2026-11-09 修）：原来只认 $HOME/.local/share，
         // 而 GUI 启动的进程通常没有 HOME ⇒ panic 日志静默丢失，等于没有。
         // 改写到与业务日志同目录的 %APPDATA%\com.rosary.andengyuanhua\logs\panic.log。
@@ -773,11 +793,36 @@ fn main() {
         #[cfg(not(windows))]
         let log_path = std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
             .join(".local/share/andeyunhui-panic.log");
-        use std::io::Write as _;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-            let _ = writeln!(f, "[PANIC] {loc} :: {msg}");
+
+        if first {
+            use std::io::Write as _;
+            // 超过 4MB 就截断重写：崩溃日志无限增长会拖慢启动（也难看）
+            if let Ok(meta) = std::fs::metadata(&log_path) {
+                if meta.len() > 4 * 1024 * 1024 {
+                    let _ = std::fs::remove_file(&log_path);
+                }
+            }
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
+                let _ = writeln!(f, "{text}");
+                let _ = f.flush();
+            }
         }
     }));
+
+    // 崩溃日志链路自检：`andeyunhui --selftest-panic` 立刻人为 panic 一次。
+    //
+    // 为什么要留这个开关：`panic = "abort"` 下"日志到底写没写进去"平时无法验证 ——
+    // 2026-11-09 之前那条 `$HOME/.local/share` 的路径 bug 就是因为没人验证过，
+    // 结果是 panic 日志静默丢了几个月。有了自检，任何人改动 hook 后跑一次就知道好没好。
+    // 只在显式传参时触发，正常启动零影响。
+    if std::env::args().any(|a| a == "--selftest-panic") {
+        eprintln!("[SELFTEST] 即将人为 panic，用于验证 panic hook（含 backtrace）→ 日志文件链路");
+        panic!("selftest-panic：这是一次人为 panic，用于验证崩溃日志链路");
+    }
 
     // MCP 随包分发：同一个 exe 带 --mcp 时只跑 stdio 协议，直接返回，不初始化窗口 / WebView。
     // 放在最前面是有意的：托盘、单实例锁、日志、数据库都不该在这个模式下启动。
@@ -2385,6 +2430,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             vault_commands::vault_unlock_device,
             vault_commands::vault_unlock_biometric,
             vault_commands::vault_set_biometric_required,
+            vault_commands::vault_set_biometric_auto_prompt,
             vault_commands::vault_lock,
             vault_commands::vault_change_password,
             vault_commands::vault_rotate_recovery_codes,
