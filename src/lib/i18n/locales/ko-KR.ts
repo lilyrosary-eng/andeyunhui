@@ -100,6 +100,9 @@ export const koKR: Record<string, string> = {
   'settings.general.autosave.interval': '저장 간격(초)',
 
   // 설정 - 테마
+  'settings.themes.material': '머티리얼',
+  'settings.themes.liquidGlass': '리퀴드 글라스',
+  'settings.themes.liquidGlassDesc': '전체 흐림 효과를 리퀴드 글라스로 교체합니다: 가장자리 굴절, 프레넬 하이라이트, 부유 그림자. 굴절은 Chromium 엔진(Windows)이 필요하며 다른 엔진에서는 조명 근사로 대체됩니다.',
   'settings.themes.appearance': '모양',
   'settings.theme.system': '시스템 따르기',
   'settings.theme.light': '라이트',

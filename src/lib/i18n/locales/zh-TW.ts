@@ -100,6 +100,9 @@ export const zhTW: Record<string, string> = {
   'settings.general.autosave.interval': '儲存間隔（秒）',
 
   // 設定 - 主題
+  'settings.themes.material': '材質效果',
+  'settings.themes.liquidGlass': '液態玻璃',
+  'settings.themes.liquidGlassDesc': '把全域毛玻璃換成液態玻璃：邊緣折射背景、菲涅耳高光與懸浮投影。折射需要 Chromium 內核（Windows 版），其他內核退化為光照近似。',
   'settings.themes.appearance': '外觀',
   'settings.theme.system': '跟隨系統',
   'settings.theme.light': '淺色',

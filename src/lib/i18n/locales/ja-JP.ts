@@ -100,6 +100,9 @@ export const jaJP: Record<string, string> = {
   'settings.general.autosave.interval': '保存間隔（秒）',
 
   // 設定 - テーマ
+  'settings.themes.material': 'マテリアル',
+  'settings.themes.liquidGlass': 'リキッドグラス',
+  'settings.themes.liquidGlassDesc': '全体のすりガラスをリキッドグラスに置き換えます：縁の屈折、フレネル光沢、浮遊する影。屈折は Chromium エンジン（Windows 版）が必要で、他のエンジンでは光のみの近似になります。',
   'settings.themes.appearance': '外観',
   'settings.theme.system': 'システムに従う',
   'settings.theme.light': 'ライト',

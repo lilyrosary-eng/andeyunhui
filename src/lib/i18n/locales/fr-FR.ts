@@ -100,6 +100,9 @@ export const frFR: Record<string, string> = {
   'settings.general.autosave.interval': 'Intervalle d\'enregistrement (secondes)',
 
   // Paramètres - Thème
+  'settings.themes.material': 'Matériau',
+  'settings.themes.liquidGlass': 'Verre liquide',
+  'settings.themes.liquidGlassDesc': 'Remplace tout le verre dépoli par du verre liquide : réfraction des bords, lumière de Fresnel et ombre flottante. La réfraction nécessite un moteur Chromium (Windows), les autres moteurs se limitent à un éclairage approximatif.',
   'settings.themes.appearance': 'Apparence',
   'settings.theme.system': 'Suivre le système',
   'settings.theme.light': 'Clair',

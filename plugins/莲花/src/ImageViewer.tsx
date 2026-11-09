@@ -123,7 +123,6 @@ function TileImage({
   zoomScale,
   cameraX,
   cameraY,
-  zoomStyle,
   getBaseRect,
   containerRef,
   onReady,
@@ -143,7 +142,6 @@ function TileImage({
    *  瓦片层必须用它来定尺寸，否则两层坐标系不一致（会看到两个图 / 尺寸错位） */
   getBaseRect?: () => { left: number; top: number; width: number; height: number } | null;
   /** 与底层 <img> 完全相同的 transform，保证两层对齐 */
-  zoomStyle: React.CSSProperties;
   /** 首批瓦片已渲染 —— 父级据此隐藏底层 <img>（避免两个大图层叠加合成） */
   onReady?: () => void;
   /** 这张图不需要瓦片（尺寸够小）—— 父级改用原图 <img> */
@@ -398,6 +396,32 @@ function TileCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const readyRef = useRef(false);
+  /**
+   * 绘制耗时统计（**这是判断"卡在哪"的唯一尺子**）。
+   *
+   * 之前这里有一行 `const __t0 = performance.now()` 但从未被使用 —— 等于没有测量。
+   * Windows 用户反馈"图片模块卡卡的"，Linux 端却流畅，而两边代码完全一样：
+   * 差别只可能在 **canvas 合成成本**（WebView2/Chromium vs WebKitGTK）。
+   * 没有数据就只能猜，所以这里做三件事：
+   *   1. 统计每帧 drawImage 总耗时、瓦片数、dpr；
+   *   2. 超过 24ms（≈40fps 掉帧线）的帧**显式打印**，但按 500ms 节流避免刷屏；
+   *   3. 在 `window.__imgPerf()` 暴露环形统计，方便用户/我们随时取一份。
+   */
+  const perfRef = useRef({ frames: 0, slow: 0, totalMs: 0, lastLog: 0, peakMs: 0, lastTiles: 0 });
+  /**
+   * 慢帧日志默认**关闭**（8335df9 清理过一批常驻打点，不要倒退）。
+   * 复现卡顿时在控制台执行：
+   *   localStorage['image.perf'] = '1'   → 重开图片模块生效
+   * 之后 `console.info` 会按 500ms 节流打印 >24ms 的帧；
+   * 随时用 `__imgPerf()` 取一份累计统计（这个不受开关限制）。
+   */
+  const perfLog = useMemo(() => {
+    try {
+      return localStorage.getItem('image.perf') === '1';
+    } catch {
+      return false;
+    }
+  }, []);
   useEffect(() => {
     let alive = true;
     for (const t of tiles) {
@@ -453,6 +477,7 @@ function TileCanvas({
     const originX = base.left + cameraX - cr.left;
     const originY = base.top + cameraY - cr.top;
 
+    let drawn = 0;
     for (const t of tiles) {
       const im = cacheRef.current.get(t.url);
       if (!im || !im.complete || im.naturalWidth === 0) continue;
@@ -491,7 +516,35 @@ function TileCanvas({
       const sh = (vy1 - vy0) * ky;
 
       ctx.drawImage(im, sx0, sy0, sw, sh, vx0, vy0, vx1 - vx0, vy1 - vy0);
+      drawn += 1;
     }
+
+      // —— 绘制耗时落账（超阈值显式打印，便于抓"哪一帧慢"）——
+      const ms = performance.now() - __t0;
+      const st = perfRef.current;
+      st.frames += 1;
+      st.totalMs += ms;
+      st.lastTiles = drawn;
+      if (ms > st.peakMs) st.peakMs = ms;
+      if (ms > 24) st.slow += 1;
+      const now = performance.now();
+      if (perfLog && ms > 24 && now - st.lastLog > 500) {
+        st.lastLog = now;
+        console.info(
+          `[莲花/perf] 慢帧 ${ms.toFixed(1)}ms 瓦片=${drawn}/${tiles.length} `
+          + `dpr=${dpr} sf=${sf.toFixed(3)} 画布=${cw}x${ch} `
+          + `累计 ${st.frames} 帧/慢 ${st.slow}/峰值 ${st.peakMs.toFixed(1)}ms`,
+        );
+      }
+      // 供随时取一份：控制台执行 __imgPerf()
+      (window as unknown as Record<string, unknown>).__imgPerf = () => ({
+        frames: st.frames,
+        slowFrames: st.slow,
+        avgMs: st.frames ? +(st.totalMs / st.frames).toFixed(2) : 0,
+        peakMs: +st.peakMs.toFixed(2),
+        lastTiles: st.lastTiles,
+        dpr: window.devicePixelRatio || 1,
+      });
     });
 
     return () => cancelAnimationFrame(raf);
@@ -500,33 +553,6 @@ function TileCanvas({
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />;
 }
 
-const TileGrid = React.memo(function TileGrid({
-  tiles,
-  tileSize,
-  onFirstLoad,
-}: {
-  tiles: { url: string; left: number; top: number }[];
-  tileSize: number;
-  onFirstLoad?: () => void;
-}) {
-  return (
-    <>
-      {tiles.map((t, i) => (
-        <img
-          key={i}
-          src={t.url}
-          alt=""
-          draggable={false}
-          onLoad={i === 0 ? onFirstLoad : undefined}
-          className="absolute select-none"
-          // 尺寸 +1px：放大后瓦片之间会出现一条 1px 的细缝（坐标舍入），
-          // 让相邻瓦片轻微重叠即可消掉。
-          style={{ left: t.left, top: t.top, width: tileSize + 1, height: tileSize + 1 }}
-        />
-      ))}
-    </>
-  );
-});
 
 export function ImageViewer({ folderPath, folderName, onBack, initialPath, imagesOverride, favorites, onToggleFavorite }: ImageViewerProps) {
   useLang();
@@ -648,15 +674,6 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
    * 200px 秒开 → 2560px 替换（够 4K 屏）。
    */
   const [displaySrc, setDisplaySrc] = useState('');
-  /** displaySrc 当前对应哪张图 —— 用来区分「同图刷新」与「切到新图」 */
-  const displayPathRef = useRef('');
-  /**
-   * 显示层的目标宽度：随缩放级别提升。
-   * 2560 够 1080p/2K 屏 1:1；放大到 >1.4×（比如在 4K 屏上看）换 4096；
-   * >3× 换 6144。缩小时可以降到 1280（更快）。
-   * 跨阈值才切换，避免滚动/缩放时频繁重解码。
-   */
-  const [layerWidth, setLayerWidth] = useState(2560);
 
   // camera 变化 → 直接重绘，不经过 React
   const handleCameraChange = useCallback((cam: { scale: number; x: number; y: number }) => {
@@ -713,13 +730,6 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath, image
     }
     return arr;
   }, [images, isRandomMode]);
-
-  // 缩放级别跨阈值时调整显示层宽度（只在跨阈值时变，避免频繁重解码）
-  useEffect(() => {
-    const s = zoomCamera.scale;
-    const want = s > 3 ? 6144 : s > 1.4 ? 4096 : s < 0.7 ? 1280 : 2560;
-    setLayerWidth((prev) => (prev === want ? prev : want));
-  }, [zoomCamera.scale]);
 
   // 显示层已停用（原图直出）：不再调用 generate_thumbnail。
   // 之前它会在 Rust 侧把 8192² 整图解码一遍（Lanczos 流式，数秒 CPU 满载），
@@ -1548,11 +1558,9 @@ function FullView({
   imgUrls,
   imgPaths,
   currentIndex,
-  setCurrentIndex,
   imgRef,
   zoomStyle,
   zoomScale,
-  baseWidth,
   getBaseRectProp,
   cameraX,
   cameraY,
@@ -1775,7 +1783,11 @@ function FullView({
               // （否则小图也变成模糊缩略图，用户明确要求排除）。
               void hostApi
                 .invoke<{ width?: number; height?: number }>('get_image_metadata', {
-                  imagePath: currentPath,
+                  // 参数名必须是 filePath：Rust 侧签名是 `file_path: String`，
+                  // Tauri 默认 rename_all = "camelCase" ⇒ 只认 filePath。
+                  // 之前写成 imagePath，这条兜底路径会一直 "invalid args" 静默失败
+                  // （表现：小图也走 200px 缩略图）。由 tauriCommands 契约测试逮到。
+                  filePath: currentPath,
                 })
                 .then((m) => {
                   const w = m?.width ?? 0;
@@ -1804,7 +1816,6 @@ function FullView({
             cameraX={cameraX}
             cameraY={cameraY}
             containerRef={containerRef}
-            zoomStyle={zoomStyle}
           />
         )}
     </div>

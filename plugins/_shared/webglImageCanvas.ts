@@ -123,8 +123,6 @@ export class WebglImageCanvas {
   private rows = 0;
   /** 单片边长（像素）；512 在常见视口下可见瓦片数 < 20 */
   private static readonly TILE = 512;
-  /** 复用同一块离屏 canvas 切瓦片，避免每片新建 */
-  private scratch: HTMLCanvasElement | null = null;
   private uAlpha: WebGLUniformLocation | null = null;
 
   /** 图片的**原始**像素尺寸（用于布局计算，不能拿纹理尺寸顶替） */

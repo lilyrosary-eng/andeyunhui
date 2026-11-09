@@ -100,6 +100,9 @@ export const deDE: Record<string, string> = {
   'settings.general.autosave.interval': 'Speicherintervall (Sekunden)',
 
   // Einstellungen - Design
+  'settings.themes.material': 'Material',
+  'settings.themes.liquidGlass': 'Flüssigglas',
+  'settings.themes.liquidGlassDesc': 'Ersetzt alle Milchglas-Effekte durch Flüssigglas: Kantenbrechung, Fresnel-Kantenlicht und schwebender Schatten. Brechung benötigt eine Chromium-Engine (Windows), andere Engines fallen auf reine Beleuchtung zurück.',
   'settings.themes.appearance': 'Erscheinungsbild',
   'settings.theme.system': 'System folgen',
   'settings.theme.light': 'Hell',
