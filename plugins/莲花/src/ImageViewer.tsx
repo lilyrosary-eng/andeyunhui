@@ -164,12 +164,26 @@ function TileImage({
     setFailed(false);
     readyRef.current = false;
     fallbackNotifiedRef.current = false;
+    // **换图必须立刻丢掉上一张的 info**（2026-11-09）：
+    // 不清的话，新图的请求还在路上时，canvas 仍在用**上一张**的 levels/dir 画，
+    // 而 base 矩形已经换成新图的 ⇒ 要么画出上一张的残留、要么整块被跳过，
+    // 表现就是「翻页了但还是这张图，缩放也没反应」。
+    // 清空后 TileImage 直接返回 null，这段时间由底图（displaySrc/原图）顶着。
+    const t0 = performance.now();
+    console.info('[莲花/tiles] 请求瓦片:', imagePath);
+    setInfo(null);
     void hostApi
       .invoke<TilesInfo>('generate_tiles', { imagePath })
       .then((t) => {
+        const ms = performance.now() - t0;
+        console.info(`[莲花/tiles] 瓦片就绪 ${ms.toFixed(0)}ms dir=${t.dir} levels=${t.levels.length}`);
+        if (ms > 1500) {
+          console.warn(`[莲花/tiles] 瓦片生成偏慢 ${ms.toFixed(0)}ms（可能是排队/大图解码）: ${imagePath}`);
+        }
         if (alive) setInfo(t);
       })
-      .catch(() => {
+      .catch((e) => {
+        console.warn('[莲花/tiles] 瓦片请求失败:', imagePath, e);
         if (alive) setFailed(true);
       });
     return () => {
@@ -467,7 +481,9 @@ function TileCanvas({
   const draw = useCallback(() => {
     const cv = canvasRef.current;
     if (!cv || !base) return;
-    {
+    // 绘制里一旦抛异常，rAF 回调就断了 —— canvas 会**永久冻在最后一帧**，
+    // 看起来就是"图不变、缩放也没反应"。这里必须把异常显式打出来。
+    try {
       const __t0 = performance.now();
       const ctx = cv.getContext('2d');
       if (!ctx) return;
@@ -562,6 +578,8 @@ function TileCanvas({
         lastTiles: st.lastTiles,
         dpr: window.devicePixelRatio || 1,
       });
+    } catch (e) {
+      console.error('[莲花/tiles] 绘制异常（canvas 会冻住）:', e);
     }
   }, [tiles, lv, base, zoomScale, cameraX, cameraY, perfLog]);
 
@@ -1695,6 +1713,26 @@ function FullView({
         .catch(() => { if (!cancelled) setImgError(true); });
       return () => { cancelled = true; };
     }
+    // **瓦片模式下底图必须真的存在**（2026-11-09 实锤的坑）：
+    // 底图 src 是 `tileFallback || displaySrc`，而 displaySrc 早已停用（恒为空）、
+    // tileFallback 只在"瓦片生成失败"时才写 ⇒ **正常浏览时底图 src 是空串**，
+    // 整块画面完全靠 canvas。于是换图后瓦片还没到时，canvas 上仍是上一张的旧瓦片，
+    // 看起来就是「翻页了还是这张图，缩放也没反应」。
+    // 这里在换图瞬间先取一张 200px 缩略图（后端有磁盘缓存，很快）当底图，
+    // 保证屏幕上立刻是新图；瓦片到达后 tilesReady 会把它 display:none。
+    if (currentPath) {
+      let cancelled = false;
+      const t0 = performance.now();
+      void hostApi
+        .invoke<string>('generate_thumbnail', { imagePath: currentPath, width: 200 })
+        .then((t) => {
+          if (cancelled || !t) return;
+          console.info(`[莲花/tiles] 底图就绪 ${(performance.now() - t0).toFixed(0)}ms`);
+          setTileFallback(safeFileSrc(t));
+        })
+        .catch((e) => console.warn('[莲花/tiles] 底图生成失败（画面只能等瓦片）:', e));
+      return () => { cancelled = true; };
+    }
   }, [currentIndex, isCurrentGif, currentPath]);
 
 
@@ -1802,6 +1840,10 @@ function FullView({
             实测一直转圈出不来），所以清晰度只能靠瓦片分层提供。 */}
         {tilesEnabled && engine === 'tiles' && !isCurrentGif && currentPath && (
           <TileImage
+            // **按图片路径重建**：TileImage 内部有 info（dir/levels）与已解码瓦片缓存，
+            // 换图时若复用同一实例，新图请求还在路上时它会继续用上一张的 info 画，
+            // 这正是「翻页后画面不变」的直接原因。key 一变就整块重挂，状态干净。
+            key={currentPath}
             imagePath={currentPath}
             onReady={() => setTilesReady(true)}
             onSmall={() => setSmallImage(true)}
