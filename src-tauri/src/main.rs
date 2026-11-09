@@ -738,6 +738,10 @@ fn marker_exists(name: &str) -> bool {
 }
 
 fn main() {
+    // **崩溃取证最先装**（2026-11-09）：`0xc000001d` 这类非法指令崩溃不经过 panic，
+    // 只能靠首轮异常处理器拿"异常码 + 出错模块 + 偏移"。必须早于任何线程创建。
+    andeyunhui_lib::services::crash_guard::install();
+
     // panic = "abort"（Cargo.toml:288）：panic 会直接 abort，默认什么都不打印，
     // 排查时只能看到进程凭空消失。这里装一个 hook，在 abort 前把位置和信息写出来
     // （同时写日志文件，便于崩溃后回看）。
@@ -754,13 +758,24 @@ fn main() {
             "非字符串 payload".to_string()
         };
         eprintln!("[PANIC] {loc} :: {msg}");
-        if let Ok(dir) = std::env::var("HOME") {
-            let path = std::path::Path::new(&dir).join(".local/share/andeyunhui-panic.log");
-            let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
-            use std::io::Write as _;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                let _ = writeln!(f, "[PANIC] {loc} :: {msg}");
-            }
+        // **Windows 分支**（2026-11-09 修）：原来只认 $HOME/.local/share，
+        // 而 GUI 启动的进程通常没有 HOME ⇒ panic 日志静默丢失，等于没有。
+        // 改写到与业务日志同目录的 %APPDATA%\com.rosary.andengyuanhua\logs\panic.log。
+        #[cfg(windows)]
+        let log_path = {
+            let base = std::env::var_os("APPDATA")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            let dir = base.join("com.rosary.andengyuanhua").join("logs");
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join("panic.log")
+        };
+        #[cfg(not(windows))]
+        let log_path = std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
+            .join(".local/share/andeyunhui-panic.log");
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            let _ = writeln!(f, "[PANIC] {loc} :: {msg}");
         }
     }));
 

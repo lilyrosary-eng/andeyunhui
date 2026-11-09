@@ -504,6 +504,27 @@ fn decode_png_stream_scaled(path: &std::path::Path, target_max: u32) -> Option<i
             break;
         }
         let len = u32::from_be_bytes(lenb) as usize;
+        // **必须校验 chunk 长度**（2026-11-09）：
+        // 这里是手写 PNG 解析，`len` 直接来自文件里的 4 字节。一个损坏/半截的文件
+        // （下载中断、磁盘写坏、或根本不是 PNG 只是签名字节巧合）可以声明 4GB，
+        // 接下来 `vec![0u8; len]` 就会去要 4GB —— 轻则 Rust 直接 abort（进程无栈可看），
+        // 重则把内存吃满。宁可在这一行拒绝，也不要走到分配。
+        const MAX_CHUNK: usize = 256 * 1024 * 1024;
+        if len > MAX_CHUNK {
+            log::warn!(
+                "[png] chunk 长度异常，放弃解码: {:?} 声明 {len} 字节（上限 {MAX_CHUNK}），文件可能已损坏",
+                path
+            );
+            return None;
+        }
+        // IDAT 总量也设上限：合法 PNG 的 IDAT 不会超过原图字节数太多
+        if idat.len().saturating_add(len) > MAX_CHUNK {
+            log::warn!(
+                "[png] IDAT 累计超过 {MAX_CHUNK} 字节，放弃解码: {:?}（文件可能已损坏或不是单图）",
+                path
+            );
+            return None;
+        }
         let mut ctype = [0u8; 4];
         if f.read_exact(&mut ctype).is_err() {
             break;
@@ -1137,6 +1158,20 @@ fn generate_png_tiles(
             break;
         }
         let len = u32::from_be_bytes(lenb) as usize;
+        // chunk 长度直接来自文件头，损坏/截断的文件可以让它是 4GB
+        // ⇒ `vec![0u8; len]` 会先尝试分配再失败，表现为进程被系统杀掉（不是干净 Err）。
+        // 合法 PNG 的单 chunk 不会这么大；IDAT 累计同样设限。
+        const MAX_CHUNK: usize = 256 * 1024 * 1024;
+        if len > MAX_CHUNK {
+            return Err(format!(
+                "PNG chunk 长度异常：声明 {len} 字节（上限 {MAX_CHUNK}），拒绝解析（文件可能已损坏）"
+            ));
+        }
+        if idat.len().saturating_add(len) > MAX_CHUNK {
+            return Err(format!(
+                "PNG IDAT 累计超过 {MAX_CHUNK} 字节，拒绝解析（文件可能已损坏或不是单图）"
+            ));
+        }
         let mut ctype = [0u8; 4];
         if f.read_exact(&mut ctype).is_err() {
             break;
@@ -1165,15 +1200,27 @@ fn generate_png_tiles(
             _ => {}
         }
     }
-    let (w0, h0, bit_depth, color_type, interlace) = ihdr.ok_or("缺少 IHDR")?;
+    let (w0, h0, bit_depth, color_type, interlace) = match ihdr {
+        Some(v) => v,
+        None => return Err("缺少 IHDR（不是完整 PNG）".into()),
+    };
     if bit_depth != 8 || interlace != 0 {
-        return Err("暂不支持该 PNG 格式".into());
+        return Err(format!("暂不支持该 PNG 格式（bit_depth={bit_depth} interlace={interlace}）"));
     }
     let channels: usize = match color_type {
         2 => 3,
         6 => 4,
-        _ => return Err("暂不支持该 PNG 颜色类型".into()),
+        _ => return Err(format!("暂不支持该 PNG 颜色类型（color_type={color_type}，仅支持 2/6）")),
     };
+    // 尺寸健壮性：0 尺寸会让后续 div_ceil/除零逻辑变成"看似正常"的垃圾；
+    // 超大尺寸则意味着后面 row_bytes 会爆。这里一次拦掉，日志能直接看出是文件问题。
+    if w0 == 0 || h0 == 0 {
+        return Err(format!("PNG 尺寸非法：{w0}x{h0}"));
+    }
+    const MAX_DIM: u32 = 65535;
+    if w0 > MAX_DIM || h0 > MAX_DIM {
+        return Err(format!("PNG 尺寸过大：{w0}x{h0}（上限 {MAX_DIM}）"));
+    }
 
     // 每层的整数 step：由 level 尺寸反推。tile_levels 已保证层尺寸是
     // ceil(src/step) 的形式，这里用同样的公式还原 step。

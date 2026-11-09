@@ -180,7 +180,9 @@ windows = { version = "0.62", features = [
 # 在 Android/Linux/macOS 目标下若仍无条件声明会导致编译失败。迁入后 Windows 构建行为完全不变。
 # 桌面端 Windows 独占功能：截图(EnumWindows/PrintWindow/GDI)、WGC 捕获、DoDragDrop 原生拖出、WebView2 COM 透明窗。
 drag = "2.1.1"
-winapi = { version = "0.3", features = ["winuser", "wingdi", "processthreadsapi", "shellscalingapi", "dwmapi", "winbase", "objbase", "combaseapi", "jobapi2", "objidl", "unknwnbase", "winerror", "ole2", "wtypes", "minwindef", "windef", "guiddef"] }
+winapi = { version = "0.3", features = ["winuser", "wingdi", "processthreadsapi", "shellscalingapi", "dwmapi", "winbase", "objbase", "combaseapi", "jobapi2", "objidl", "unknwnbase", "winerror", "ole2", "wtypes", "minwindef", "windef", "guiddef",
+  # crash_guard：首轮异常取证需要 AddVectoredExceptionHandler / GetModuleHandleExW
+  "errhandlingapi", "libloaderapi", "winnt"] }
 windows-capture = "2.0"
 # WebView2 COM 透明窗：必须与 wry 内部 webview2-com 同版本（0.38），且实现 windows-core 0.61 的 Interface trait
 webview2-com-sys = "0.38"

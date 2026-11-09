@@ -75,6 +75,7 @@ pub mod shell_service;
 // 功能内聚，禁止在别处复制安全判定逻辑。
 pub mod sandbox_service;
 // AI 用量/成本统计（持久化 + 聚合查询）：ai_chat 结束时落库，usage_stats 供前端用量面板查询。
+pub mod crash_guard;
 pub mod usage_service;
 // 通用 Hook 引擎（进程内回调注册/触发）：chat.done / agent.step 等生命周期钩点。
 pub mod hook_service;
