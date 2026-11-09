@@ -126,6 +126,7 @@ function TileImage({
   getBaseRect,
   containerRef,
   onReady,
+  onNeedsBase,
   onSmall,
   onFallback,
   onImageLoaded,
@@ -142,8 +143,10 @@ function TileImage({
    *  瓦片层必须用它来定尺寸，否则两层坐标系不一致（会看到两个图 / 尺寸错位） */
   getBaseRect?: () => { left: number; top: number; width: number; height: number } | null;
   /** 与底层 <img> 完全相同的 transform，保证两层对齐 */
-  /** 首批瓦片已渲染 —— 父级据此隐藏底层 <img>（避免两个大图层叠加合成） */
+  /** 视口内瓦片全部就绪 —— 父级据此隐藏底层 <img>（避免两个大图层叠加合成） */
   onReady?: () => void;
+  /** 视口内瓦片又不够了（平移进未加载区）—— 父级据此把底图放回来，别露白 */
+  onNeedsBase?: () => void;
   /** 这张图不需要瓦片（尺寸够小）—— 父级改用原图 <img> */
   onSmall?: () => void;
   /** 瓦片不可用 —— 父级改用 200px 缩略图兜底 */
@@ -349,10 +352,17 @@ function TileImage({
       zoomScale={zoomScale}
       cameraX={cameraX}
       cameraY={cameraY}
+      cacheKey={info.dir}
+      underlayCount={l0Tiles.length}
       onReady={() => {
         if (readyRef.current) return;
         readyRef.current = true;
         onReady?.();
+      }}
+      onNeedsBase={() => {
+        if (!readyRef.current) return;
+        readyRef.current = false;
+        onNeedsBase?.();
       }}
     />
   );
@@ -383,7 +393,10 @@ function TileCanvas({
   zoomScale,
   cameraX,
   cameraY,
+  cacheKey,
+  underlayCount = 0,
   onReady,
+  onNeedsBase,
 }: {
   tiles: { url: string; left: number; top: number }[];
   lv: { width: number; height: number };
@@ -391,11 +404,45 @@ function TileCanvas({
   zoomScale: number;
   cameraX: number;
   cameraY: number;
+  /** 瓦片目录（= info.dir）。变化即「换了图」⇒ 必须清缓存，否则上一张的
+   *  已解码位图会一直躺在 Map 里（组件实例在换图时是复用的，不会重挂） */
+  cacheKey: string;
+  /** tiles 数组前多少块是 L0 打底块（不算进"视口就绪"判定） */
+  underlayCount?: number;
   onReady?: () => void;
+  /** 可见区域又缺瓦片了（平移进未加载区）⇒ 请把底图放回来，别露白 */
+  onNeedsBase?: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const cacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  /**
+   * 已解码瓦片缓存。
+   *
+   * 之前是 `Map<string, HTMLImageElement>`，两个问题：
+   *   ① **没有上限**：同一张图切层会累积 L0..L4 全部块（8192² 全金字塔
+   *      341 块 × 512²×4B = 341MB），换图也不清（组件实例复用）；
+   *   ② **只有第一块挂了 onload**（见下），后面的块加载完不触发重绘
+   *      ⇒ 画面停在"第一块 + 底图"，你得平移一下才把剩下的画出来
+   *      —— 这才是"瓦片一块块/一圈圈加载"的真正原因（不是网络慢，是没重画）。
+   * 现在：带字节记账 + 换图清空 + 超限淘汰旧层。
+   */
+  const cacheRef = useRef<Map<string, { im: HTMLImageElement; bytes: number }>>(new Map());
+  const cacheBytesRef = useRef(0);
   const readyRef = useRef(false);
+  const drawRef = useRef<() => void>(() => {});
+  const rafRef = useRef<number | null>(null);
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
+  const onNeedsBaseRef = useRef(onNeedsBase);
+  onNeedsBaseRef.current = onNeedsBase;
+
+  /** 所有重绘都走这里：rAF 合并成每帧最多一次（缩放/平移时每帧会触发多次）。 */
+  const scheduleDraw = useCallback(() => {
+    if (rafRef.current != null) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      drawRef.current();
+    });
+  }, []);
   /**
    * 绘制耗时统计（**这是判断"卡在哪"的唯一尺子**）。
    *
@@ -422,38 +469,66 @@ function TileCanvas({
       return false;
     }
   }, []);
+  // 换图即清缓存（cacheKey = 瓦片目录）
+  useEffect(() => {
+    if (cacheRef.current.size) {
+      console.info(`[莲花/tiles] 换图，清掉 ${cacheRef.current.size} 块缓存（${(cacheBytesRef.current / 1048576).toFixed(1)}MB）`);
+    }
+    cacheRef.current.clear();
+    cacheBytesRef.current = 0;
+    readyRef.current = false;
+  }, [cacheKey]);
+
+  // 载入瓦片：**每块都挂 onload → 就绪即重绘**
   useEffect(() => {
     let alive = true;
     for (const t of tiles) {
       if (cacheRef.current.has(t.url)) continue;
       const im = new Image();
       im.decoding = 'async';
+      const entry = { im, bytes: 0 };
+      im.onload = () => {
+        if (!alive) return;
+        // 记账（512² RGBA ≈ 1MB）：没有这个数就不知道缓存吃多少内存
+        entry.bytes = im.naturalWidth * im.naturalHeight * 4;
+        cacheBytesRef.current += entry.bytes;
+        scheduleDraw();
+      };
+      im.onerror = () => {
+        if (!alive) return;
+        console.warn('[莲花/tiles] 瓦片加载失败:', t.url);
+        scheduleDraw();
+      };
       im.src = t.url;
-      cacheRef.current.set(t.url, im);
-      if (!readyRef.current) {
-        im.onload = () => {
-          if (!alive || readyRef.current) return;
-          readyRef.current = true;
-          onReady?.();
-        };
+      cacheRef.current.set(t.url, entry);
+    }
+    // 超限淘汰：优先丢「不在当前 tiles 里」的（旧层），按插入顺序
+    const CAP_BYTES = 128 * 1024 * 1024;
+    if (cacheBytesRef.current > CAP_BYTES) {
+      const keep = new Set(tiles.map((t) => t.url));
+      let freed = 0;
+      for (const [url, e] of cacheRef.current) {
+        if (cacheBytesRef.current - freed <= CAP_BYTES) break;
+        if (keep.has(url)) continue;
+        freed += e.bytes;
+        cacheRef.current.delete(url);
+      }
+      cacheBytesRef.current -= freed;
+      if (freed > 0) {
+        console.info(`[莲花/tiles] 缓存超限，淘汰旧层 ${(freed / 1048576).toFixed(1)}MB，现 ${(cacheBytesRef.current / 1048576).toFixed(1)}MB`);
       }
     }
     return () => {
       alive = false;
     };
-  }, [tiles, onReady]);
+  }, [tiles, scheduleDraw]);
 
-  useEffect(() => {
+  const draw = useCallback(() => {
     const cv = canvasRef.current;
     if (!cv || !base) return;
-
-    // **rAF 合并**：缩放/平移时每帧可能触发多次 effect，
-    // 直接同步重绘会画很多遍（用户观感是"瓦片一圈圈刷"）。
-    // 用 requestAnimationFrame 合并成"每帧最多画一次"。
-    const raf = requestAnimationFrame(() => {
-      const __t0 = performance.now();
-      const ctx = cv.getContext('2d');
-      if (!ctx) return;
+    const __t0 = performance.now();
+    const ctx = cv.getContext('2d');
+    if (!ctx) return;
 
     const dpr = window.devicePixelRatio || 1;
     const cw = cv.clientWidth;
@@ -478,14 +553,27 @@ function TileCanvas({
     const originY = base.top + cameraY - cr.top;
 
     let drawn = 0;
-    for (const t of tiles) {
-      const im = cacheRef.current.get(t.url);
-      if (!im || !im.complete || im.naturalWidth === 0) continue;
+    // 视口内瓦片计数：用来决定「什么时候可以撤底图」与「什么时候要放回来」。
+    // 只统计当前层，**排除 L0 打底块**（它只是一整张缩略图，早就 ready，
+    // 把它算进来会让底图在真正细节到达前就被撤掉 —— 那正是"一块块补"的观感来源）。
+    let visible = 0;
+    let visibleReady = 0;
+    for (let ti = 0; ti < tiles.length; ti++) {
+      const t = tiles[ti];
+      const entry = cacheRef.current.get(t.url);
+      const im = entry?.im;
+      const isReady = !!(im && im.complete && im.naturalWidth > 0);
+      // **按下标判定打底块**：levelIdx=0 时当前层本身就叫 L0，
+      // 按 URL 判断会把整层都当打底块 ⇒ visible 恒 0 ⇒ 底图永不撤（画面糊）
+      const isUnderlay = ti < underlayCount;
+      // 未解码时用标称边长占位（瓦片是 512；边缘块略小，只影响 1px 级判断）
+      const nw = isReady ? im!.naturalWidth : 512;
+      const nh = isReady ? im!.naturalHeight : 512;
 
       const dx = originX + t.left * sf;
       const dy = originY + t.top * sf;
-      const dw = im.naturalWidth * sf;
-      const dh = im.naturalHeight * sf;
+      const dw = nw * sf;
+      const dh = nh * sf;
       if (dx + dw < 0 || dy + dh < 0 || dx > cw || dy > ch) continue;
 
       // **目标矩形按整数边界对齐**：相邻瓦片共享同一条整数边界，
@@ -507,48 +595,77 @@ function TileCanvas({
       const vy1 = Math.min(ch, y1);
       if (vx1 <= vx0 || vy1 <= vy0) continue;
 
+      if (!isUnderlay) {
+        visible += 1;
+        if (isReady) visibleReady += 1;
+      }
+      if (!isReady) continue;
+
       // 源矩形按同一比例裁剪（保持一一对应）
-      const kx = im.naturalWidth / (x1 - x0);
-      const ky = im.naturalHeight / (y1 - y0);
+      const kx = nw / (x1 - x0);
+      const ky = nh / (y1 - y0);
       const sx0 = (vx0 - x0) * kx;
       const sy0 = (vy0 - y0) * ky;
       const sw = (vx1 - vx0) * kx;
       const sh = (vy1 - vy0) * ky;
 
-      ctx.drawImage(im, sx0, sy0, sw, sh, vx0, vy0, vx1 - vx0, vy1 - vy0);
+      ctx.drawImage(im!, sx0, sy0, sw, sh, vx0, vy0, vx1 - vx0, vy1 - vy0);
       drawn += 1;
     }
 
-      // —— 绘制耗时落账（超阈值显式打印，便于抓"哪一帧慢"）——
-      const ms = performance.now() - __t0;
-      const st = perfRef.current;
-      st.frames += 1;
-      st.totalMs += ms;
-      st.lastTiles = drawn;
-      if (ms > st.peakMs) st.peakMs = ms;
-      if (ms > 24) st.slow += 1;
-      const now = performance.now();
-      if (perfLog && ms > 24 && now - st.lastLog > 500) {
-        st.lastLog = now;
-        console.info(
-          `[莲花/perf] 慢帧 ${ms.toFixed(1)}ms 瓦片=${drawn}/${tiles.length} `
-          + `dpr=${dpr} sf=${sf.toFixed(3)} 画布=${cw}x${ch} `
-          + `累计 ${st.frames} 帧/慢 ${st.slow}/峰值 ${st.peakMs.toFixed(1)}ms`,
-        );
+    // —— 底图（displaySrc 那张 2560px）什么时候撤/放 ——
+    // 撤：视口内当前层**全部**就绪。放：掉到 60% 以下（ hysteresis，避免来回闪）。
+    if (visible > 0) {
+      if (!readyRef.current && visibleReady === visible) {
+        readyRef.current = true;
+        onReadyRef.current?.();
+      } else if (readyRef.current && visibleReady < visible * 0.6) {
+        readyRef.current = false;
+        onNeedsBaseRef.current?.();
       }
-      // 供随时取一份：控制台执行 __imgPerf()
-      (window as unknown as Record<string, unknown>).__imgPerf = () => ({
-        frames: st.frames,
-        slowFrames: st.slow,
-        avgMs: st.frames ? +(st.totalMs / st.frames).toFixed(2) : 0,
-        peakMs: +st.peakMs.toFixed(2),
-        lastTiles: st.lastTiles,
-        dpr: window.devicePixelRatio || 1,
-      });
-    });
+    }
 
-    return () => cancelAnimationFrame(raf);
-  }, [tiles, lv, base, zoomScale, cameraX, cameraY]);
+    // —— 绘制耗时落账（超阈值显式打印，便于抓"哪一帧慢"）——
+    const ms = performance.now() - __t0;
+    const st = perfRef.current;
+    st.frames += 1;
+    st.totalMs += ms;
+    st.lastTiles = drawn;
+    if (ms > st.peakMs) st.peakMs = ms;
+    if (ms > 24) st.slow += 1;
+    const now = performance.now();
+    if (perfLog && ms > 24 && now - st.lastLog > 500) {
+      st.lastLog = now;
+      console.info(
+        `[莲花/perf] 慢帧 ${ms.toFixed(1)}ms 瓦片=${drawn}/${tiles.length} `
+        + `可见就绪=${visibleReady}/${visible} dpr=${dpr} sf=${sf.toFixed(3)} 画布=${cw}x${ch} `
+        + `累计 ${st.frames} 帧/慢 ${st.slow}/峰值 ${st.peakMs.toFixed(1)}ms`,
+      );
+    }
+    // 供随时取一份：控制台执行 __imgPerf()
+    (window as unknown as Record<string, unknown>).__imgPerf = () => ({
+      frames: st.frames,
+      slowFrames: st.slow,
+      avgMs: st.frames ? +(st.totalMs / st.frames).toFixed(2) : 0,
+      peakMs: +st.peakMs.toFixed(2),
+      lastTiles: st.lastTiles,
+      cachedTiles: cacheRef.current.size,
+      cachedMB: +(cacheBytesRef.current / 1048576).toFixed(1),
+      dpr: window.devicePixelRatio || 1,
+    });
+  }, [tiles, lv, base, zoomScale, cameraX, cameraY, perfLog]);
+
+  // 每次 props 变化都重画（经 rAF 合并）
+  drawRef.current = draw;
+  useEffect(() => {
+    scheduleDraw();
+    return () => {
+      if (rafRef.current != null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+  }, [draw, scheduleDraw]);
 
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />;
 }
@@ -1777,6 +1894,7 @@ function FullView({
           <TileImage
             imagePath={currentPath}
             onReady={() => setTilesReady(true)}
+            onNeedsBase={() => setTilesReady(false)}
             onSmall={() => setSmallImage(true)}
             onFallback={() => {
               // **先查尺寸**：小图直接用原图（秒开、清晰），不要走 200px 兜底
