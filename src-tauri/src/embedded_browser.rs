@@ -1,4 +1,4 @@
-//! 内置浏览器窗口（网络视频平台页）。
+//! 内置浏览器窗口（网络视频 / 网络图片等「官方网页」壳）。
 //!
 //! # 为什么是「独立窗口」而不是「面板里的子 webview」
 //!
@@ -7,27 +7,40 @@
 //! 正确位置，但**始终被主 webview 的合成层盖住**，页面只呈现一片白色 ——
 //! 提升 HWND 的 z-order 也无效（WebView2 走的是 DComp 合成，不是 GDI 绘制顺序）。
 //!
-//! 因此改为 **一个真正的 Tauri 窗口**（WebviewWindow）承载平台页面：
+//! 因此改为 **真正的 Tauri 窗口**（WebviewWindow）承载平台页面：
 //! - 一定可见、可输入；
 //! - 不遮挡主界面（用户可自由拖动/缩放/最大化）；
 //! - 与「面板里嵌网页」相比只是少了贴边，稳定性完全不在一个量级。
+//!
+//! # 多平台并行
+//!
+//! 每个调用方用 `target`（平台 id）区分，窗口 label = `browser-<target>`，
+//! 因此 B 站与抖音可以同时各开一个窗口；`browser_close_all` 用于离开模块时统一收尾。
+//!
+//! # 登录态
+//!
+//! 所有浏览器窗口共用**固定**的 WebView2 数据目录（`app_local_data_dir/browser-profile`），
+//! cookie / localStorage 随目录持久化：登录一次，下次启动仍在。
+//! 注意必须与主窗口使用**同一组** `additional_browser_args`（见 `BROWSER_ARGS`），
+//! 否则 WebView2 会拒绝创建（HRESULT 0x8007139F）。
 //!
 //! # 嗅探通道
 //!
 //! 外部页面无法使用 Tauri IPC，因此注入脚本把结果经本协议送出：
 //! `location.href = "http://bimedia.localhost/__report/<b64u(json)>"`，
 //! 由 `on_navigation` 截获并 `return false` 取消导航（页面不会跳走），
-//! 载荷存入 `media_relay` 的进程内缓冲，前端用 `browser_sniff` 取走。
+//! 载荷按窗口 label 存入 `media_relay` 的进程内缓冲，前端用 `browser_sniff(target)` 取走。
 //! 用「导航」而非 fetch 的原因：外部站点的 CSP 管不到导航，但很可能把 fetch 拦掉。
 
 use tauri::http::{header, Response, StatusCode};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
-pub const LABEL: &str = "video-browser";
+/// 窗口 label 前缀（同时用于 `browser_close_all` 的批量识别）
+pub const LABEL_PREFIX: &str = "browser-";
 
 /// 浏览器窗口的 UA：伪装成普通桌面 Edge。
 ///
-/// 默认 UA 会带 Tauri 标识，抖音 / B 站等站点会据此判定为「非常规浏览器」，
+/// 默认 UA 会带 Tauri 标识，抖音 / B 站 / pixiv 等站点会据此判定为「非常规浏览器」，
 /// 表现为白屏、强制登录或滑块 —— 这是内嵌浏览器打不开页面最常见的原因。
 const DESKTOP_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
@@ -41,6 +54,27 @@ const DESKTOP_UA: &str =
 const BROWSER_ARGS: &str =
     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,MediaSession,HardwareMediaKeyHandling";
 
+/// 把 target（平台 id）规整成合法 label 片段：只留小写字母/数字/连字符。
+fn sanitize_target(target: Option<&str>) -> String {
+    let raw = target.unwrap_or("").trim().to_lowercase();
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            out.push(c);
+        }
+    }
+    if out.is_empty() {
+        "main".to_string()
+    } else {
+        out.chars().take(32).collect()
+    }
+}
+
+/// target → 窗口 label
+fn window_label(target: Option<&str>) -> String {
+    format!("{}{}", LABEL_PREFIX, sanitize_target(target))
+}
+
 /// 注入到每个页面最前面的嗅探钩子。
 ///
 /// 主通道是 `PerformanceObserver`（**不修改页面任何原型**，能拿到页面加载的每一个资源）；
@@ -51,18 +85,18 @@ const SNIFF_HOOK: &str = r#"(function () {
   if (window.__sniffHookInstalled) return;
   window.__sniffHookInstalled = true;
   window.__sniffLog = [];
-  function push(u, src) {
+  function push(u, src, initiatorType) {
     try {
       if (!u || typeof u !== 'string') return;
       if (u.indexOf('blob:') === 0 || u.indexOf('data:') === 0) return;
-      window.__sniffLog.push({ url: u, src: src });
-      if (window.__sniffLog.length > 800) window.__sniffLog.shift();
+      window.__sniffLog.push({ url: u, src: src, it: initiatorType || '' });
+      if (window.__sniffLog.length > 1200) window.__sniffLog.shift();
     } catch (e) {}
   }
   try {
     var po = new PerformanceObserver(function (list) {
       var es = list.getEntries();
-      for (var i = 0; i < es.length; i++) push(es[i].name, 'perf');
+      for (var i = 0; i < es.length; i++) push(es[i].name, 'perf', es[i].initiatorType);
     });
     po.observe({ type: 'resource', buffered: true });
   } catch (e) {}
@@ -70,34 +104,62 @@ const SNIFF_HOOK: &str = r#"(function () {
     var _fetch = window.fetch;
     if (_fetch) {
       window.fetch = function (input, init) {
-        try { push(typeof input === 'string' ? input : (input && input.url), 'fetch'); } catch (e) {}
+        try { push(typeof input === 'string' ? input : (input && input.url), 'fetch', 'fetch'); } catch (e) {}
         return _fetch.apply(this, arguments);
       };
     }
   } catch (e) {}
   try {
     var _open = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function (m, u) { push(u, 'xhr'); return _open.apply(this, arguments); };
+    XMLHttpRequest.prototype.open = function (m, u) { push(u, 'xhr', 'xmlhttprequest'); return _open.apply(this, arguments); };
   } catch (e) {}
 })();"#;
 
-/// 前端点「嗅探」时执行的收集脚本：合并钩子记录 + DOM 扫描，去重后上报。
+/// 前端点「嗅探」时执行的收集脚本。
+///
+/// ★ 必须在这里就过滤掉 js/css/font/json 这些噪声：一个视频页动辄 300+ 资源，
+///   九成是脚本与样式，全抛给用户等于没有结果。只保留「媒体 / 图片 / 分片」三类，
+///   并把 initiatorType 一并带出，供前端区分「元素直链」与「网络分片」。
 const SNIFF_COLLECT: &str = r#"(function () {
   try {
+    var MEDIA_RE = /\.(mp4|webm|mkv|mov|m4v|flv|m3u8|mpd|m4s|ts|mp3|m4a|aac|flac|wav|ogg)([?#]|$)/i;
+    var SEG_RE   = /\.(m4s|ts|m4a)([?#]|$)/i;
+    var IMG_RE   = /\.(jpe?g|png|webp|gif|avif|bmp)([?#]|$)/i;
+    var NOISE_RE = /\.(js|mjs|css|map|json|woff2?|ttf|otf|eot|svg|html?|txt|xml|ico|wasm)([?#]|$)/i;
+    // 无扩展名的媒体地址（抖音/B站 CDN 常见）：靠路径关键字与查询参数识别
+    var MEDIA_HINT = /(\/video\/tos\/|douyinvod|aweme|mime_type=video|video_mp4|\/playurl|bilivideo|\/api\/x\/player|\/hls\/)/i;
+
+    function kindOf(u, initiatorType) {
+      if (SEG_RE.test(u)) return 'segment';
+      if (MEDIA_RE.test(u)) return 'media';
+      if (IMG_RE.test(u)) return 'image';
+      if (initiatorType === 'video' || initiatorType === 'audio') return 'media';
+      if (initiatorType === 'img') return 'image';
+      if (MEDIA_HINT.test(u)) return 'media';
+      if (NOISE_RE.test(u)) return 'noise';
+      return 'other';
+    }
+
     var out = [], seen = {};
-    function add(u, kind, extra) {
+    function add(u, initiatorType, extra) {
       try {
         if (!u || typeof u !== 'string') return;
         if (u.indexOf('blob:') === 0 || u.indexOf('data:') === 0) return;
+        var kind = kindOf(u, initiatorType);
+        if (kind === 'noise') return;
+        // other 只留「页面显式引用的元素地址」（video/img 的 currentSrc），网络请求里的 other 一律丢
+        if (kind === 'other' && initiatorType !== 'media') return;
         if (seen[u]) return;
         seen[u] = 1;
-        var o = { url: u, kind: kind };
+        var o = { url: u, kind: kind, it: initiatorType || '' };
         if (extra) { for (var k in extra) { o[k] = extra[k]; } }
         out.push(o);
       } catch (e) {}
     }
+
     var log = window.__sniffLog || [];
-    for (var i = 0; i < log.length; i++) { add(log[i].url, log[i].src || 'auto'); }
+    for (var i = 0; i < log.length; i++) add(log[i].url, log[i].it || log[i].src || 'auto');
+
     var vs = document.querySelectorAll('video, audio, source');
     for (var j = 0; j < vs.length; j++) {
       var el = vs[j];
@@ -108,13 +170,14 @@ const SNIFF_COLLECT: &str = r#"(function () {
       var im = imgs[k];
       var s = im.currentSrc || im.src;
       if (s && (im.naturalWidth >= 96 || im.naturalHeight >= 96)) {
-        add(s, 'image', { w: im.naturalWidth, h: im.naturalHeight });
+        add(s, 'img', { w: im.naturalWidth, h: im.naturalHeight });
       }
     }
+
     var payload = JSON.stringify({
       page: location.href,
       title: document.title,
-      items: out.slice(0, 200)
+      items: out.slice(0, 300)
     });
     var b64 = btoa(unescape(encodeURIComponent(payload)))
       .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -131,13 +194,13 @@ fn parse_target(url: &str) -> Result<tauri::Url, String> {
 }
 
 /// 嗅探上报的拦截逻辑：命中 `bimedia.localhost/__report/...` 时存下载荷并取消导航。
-fn sniff_navigation(u: &tauri::Url) -> bool {
+fn sniff_navigation(label: &str, u: &tauri::Url) -> bool {
     if u.host_str() == Some("bimedia.localhost")
         && u.path().starts_with(crate::media_relay::REPORT_PATH_PREFIX)
     {
         if let Some(p) = u.path().strip_prefix(crate::media_relay::REPORT_PATH_PREFIX) {
             if let Some(json) = crate::media_relay::decode_b64u(p) {
-                crate::media_relay::push_sniff_report(json);
+                crate::media_relay::push_sniff_report(label, json);
             }
         }
         return false;
@@ -145,41 +208,56 @@ fn sniff_navigation(u: &tauri::Url) -> bool {
     true
 }
 
-/// 打开（或复用）浏览器窗口。
+/// 浏览器窗口共用的 WebView2 数据目录（登录态就存在这里）。
+fn profile_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_local_data_dir()
+        .ok()
+        .map(|p| p.join("browser-profile"))
+}
+
+/// 打开（或复用）某个平台的浏览器窗口。
 ///
-/// `x/y/width/height` 保留在签名里只为兼容既有前端调用；窗口模式下位置由系统窗口
-/// 管理器负责（首次创建居中，之后记住用户拖动后的位置）。
+/// `target` 决定窗口 label 与嗅探归属（同一 target 永远对应同一个窗口）；
+/// `x/y/width/height` 仅为兼容既有前端调用保留，窗口位置交给系统窗口管理器。
 #[tauri::command]
 pub async fn browser_open(
     app: AppHandle,
+    target: Option<String>,
     url: String,
+    title: Option<String>,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    // 参数名必须与前端 payload 一致（Tauri 按参数名反序列化，改成 `_x` 会因为缺字段而失败）
     let _ = (x, y, width, height);
-    let target = parse_target(&url)?;
+    let url_target = parse_target(&url)?;
+    let label = window_label(target.as_deref());
 
-    // 已存在：直接导航并聚焦，不重复创建（label 冲突）
-    if let Some(win) = app.get_webview_window(LABEL) {
-        win.navigate(target).map_err(|e| format!("导航失败：{e}"))?;
+    // 已存在：直接导航并聚焦（同平台重复打开不产生第二个窗口）
+    if let Some(win) = app.get_webview_window(&label) {
+        win.navigate(url_target).map_err(|e| format!("导航失败：{e}"))?;
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
         return Ok(());
     }
 
-    let builder = WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::External(target))
-        .title("安得云荟 · 网页")
+    let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(url_target))
+        .title(title.unwrap_or_else(|| "安得云荟 · 网页".to_string()))
         .inner_size(1120.0, 780.0)
         .min_inner_size(640.0, 420.0)
         .center()
         .user_agent(DESKTOP_UA)
         .additional_browser_args(BROWSER_ARGS)
-        .initialization_script(SNIFF_HOOK)
-        .on_navigation(sniff_navigation);
+        .initialization_script(SNIFF_HOOK);
+    // 固定 profile：cookie/localStorage 持久化，登录一次下次仍在；多个平台窗口共享同一份。
+    if let Some(dir) = profile_dir(&app) {
+        builder = builder.data_directory(dir);
+    }
+    let nav_label = label.clone();
+    builder = builder.on_navigation(move |u| sniff_navigation(&nav_label, u));
 
     let win = builder
         .build()
@@ -188,36 +266,39 @@ pub async fn browser_open(
     Ok(())
 }
 
-/// 兼容旧前端：面板矩形同步。窗口模式下无需同步（保留命令避免调用方报「未注册」）。
+/// 兼容旧前端：窗口模式下无需同步面板矩形。
 #[tauri::command]
 pub async fn browser_set_bounds(
     _app: AppHandle,
+    target: Option<String>,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    let _ = (x, y, width, height);
+    let _ = (target, x, y, width, height);
     Ok(())
 }
 
-/// 在浏览器里导航到新网址（地址栏回车 / 快捷入口）。
+/// 在浏览器里导航到新网址（地址栏回车）。
 #[tauri::command]
-pub async fn browser_navigate(app: AppHandle, url: String) -> Result<(), String> {
-    let target = parse_target(&url)?;
+pub async fn browser_navigate(app: AppHandle, target: Option<String>, url: String) -> Result<(), String> {
+    let u = parse_target(&url)?;
+    let label = window_label(target.as_deref());
     let win = app
-        .get_webview_window(LABEL)
+        .get_webview_window(&label)
         .ok_or_else(|| "浏览器窗口尚未打开".to_string())?;
-    win.navigate(target).map_err(|e| format!("导航失败：{e}"))?;
+    win.navigate(u).map_err(|e| format!("导航失败：{e}"))?;
     let _ = win.set_focus();
     Ok(())
 }
 
-/// 把浏览器窗口提到最前（用户在主界面点「回到浏览器窗口」时用）。
+/// 把某个平台的浏览器窗口提到最前。
 #[tauri::command]
-pub async fn browser_focus(app: AppHandle) -> Result<(), String> {
+pub async fn browser_focus(app: AppHandle, target: Option<String>) -> Result<(), String> {
+    let label = window_label(target.as_deref());
     let win = app
-        .get_webview_window(LABEL)
+        .get_webview_window(&label)
         .ok_or_else(|| "浏览器窗口尚未打开".to_string())?;
     let _ = win.show();
     let _ = win.unminimize();
@@ -225,37 +306,63 @@ pub async fn browser_focus(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 触发一次嗅探：执行收集脚本 → 等页面把结果上报回来 → 返回原始 JSON 列表。
-///
-/// 返回的是页面自报的 JSON 字符串数组（含 page/title/items），由前端解析。
-/// 等 500ms 是因为上报要走一次「导航」往返；宁可多等一点也不漏结果。
+/// 触发一次嗅探：执行收集脚本 → 等页面把结果上报回来 → 返回该窗口的原始 JSON 列表。
 #[tauri::command]
-pub async fn browser_sniff(app: AppHandle) -> Result<Vec<String>, String> {
+pub async fn browser_sniff(app: AppHandle, target: Option<String>) -> Result<Vec<String>, String> {
+    let label = window_label(target.as_deref());
     let wv = app
-        .get_webview(LABEL)
+        .get_webview(&label)
         .ok_or_else(|| "浏览器窗口尚未打开".to_string())?;
     wv.eval(SNIFF_COLLECT)
         .map_err(|e| format!("执行嗅探脚本失败：{e}"))?;
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    Ok(crate::media_relay::take_sniff_reports())
+    // 上报要走一次「导航」往返；宁可多等一点也不漏结果。
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    Ok(crate::media_relay::take_sniff_reports(&label))
 }
 
-/// 当前浏览器地址（用于地址栏回显；失败返回空串）
+/// 当前浏览器地址（地址栏回显用；失败返回空串）
 #[tauri::command]
-pub async fn browser_current_url(app: AppHandle) -> Result<String, String> {
-    match app.get_webview(LABEL) {
+pub async fn browser_current_url(app: AppHandle, target: Option<String>) -> Result<String, String> {
+    let label = window_label(target.as_deref());
+    match app.get_webview(&label) {
         Some(wv) => Ok(wv.url().map(|u| u.to_string()).unwrap_or_default()),
         None => Ok(String::new()),
     }
 }
 
-/// 关闭浏览器窗口
+/// 关闭某个平台的浏览器窗口
 #[tauri::command]
-pub async fn browser_close(app: AppHandle) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window(LABEL) {
+pub async fn browser_close(app: AppHandle, target: Option<String>) -> Result<(), String> {
+    let label = window_label(target.as_deref());
+    if let Some(win) = app.get_webview_window(&label) {
         win.close().map_err(|e| format!("关闭失败：{e}"))?;
     }
     Ok(())
+}
+
+/// 关闭所有由本模块创建的浏览器窗口（离开模块 / 卸载面板时调用）。
+#[tauri::command]
+pub async fn browser_close_all(app: AppHandle) -> Result<(), String> {
+    for win in app.webview_windows().into_values() {
+        if win.label().starts_with(LABEL_PREFIX) {
+            let _ = win.close();
+        }
+    }
+    Ok(())
+}
+
+/// 用**系统默认浏览器**打开网址。
+///
+/// 为什么需要它：部分站点（pixiv 等）在大陆被网络阻断，而 WebView2 只跟随系统代理。
+/// 如果用户的梯子只对浏览器生效（PAC/规则/扩展代理），内嵌窗口就会打不开；
+/// 这时把链接交给系统浏览器是唯一可靠的路。
+#[tauri::command]
+pub async fn browser_open_external(app: AppHandle, url: String) -> Result<(), String> {
+    let target = parse_target(&url)?;
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(target.to_string(), None::<&str>)
+        .map_err(|e| format!("调起系统浏览器失败：{e}"))
 }
 
 /// 上报通道的兜底响应（正常会被 on_navigation 取消，见文件头注释）

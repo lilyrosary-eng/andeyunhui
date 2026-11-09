@@ -13,7 +13,7 @@ import { BrowserPanel } from './BrowserPanel';
 import { VideoStatsView } from './VideoStatsView';
 import { PlaylistGridRow } from '@shared/OnlineMusicTemplates';
 
-const { useState } = React;
+const { useState, useEffect } = React;
 
 interface Props {
   initialPlatformId?: string | null;
@@ -85,6 +85,17 @@ export function OnlineVideoView({
   const platform = videoPlatforms.find((p) => p.id === activeId) || null;
   // 平台内视图只知道「播了什么」，平台 id 由这里补上再交给宿主
   const playWithPlatform = (item: OnlineVideoItem) => onPlayVideo(activeId || '', item);
+
+  // 离开整个网络视频视图时，统一关掉本模块的浏览器窗口。
+  // 注意**不能**放在单个平台面板的清理里：切换平台也会卸载面板，那样就永远只能开一个平台。
+  useEffect(() => {
+    return () => {
+      const api: any = (window as any).__HOST_API__;
+      for (const p of videoPlatforms) {
+        void api?.invoke('browser_close', { target: p.id }).catch(() => {});
+      }
+    };
+  }, []);
 
   return React.createElement(
     'div',

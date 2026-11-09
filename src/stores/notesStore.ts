@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { api, type NoteInfo } from '@/lib/api';
 import { logger } from '@/lib/logger';
 import { renderMarkdownPreview } from '@/core/notes/markdown';
+import type { NoteSourceId } from '@/core/notes/noteSources';
 import { resolveLocalImagesInHtml } from '@/lib/localImage';
 import type { CSSProperties } from 'react';
 
@@ -39,9 +40,15 @@ interface NotesState {
   summonQueue: string[];
   /** 「网络」独立结果页是否打开（侧栏入口切换；打开时主区不显示编辑器） */
   networkOpen: boolean;
+  /** 「网络」源选择抽屉是否打开（与侧栏标题栏的云按钮对应） */
+  networkDrawerOpen: boolean;
+  /** 「网络」当前选中的源（侧栏列表与结果页共用，保证两边永远一致） */
+  networkSource: NoteSourceId;
 
   // ---- actions ----
   setNetworkOpen: (open: boolean) => void;
+  setNetworkDrawerOpen: (open: boolean) => void;
+  setNetworkSource: (source: NoteSourceId) => void;
   setNotes: (notes: NoteInfo[]) => void;
   setSearchQuery: (q: string) => void;
   setTitle: (t: string) => void;
@@ -159,8 +166,12 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   favoriteMeta: new Map(),
   summonQueue: [],
   networkOpen: false,
+  networkDrawerOpen: false,
+  networkSource: 'arxiv',
 
   setNetworkOpen: (networkOpen) => set({ networkOpen }),
+  setNetworkDrawerOpen: (networkDrawerOpen) => set({ networkDrawerOpen }),
+  setNetworkSource: (networkSource) => set({ networkSource }),
   setNotes: (notes) => set({ notes }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setTitle: (title) => {

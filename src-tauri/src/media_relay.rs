@@ -78,24 +78,47 @@ fn parse_single_range(v: &str) -> Option<(u64, Option<u64>)> {
 pub const REPORT_PATH_PREFIX: &str = "/__report/";
 
 /// 嗅探上报缓冲：进程内，前端取走即清空。
-static SNIFF_REPORTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+///
+/// 每条带上报方窗口 label —— 多个平台窗口并行时，A 的嗅探结果绝不能串到 B。
+/// `None` 表示「不知道来自哪个窗口」（只有中继兜底路径会这样），取用时归任意窗口。
+static SNIFF_REPORTS: Mutex<Vec<(Option<String>, String)>> = Mutex::new(Vec::new());
 
 /// 存一条嗅探上报（上限 32 条，避免异常页面把内存撑爆）
-pub fn push_sniff_report(json: String) {
+pub fn push_sniff_report(label: &str, json: String) {
     if let Ok(mut buf) = SNIFF_REPORTS.lock() {
         if buf.len() >= 32 {
             buf.remove(0);
         }
-        buf.push(json);
+        buf.push((Some(label.to_string()), json));
     }
 }
 
-/// 取走全部嗅探上报（取走即清空）
-pub fn take_sniff_reports() -> Vec<String> {
-    SNIFF_REPORTS
-        .lock()
-        .map(|mut b| std::mem::take(&mut *b))
-        .unwrap_or_default()
+/// 中继兜底路径的上报（不带 label）
+pub(crate) fn push_sniff_report_unlabeled(json: String) {
+    if let Ok(mut buf) = SNIFF_REPORTS.lock() {
+        if buf.len() >= 32 {
+            buf.remove(0);
+        }
+        buf.push((None, json));
+    }
+}
+
+/// 取走某个窗口的嗅探上报（取走即清空；未标注来源的也一并交给它）
+pub fn take_sniff_reports(label: &str) -> Vec<String> {
+    let Ok(mut buf) = SNIFF_REPORTS.lock() else {
+        return Vec::new();
+    };
+    let mut mine = Vec::new();
+    let mut rest = Vec::new();
+    for (l, json) in std::mem::take(&mut *buf) {
+        match l {
+            Some(ref l) if l == label => mine.push(json),
+            None => mine.push(json),
+            other => rest.push((other, json)),
+        }
+    }
+    *buf = rest;
+    mine
 }
 
 pub(crate) fn decode_b64u(s: &str) -> Option<String> {
@@ -138,7 +161,7 @@ pub async fn handle(uri: &tauri::http::Uri, range: Option<String>) -> Response<V
     // 嗅探上报通道：不走中继逻辑（见 REPORT_PATH_PREFIX 的注释）
     if let Some(rest) = uri.path().strip_prefix(REPORT_PATH_PREFIX) {
         if let Some(json) = decode_b64u(rest) {
-            push_sniff_report(json);
+            push_sniff_report_unlabeled(json);
         }
         // 正常情况下 on_navigation 会把这次导航取消掉；这里返回「自动返回上一页」的兜底页面，
         // 万一取消没生效，用户也不会卡在一个空白响应上。

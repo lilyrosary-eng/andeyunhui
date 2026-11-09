@@ -2,6 +2,9 @@
 import { ImageViewer } from './ImageViewer';
 import { ImageSidebar, albumCoverKey } from './ImageSidebar';
 import { ImageStatsPage } from './ImageStatsPage';
+import { OnlineImageView } from './online/OnlineImageView';
+import { IMAGE_PLATFORMS } from './online/imagePlatforms';
+import { CloudDrawer } from '@shared/CloudDrawer';
 import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 const React = window.__HOST_REACT__;
@@ -139,6 +142,10 @@ function ImageModule() {
   const [showSettings, setShowSettings] = useState(false);
   // 「统计」页：覆盖主内容区（不覆盖侧栏），数据取自已扫描的 folders/customAlbums
   const [showStats, setShowStats] = useState(false);
+  // 「网络」视图：pixiv 等官方网页壳（与视频模块同构：侧栏换成平台列表）
+  const [showNetwork, setShowNetwork] = useState(false);
+  // 平台选择抽屉（入口与视频/音乐一致：侧栏标题栏的「网络」按钮 → 右侧抽屉）
+  const [networkDrawerOpen, setNetworkDrawerOpen] = useState(false);
   // 收藏的图片（路径列表，最近收藏在前）
   const [favorites, setFavorites] = useState<string[]>(() => {
     try {
@@ -476,8 +483,21 @@ function ImageModule() {
     );
   }
 
+  // 「网络」视图：整块替换模块内容（含自己的平台列表侧栏），与视频模块的在线视图同构。
+  // 放在这里而不是塞进主区，是为了让侧栏也换成「平台列表」，三处交互一致。
+  if (showNetwork) {
+    return (
+      <div className="relative flex-1 h-full overflow-hidden">
+        <OnlineImageView
+          onExit={() => setShowNetwork(false)}
+          onOpenModuleSettings={handleOpenModuleSettings}
+        />
+      </div>
+    );
+  }
+
   return (
-    <div className="flex-1 flex h-full overflow-hidden">
+    <div className="relative flex-1 flex h-full overflow-hidden">
       <ImageSidebar
         folders={sidebarFolders}
         customAlbums={customAlbums}
@@ -495,6 +515,8 @@ function ImageModule() {
         onOpenModuleSettings={handleOpenModuleSettings}
         onOpenStats={() => setShowStats((v) => !v)}
         statsActive={showStats}
+        onOpenNetwork={() => setNetworkDrawerOpen(true)}
+        networkActive={showNetwork}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
       />
@@ -596,6 +618,45 @@ function ImageModule() {
           </div>
         )}
       </div>
+      {/* 平台选择抽屉：与视频「云视频」/音乐「云音乐」同一套组件 */}
+      <CloudDrawer
+        open={networkDrawerOpen}
+        onClose={() => setNetworkDrawerOpen(false)}
+        title="网络图片"
+        sectionLabel="图片来源"
+        groups={[
+          {
+            key: 'local',
+            title: '本地图库',
+            desc: '本机文件夹扫描',
+            active: !showNetwork,
+            onSelect: () => {
+              setShowNetwork(false);
+              setNetworkDrawerOpen(false);
+            },
+          },
+          {
+            key: 'network',
+            title: '网络图片',
+            desc: '官方页面 · 浏览器窗口',
+            active: showNetwork,
+            defaultExpanded: true,
+            items: IMAGE_PLATFORMS.map((p) => ({
+              id: p.id,
+              name: p.name,
+              desc: p.desc,
+              accent: p.accent,
+              // pixiv 在大陆被阻断：这里提前标注，避免用户以为是模块坏了
+              badge: p.id === 'pixiv' ? '需代理' : undefined,
+            })),
+            onPick: () => {
+              setShowNetwork(true);
+              setNetworkDrawerOpen(false);
+            },
+          },
+        ]}
+        footer="只打开官方页面：登录与浏览都在站点自己完成，我们不抓取内容、不批量下载。pixiv 在大陆需代理（WebView2 跟随系统代理）。"
+      />
     </div>
   );
 }

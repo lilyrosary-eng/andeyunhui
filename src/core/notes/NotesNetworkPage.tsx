@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { Globe, Search, X, Loader2, AlertCircle, BookmarkPlus, Check, ExternalLink } from 'lucide-react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { useNotesStore } from '@/stores/notesStore';
@@ -6,7 +6,6 @@ import {
   NOTE_SOURCES,
   searchNoteSource,
   toNoteMarkdown,
-  type NoteSourceId,
   type NoteWebResult,
 } from './noteSources';
 
@@ -17,10 +16,10 @@ import {
  * 收藏：把标题 / 作者 / 日期 / 原文链接 / 摘要写成一篇新笔记（属引用，不复制全文）。
  */
 export function NotesNetworkPage() {
+  const source = useNotesStore((s) => s.networkSource);
   const setNetworkOpen = useNotesStore((s) => s.setNetworkOpen);
   const createNoteWith = useNotesStore((s) => s.createNoteWith);
 
-  const [source, setSource] = useState<NoteSourceId>('arxiv');
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,6 +32,13 @@ export function NotesNetworkPage() {
     () => NOTE_SOURCES.find((s) => s.id === source) ?? NOTE_SOURCES[0],
     [source],
   );
+
+  // 换源（在左侧栏点）时清空旧结果，避免把 A 源的结果当成 B 源的
+  useEffect(() => {
+    setItems([]);
+    setSearched(false);
+    setError(null);
+  }, [source]);
 
   const runSearch = useCallback(
     async (override?: string) => {
@@ -130,33 +136,20 @@ export function NotesNetworkPage() {
         </button>
       </div>
 
-      {/* ===== 源切换 ===== */}
-      <div className="shrink-0 mt-3 flex flex-wrap items-center gap-2">
-        {NOTE_SOURCES.map((s) => {
-          const active = s.id === source;
-          return (
-            <button
-              key={s.id}
-              onClick={() => {
-                setSource(s.id);
-                setItems([]);
-                setSearched(false);
-                setError(null);
-              }}
-              className={`btn-press rounded-full px-3 py-1 text-xs transition-colors ${
-                active
-                  ? 'text-white'
-                  : 'text-neutral-500 dark:text-stone-400 bg-neutral-100 dark:bg-stone-800 hover:bg-neutral-200 dark:hover:bg-stone-700'
-              }`}
-              style={active ? { background: s.accent } : undefined}
-              title={s.desc}
-            >
-              {s.name}
-            </button>
-          );
-        })}
-        <span className="text-[11px] text-neutral-400 dark:text-stone-500 truncate">{activeSource.desc}</span>
+      {/* ===== 当前源（切换在左侧栏的源列表里，这里只回显 ） ===== */}
+      <div className="shrink-0 mt-3 flex items-center gap-2">
+        <span
+          className="rounded-full px-2.5 py-0.5 text-[11px] text-white shrink-0"
+          style={{ background: activeSource.accent }}
+        >
+          {activeSource.name}
+        </span>
+        <span className="text-[11px] text-neutral-400 dark:text-stone-500 truncate">
+          {activeSource.desc}
+        </span>
       </div>
+
+      {/* 换源时的清理在下面用 effect 做，这里不留占位节点 */}
 
       {/* ===== 状态条 ===== */}
       {error && (

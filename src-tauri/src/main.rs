@@ -2060,6 +2060,8 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             andeyunhui_lib::embedded_browser::browser_current_url,
             andeyunhui_lib::embedded_browser::browser_focus,
             andeyunhui_lib::embedded_browser::browser_close,
+            andeyunhui_lib::embedded_browser::browser_close_all,
+            andeyunhui_lib::embedded_browser::browser_open_external,
             // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========
             smtc_update,
             smtc_control,

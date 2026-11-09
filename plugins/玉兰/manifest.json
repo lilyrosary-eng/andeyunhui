@@ -13,6 +13,7 @@
       "browser_close",
       "browser_focus",
       "browser_open",
+      "browser_open_external",
       "browser_set_bounds",
       "browser_sniff",
       "cancel_open_book",

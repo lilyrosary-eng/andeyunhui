@@ -4,7 +4,7 @@ import { T, useLang } from '../../_shared/pluginRuntime';
 import { ThumbImg, PageIndicator } from './ImageViewer';
 const { useState } = React;
 const hostApi = window.__HOST_API__;
-const { ModuleSidebarShell, SecondaryNavShell, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, BarChart3 } = window.__HOST_UI__ || {};
+const { ModuleSidebarShell, SecondaryNavShell, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, BarChart3, Globe: GlobeIcon } = window.__HOST_UI__ || {};
 
 // 相册自选封面的键：两类相册共用一张表（见 index.tsx 的 STORAGE_KEY_COVERS），
 // 用前缀区分来源，避免键相互碰撞。放在这里而非 index.tsx，是为了避免
@@ -87,6 +87,10 @@ interface ImageSidebarProps {
   onOpenStats?: () => void;
   /** 统计页是否正在显示（用于侧栏按钮高亮，与音乐/阅读模块一致） */
   statsActive?: boolean;
+  /** 打开「网络」视图（pixiv 等官方网页壳）；不传则不显示该入口 */
+  onOpenNetwork?: () => void;
+  /** 网络视图是否正在显示 */
+  networkActive?: boolean;
   searchQuery?: string;
   onSearchChange?: (value: string) => void;
 }
@@ -324,7 +328,7 @@ function CoverPickerOverlay(props: {
   ));
 }
 
-export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, onSelectFolder, onAddRoot, onRescan, onRenameFolder, onDeleteFolder, onDeleteAlbum, albumCovers, onSetCover, onOpenModuleSettings, onOpenStats, statsActive, searchQuery, onSearchChange }: ImageSidebarProps) {
+export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, onSelectFolder, onAddRoot, onRescan, onRenameFolder, onDeleteFolder, onDeleteAlbum, albumCovers, onSetCover, onOpenModuleSettings, onOpenStats, statsActive, onOpenNetwork, networkActive, searchQuery, onSearchChange }: ImageSidebarProps) {
   useLang();
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState('');
@@ -583,6 +587,27 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
       })
     : null;
 
+  // 网络入口：与视频/音乐一致 —— 侧栏标题栏右侧的「云」按钮（icon+文字），
+  // 点开由宿主渲染右侧抽屉选平台。不再用侧栏底部的小图标。
+  const networkTitleAction = onOpenNetwork
+    ? React.createElement('button', {
+        key: 'open-network',
+        onClick: () => onOpenNetwork(),
+        title: '网络图片',
+        className: `btn-press flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs transition-colors ${
+          networkActive
+            ? 'text-[var(--element-color-raw)] bg-[var(--element-muted)]'
+            : 'text-neutral-500 dark:text-stone-400 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)]'
+        }`,
+        children: [
+          GlobeIcon
+            ? React.createElement(GlobeIcon, { key: 'i', size: 14, strokeWidth: 2 })
+            : React.createElement('span', { key: 'i' }, '🌐'),
+          React.createElement('span', { key: 't' }, '网络'),
+        ],
+      })
+    : null;
+
   // 封面选择面板：与侧栏同级渲染（fixed 覆盖层），两种布局分支都要挂上
   const coverPageCount = Math.max(1, Math.ceil(coverCandidates.length / COVER_PAGE_CANDIDATES));
   // 候选列表变化后页码可能越界（例如从 5 页的相册切到 1 页的相册），渲染前夹紧
@@ -647,6 +672,7 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
       title: T('image.title'),
       onOpenModuleSettings,
       footerExtra: statsButton,
+      titleActions: networkTitleAction,
       searchQuery,
       onSearchChange,
       searchPlaceholder: T('image.sidebar.search'),

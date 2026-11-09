@@ -5,7 +5,7 @@ import React from 'react';
 import ReactDOM from 'react-dom';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, emit } from '@tauri-apps/api/event';
-import { BarChart3 } from 'lucide-react';
+import { BarChart3, Globe } from 'lucide-react';
 import { PluginRegistry, HOST_API_VERSION } from '@/core/pluginRegistry';
 import { api, type PluginManifest } from '@/lib/api';
 import { pluginDiagnostics } from '@/core/pluginDiagnostics';
@@ -104,7 +104,7 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
 
     // 挂载宿主 React 和 API 到全局（仅首次设置，后续不可覆盖）
     const hostApi = { invoke, convertFileSrc, listen, emit, createFrameBuffer };
-    const hostUi = { ModuleSidebarShell, SecondaryNavShell, NestedNavList, ModuleSettingsPanel, CollapsibleSearch, IconButton, Icon: PluginIcon, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, Ripple, SlidingTabs, ScrollReveal, PushView, BarChart3 };
+    const hostUi = { ModuleSidebarShell, SecondaryNavShell, NestedNavList, ModuleSettingsPanel, CollapsibleSearch, IconButton, Icon: PluginIcon, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, Ripple, SlidingTabs, ScrollReveal, PushView, BarChart3, Globe };
     // i18n：把翻译函数与语言状态注入沙箱，插件通过 window.__HOST_I18N__ 使用
     // （t/translate 读取宿主侧 currentLang，语言切换由主应用 setLanguage 广播 app-language-change 事件）
     const hostI18n = { t, translate, getLanguage, LANGUAGES };
