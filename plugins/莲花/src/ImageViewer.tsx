@@ -274,13 +274,26 @@ function TileImage({
       // 图像左上角的屏幕坐标 = 适配矩形左上角 + 相机平移
       const imgLeft = br.left + crop.x;
       const imgTop = br.top + crop.y;
+      // **视口的边必须取容器矩形，不是图片矩形**（2026-11-09 修）。
+      // 之前写的是 `br.left - 60` / `br.left + viewSize.w + 60`，
+      // 把「图片左边缘」当成了「视口左边缘」。图片比窗口窄时（竖图、或窗口很宽），
+      // br.left > 容器.left ⇒ 左侧那一条可见区域被漏掉（**左上角经常不加载**），
+      // 而右侧多算出一屏 ⇒ 屏幕外的右下反而被加载。用户看到的偏移就是这个。
+      const cr = containerRef?.current?.getBoundingClientRect();
+      const vLeft = cr && cr.width > 0 ? cr.left : br.left;
+      const vTop = cr && cr.height > 0 ? cr.top : br.top;
+      const vW = cr && cr.width > 0 ? cr.width : viewSize.w;
+      const vH = cr && cr.height > 0 ? cr.height : viewSize.h;
+      // **加载区放大到 1.5 倍视口**（原来只外扩 60px）：平移时不容易露白，
+      // 代价是每屏多几块（512²≈1MiB/块），仍在预算内。
+      const margin = Math.max(160, Math.round(Math.max(vW, vH) * 0.5));
       // 屏幕 → 图像坐标 → 层像素坐标
       const toLayer = (screen: number, origin: number, cssSize: number, layerSize: number) =>
         ((screen - origin) / crop.s) * (layerSize / cssSize);
-      const x0 = toLayer(br.left - 60, imgLeft, br.width, lv.width);
-      const x1 = toLayer(br.left + viewSize.w + 60, imgLeft, br.width, lv.width);
-      const y0 = toLayer(br.top - 60, imgTop, br.height, lv.height);
-      const y1 = toLayer(br.top + viewSize.h + 60, imgTop, br.height, lv.height);
+      const x0 = toLayer(vLeft - margin, imgLeft, br.width, lv.width);
+      const x1 = toLayer(vLeft + vW + margin, imgLeft, br.width, lv.width);
+      const y0 = toLayer(vTop - margin, imgTop, br.height, lv.height);
+      const y1 = toLayer(vTop + vH + margin, imgTop, br.height, lv.height);
       c0 = Math.max(0, Math.floor(x0 / t));
       c1 = Math.min(lv.cols - 1, Math.floor(x1 / t));
       r0 = Math.max(0, Math.floor(y0 / t));
@@ -1666,7 +1679,6 @@ function FullView({
   /** 这张图太小，不需要瓦片 —— 直接用原图 <img> */
   const [smallImage, setSmallImage] = useState(false);
   /** 瓦片不可用 —— 回退到 200px 缩略图 */
-  const [tileFallback, setTileFallback] = useState<string>('');
   /** 瓦片开关（localStorage 'image.tiles' = '0' 可关闭，用于 A/B 对比） */
   const tilesEnabled = useMemo(() => {
     try {
@@ -1704,33 +1716,12 @@ function FullView({
     setImgError(false);
     setTilesReady(false);
     setSmallImage(false);
-    setTileFallback('');
     setGifDataUrl(null);
     if (isCurrentGif && currentPath) {
       let cancelled = false;
       hostApi.invoke<string>('read_file_base64', { filePath: currentPath })
         .then((dataUrl) => { if (!cancelled) setGifDataUrl(dataUrl); })
         .catch(() => { if (!cancelled) setImgError(true); });
-      return () => { cancelled = true; };
-    }
-    // **瓦片模式下底图必须真的存在**（2026-11-09 实锤的坑）：
-    // 底图 src 是 `tileFallback || displaySrc`，而 displaySrc 早已停用（恒为空）、
-    // tileFallback 只在"瓦片生成失败"时才写 ⇒ **正常浏览时底图 src 是空串**，
-    // 整块画面完全靠 canvas。于是换图后瓦片还没到时，canvas 上仍是上一张的旧瓦片，
-    // 看起来就是「翻页了还是这张图，缩放也没反应」。
-    // 这里在换图瞬间先取一张 200px 缩略图（后端有磁盘缓存，很快）当底图，
-    // 保证屏幕上立刻是新图；瓦片到达后 tilesReady 会把它 display:none。
-    if (currentPath) {
-      let cancelled = false;
-      const t0 = performance.now();
-      void hostApi
-        .invoke<string>('generate_thumbnail', { imagePath: currentPath, width: 200 })
-        .then((t) => {
-          if (cancelled || !t) return;
-          console.info(`[莲花/tiles] 底图就绪 ${(performance.now() - t0).toFixed(0)}ms`);
-          setTileFallback(safeFileSrc(t));
-        })
-        .catch((e) => console.warn('[莲花/tiles] 底图生成失败（画面只能等瓦片）:', e));
       return () => { cancelled = true; };
     }
   }, [currentIndex, isCurrentGif, currentPath]);
@@ -1789,9 +1780,12 @@ function FullView({
           ref={canvasRef}
           className="absolute inset-0 w-full h-full select-none"
         />
-      ) : tilesEnabled && engine === 'tiles' && !isCurrentGif && !smallImage && !tileFallback
+      ) : tilesEnabled && engine === 'tiles' && !isCurrentGif && !smallImage
+        // 瓦片模式：**不要底图**。整块画面由 TileImage 的 canvas 负责。
+        // 曾经回过 200px 缩略图，实测不可用（尺寸只有 200px、被 flex 居中后与瓦片坐标系
+        // 完全错位、放大后极糊），2026-11-09 用户要求删除。
         ? null
-        : !isCurrentGif && !smallImage && !tileFallback && !displaySrc && engine !== 'raw' ? (
+        : !isCurrentGif && !smallImage && !displaySrc && engine !== 'raw' ? (
         // 显示层还没就绪：**绝不回退原图**。
         // 回退原图会让 WebView 解码 8192×8192（≈268MB）—— 表现就是
         // 「打开大图时整机卡死」+「画质在原图/降采样之间来回跳」。
@@ -1807,7 +1801,7 @@ function FullView({
               ? gifDataUrl || currentUrl
               : engine === 'raw' || smallImage
                 ? currentUrl
-                : tileFallback || displaySrc
+                : displaySrc
           }
           alt={`${currentIndex + 1}/${imgUrls.length}`}
           key={currentIndex}
@@ -1865,16 +1859,16 @@ function FullView({
                     setSmallImage(true); // 小图走原图
                     return;
                   }
-                  return hostApi
-                    .invoke<string>('generate_thumbnail', {
-                      imagePath: currentPath,
-                      width: 200,
-                    })
-                    .then((t) => {
-                      if (t) setTileFallback(safeFileSrc(t));
-                    });
+                  // **不再回退 200px 缩略图**（2026-11-09 删）：它尺寸只有 200px、
+                  // 被 flex 居中后与瓦片坐标系完全错位、放大后极糊 —— 用户明确了不可用。
+                  // 瓦片真失败就显式报错，别给一张"看起来像图但位置尺寸全错"的东西。
+                  console.warn('[莲花/tiles] 瓦片不可用且无兜底图（缩略图兜底已删除）:', currentPath);
+                  setImgError(true);
                 })
-                .catch(() => {});
+                .catch((e) => {
+                  console.warn('[莲花/tiles] 兜底判定失败:', e);
+                  setImgError(true);
+                });
             }}
             // **必须回填尺寸**：瓦片启用时底层 <img> 不渲染，getBaseRect 拿不到
             // naturalWidth ⇒ base.width = 0 ⇒ 瓦片层把 8192 当成适配尺寸 ⇒
