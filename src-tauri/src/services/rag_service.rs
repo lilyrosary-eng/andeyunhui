@@ -1630,6 +1630,28 @@ fn rerank_score_of(item: &serde_json::Value) -> Option<f32> {
     None
 }
 
+/// 识别「上游根本没有 rerank 接口」这类响应。
+///
+/// 现实里很常见：LM Studio、部分 OpenAI 兼容网关对未实现的端点返回 **HTTP 200**
+/// + `{"error":"Unexpected endpoint or method. (POST /v1/rerank)"}`。
+/// 直接进 `parse_rerank_items` 只会得到「既没有 results 也没有 data」这种没法行动的报错，
+/// 用户看不出「是端点不支持」还是「模型没加载」。这里先拦一层，给出可执行的两条路。
+fn rerank_unsupported_hint(v: &serde_json::Value) -> Option<String> {
+    let err = v.get("error")?;
+    let detail = match err {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.get("message").and_then(|m| m.as_str()).map(str::to_string)
+            .unwrap_or_else(|| other.to_string()),
+    };
+    Some(format!(
+        "该端点没有实现重排接口（上游原文：{}）。\
+         LM Studio 与多数 OpenAI 兼容网关只提供 /v1/chat/completions 与 /v1/embeddings，不含 /v1/rerank。\
+         可选：① 把「重排端点」换成支持 /v1/rerank 的服务（Cohere / Jina / SiliconFlow / vLLM / Xinference，\
+         或 TEI 的 /rerank）；② 关闭重排，用向量排序（检索照常工作，只是少了精排）。",
+        detail.chars().take(160).collect::<String>()
+    ))
+}
+
 /// 解析重排响应体为 `(index, score)` 列表。**纯函数**，可单测（不依赖网络）。
 ///
 /// 校验三件事，任一不满足就报错而不是给一堆 0 分：
@@ -1774,6 +1796,11 @@ pub async fn rag_rerank_api(req: RagRerankRequest) -> Result<RagRerankResponse, 
         .json()
         .await
         .map_err(|e| format!("解析重排响应失败: {e}"))?;
+    // 200 + {"error": ...}：端点不认 /v1/rerank（LM Studio 等）。先拦，别让用户去猜 JSON。
+    if let Some(hint) = rerank_unsupported_hint(&v) {
+        log::warn!("[rag-rerank] 端点不支持 rerank · endpoint={endpoint} · model={model}");
+        return Err(hint);
+    }
     let results = parse_rerank_items(&v, documents.len())?;
     log::info!(
         "[rag-rerank] ok endpoint={endpoint} model={model} 候选={} 返回={}",
@@ -1941,6 +1968,25 @@ mod tests {
         assert!(parse_rerank_items(&v, 1).unwrap_err().contains("分数"));
         let v = serde_json::json!({ "results": [{ "index": 0, "score": "0.5" }] });
         assert!(parse_rerank_items(&v, 1).is_err(), "字符串分数不该被当成数字");
+    }
+
+    /// 上游根本没有 rerank 接口（LM Studio 的典型响应）：要给出「端点不支持」+ 两条出路，
+    /// 而不是「既没有 results 也没有 data」这种用户无法行动的解析错误。
+    #[test]
+    fn 重排端点不支持时给出可执行提示() {
+        let v = serde_json::json!({
+            "error": "Unexpected endpoint or method. (POST /v1/rerank)"
+        });
+        let hint = rerank_unsupported_hint(&v).expect("应识别为端点不支持");
+        assert!(hint.contains("没有实现重排接口"));
+        assert!(hint.contains("LM Studio"), "要点名最常见的来源，用户才知道对得上");
+        assert!(hint.contains("关闭重排"));
+        // 正常响应不能被误判
+        let ok = serde_json::json!({ "results": [{ "index": 0, "relevance_score": 0.9 }] });
+        assert!(rerank_unsupported_hint(&ok).is_none());
+        // error 是对象形状（OpenAI 风格）也要能读出 message
+        let obj = serde_json::json!({ "error": { "message": "not found", "type": "invalid_request" } });
+        assert!(rerank_unsupported_hint(&obj).unwrap().contains("not found"));
     }
 
     /// 超时钳制：0 / 超大值都不能把提问的关键路径拖死。
