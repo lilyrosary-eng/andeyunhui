@@ -35,6 +35,15 @@ export interface CollabRoomSource {
   sessionId?: string | null;
 }
 
+/** 新建混编房间时的成员草稿：一个房间可以同时用不同 harness 与模型。 */
+export interface CollabMemberInput {
+  name?: string;
+  harnessId: string;
+  /** 成员级模型（native / dsh 生效）；空串跟随默认 */
+  model?: string;
+  persona?: string;
+}
+
 export interface CollabRoom {
   id: string;
   name: string;
@@ -171,6 +180,8 @@ export interface UseAiCollabResult {
   setWorkspace: (workspace: string | null) => Promise<void>;
   /** models：按成员顺序指定模型（可空）；同一 harness 内可用不同模型 */
   createRoom: (name?: string, harnessId?: string, models?: string[]) => Promise<void>;
+  /** 混编房间：成员各自指定 harness 与模型（native / dsh / mcp / 信箱可同室） */
+  createRoomWithAgents: (members: CollabMemberInput[], name?: string) => Promise<void>;
   deleteRoom: (roomId: string) => Promise<void>;
   selectRoom: (roomId: string) => Promise<void>;
   send: (text: string) => Promise<void>;
@@ -439,40 +450,31 @@ export function useAiCollab(): UseAiCollabResult {
     }
   }, []);
 
-  const createRoom = useCallback(async (name?: string, harnessId = 'echo', models?: string[]) => {
+  // 混编房间：每个成员自带 harness 与模型。createRoom 只是它的「同 harness」特例，
+  // 这样成员构造与校验只有一处，避免两条建房间路径慢慢漂移。
+  const createRoomWithAgents = useCallback(async (members: CollabMemberInput[], name?: string) => {
     setError(null);
-    // 前端显式带成员，确保房间使用用户选中的 harness；后端仍保留默认 echo 兜底。
-    // models 与成员顺序对应：空字符串表示该成员跟随 harness 的默认模型。
-    const agents: CollabAgent[] = [
-      {
-        id: 'lead',
-        name: '主导',
-        harnessId,
-        persona: '负责拆解任务、分派成员、汇总结果',
-        model: models?.[0]?.trim() ?? '',
-      },
-      {
-        id: 'worker',
-        name: '执行',
-        harnessId,
-        persona: '负责执行被分派的子任务',
-        model: models?.[1]?.trim() ?? '',
-      },
-    ];
+    const agents: CollabAgent[] = members.map((member, index) => ({
+      // 前两个沿用 lead / worker，第三个起用 memberN：老房间的习惯与看板显示保持一致。
+      id: index === 0 ? 'lead' : index === 1 ? 'worker' : `member${index + 1}`,
+      name: member.name?.trim() || (index === 0 ? '主导' : `成员${index + 1}`),
+      harnessId: member.harnessId,
+      persona:
+        member.persona
+        ?? (index === 0 ? '负责拆解任务、分派成员、汇总结果' : '负责执行被分派的子任务'),
+      model: member.model?.trim() ?? '',
+    }));
+    if (agents.length < 2) {
+      setError('协作房间至少需要 2 个成员');
+      return;
+    }
+    if (agents.some((agent) => !agent.harnessId)) {
+      setError('每个成员都必须选择 harness');
+      return;
+    }
     try {
-      const fallbackName = harnessId === 'dsh'
-        ? 'DeepSeek 本地协作'
-        : harnessId === 'mcp'
-          ? 'MCP 协作房间'
-          : harnessId === 'stream-json'
-            ? 'stream-json 协作'
-            : harnessId === 'mailbox'
-              ? '.Talk 信箱协作'
-              : harnessId === 'native'
-                ? '应用内置模型协作'
-                : '协作房间';
       const room = await invoke<CollabRoom>('collab_room_create', {
-        name: name?.trim() || fallbackName,
+        name: name?.trim() || '混编协作房间',
         agents,
         leadId: 'lead',
       });
@@ -482,6 +484,27 @@ export function useAiCollab(): UseAiCollabResult {
       setError(String(err));
     }
   }, [refreshRooms, selectRoom]);
+
+  const createRoom = useCallback(async (name?: string, harnessId = 'echo', models?: string[]) => {
+    const fallbackName = harnessId === 'dsh'
+      ? 'DeepSeek 本地协作'
+      : harnessId === 'mcp'
+        ? 'MCP 协作房间'
+        : harnessId === 'stream-json'
+          ? 'stream-json 协作'
+          : harnessId === 'mailbox'
+            ? '.Talk 信箱协作'
+            : harnessId === 'native'
+              ? '应用内置模型协作'
+              : '协作房间';
+    await createRoomWithAgents(
+      [
+        { name: '主导', harnessId, model: models?.[0] },
+        { name: '执行', harnessId, model: models?.[1] },
+      ],
+      name?.trim() || fallbackName,
+    );
+  }, [createRoomWithAgents]);
 
   const deleteRoom = useCallback(async (roomId: string) => {
     setError(null);
@@ -596,6 +619,7 @@ export function useAiCollab(): UseAiCollabResult {
     importDshSession,
     setWorkspace,
     createRoom,
+    createRoomWithAgents,
     deleteRoom,
     selectRoom,
     send,

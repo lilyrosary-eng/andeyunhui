@@ -907,15 +907,10 @@ fn build_prompt(base: &Path, room: &Room, assignment: &Assignment, include_histo
         prompt.push_str(&format!("你是「{name}」，角色：{persona}。\n\n"));
     }
 
-    // 导入房间把已有会话的最近上下文带给模型。headless 每次是新进程，
-    // 不注入就会出现「导入了历史但模型看不见」的割裂感。
-    if include_history
-        && room
-            .source
-            .as_ref()
-            .map(|source| source.kind.as_str())
-            .unwrap_or("") == "dsh-import"
-    {
+    // 一次性执行器（headless / stream-json / native）每次都是全新上下文：
+    // 不注入最近消息，多轮协作里模型就看不见前面说过什么。
+    // ACP 走 session/resume，历史在原生会话里，调用方传 false 避免重复。
+    if include_history {
         if let Ok(events) = store::read_events(base, &room.id, None) {
             let mut lines: Vec<String> = Vec::new();
             let mut skipped_current = false;
@@ -939,7 +934,16 @@ fn build_prompt(base: &Path, room: &Room, assignment: &Assignment, include_histo
                     .and_then(|data| data.get("role"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("agent");
-                let who = if role == "user" { "用户" } else { "助手" };
+                // 混编房间里多个成员可能用不同 harness，只写「助手」会让模型分不清谁说过什么。
+                let who = if role == "user" {
+                    "用户".to_string()
+                } else {
+                    event
+                        .agent_id
+                        .as_deref()
+                        .map(|id| agent_name(room, id))
+                        .unwrap_or_else(|| "助手".to_string())
+                };
                 lines.push(format!("{who}：{}", clip_text(text, 500)));
             }
             if !lines.is_empty() {
@@ -1955,6 +1959,31 @@ mod tests {
             resolve_agent_model(&config, Some(&provider_model)),
             ("openai".to_string(), "gpt-4o".to_string())
         );
+    }
+
+    /// 混编房间：一次性执行器（native / headless / stream-json）必须带上共享会话最近消息，
+    /// 且按成员名标注发言人；ACP 路径传 false 时不能重复注入。
+    #[test]
+    fn prompt_carries_shared_history_with_member_names() {
+        let base = temp_base("prompt-history");
+        let room = test_room("room_prompt_history");
+        let past = create_assignment_core(&base, &room, None, "worker", "先做点什么")
+            .unwrap()
+            .assignment;
+        complete_assignment_core(&base, &room, &past, "已完成第一步", None).unwrap();
+        let current = create_assignment_core(&base, &room, None, "worker", "接着做")
+            .unwrap()
+            .assignment;
+
+        let prompt = build_prompt(&base, &room, &current, true);
+        assert!(prompt.contains("已完成第一步"));
+        assert!(prompt.contains("执行：已完成第一步"));
+        assert!(prompt.contains("接着做"));
+
+        let lean = build_prompt(&base, &room, &current, false);
+        assert!(!lean.contains("已完成第一步"));
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     /// `.Talk` 信箱成员：建任务即投递到工作目录，结果回传时走 complete_assignment_core。

@@ -540,6 +540,8 @@ const Root = memo(function Root() {
         onCreateMcpRoom={() => void collab.createRoom(undefined, 'mcp')}
         onCreateNativeRoom={() => void collab.createRoom(undefined, 'native')}
         nativeAvailable={collab.harnesses.find((harness) => harness.id === 'native')?.available ?? false}
+        harnesses={collab.harnesses}
+        onCreateCustomRoom={(members) => void collab.createRoomWithAgents(members)}
         onCreateStreamJsonRoom={() => void collab.createRoom(undefined, 'stream-json')}
         streamJsonAvailable={collab.harnesses.find((harness) => harness.id === 'stream-json')?.available ?? false}
         onCreateMailboxRoom={() => void collab.createRoom(undefined, 'mailbox')}

@@ -10,8 +10,8 @@ import {
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  CollabAssignment, CollabAssignmentStatus, CollabEvent, CollabMcpInfo, CollabPermissionRequest, CollabRoom,
-  DshSessionSummary,
+  CollabAssignment, CollabAssignmentStatus, CollabEvent, CollabHarnessInfo, CollabMcpInfo,
+  CollabMemberInput, CollabPermissionRequest, CollabRoom, DshSessionSummary,
 } from '@/core/ai/aiCollab';
 import { DshSessionImportDialog } from '@/components/ai-chat/DshSessionImportDialog';
 
@@ -29,6 +29,10 @@ interface AiCollabViewProps {
   /** 新建应用内置模型房间：直接用设置页的 AI 配置执行 */
   onCreateNativeRoom?: () => void;
   nativeAvailable?: boolean;
+  /** harness 目录（混编房间按它列可选项） */
+  harnesses?: CollabHarnessInfo[];
+  /** 混编房间：成员各自选 harness 与模型 */
+  onCreateCustomRoom?: (members: CollabMemberInput[]) => void;
   /** 新建 stream-json 房间（需要先配置 stream-json.json） */
   onCreateStreamJsonRoom?: () => void;
   streamJsonAvailable?: boolean;
@@ -370,6 +374,141 @@ function McpDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+/// 混编房间：每个成员各自选 harness 与模型。
+/// 只列可用 harness —— 选了不可用项会在第一次派单时失败，比在建房间时就挡住更晚也更难懂。
+function MixedRoomDialog({
+  harnesses,
+  onClose,
+  onCreate,
+}: {
+  harnesses: CollabHarnessInfo[];
+  onClose: () => void;
+  onCreate: (members: CollabMemberInput[]) => void;
+}) {
+  const options = harnesses.filter((harness) => harness.available);
+  const ids = options.map((harness) => harness.id);
+  const pick = (...wanted: string[]) => wanted.find((id) => ids.includes(id)) ?? ids[0] ?? 'echo';
+  const [members, setMembers] = useState<CollabMemberInput[]>(() => [
+    { name: '主导', harnessId: pick('native', 'dsh'), model: '' },
+    { name: '执行', harnessId: pick('dsh', 'mcp', 'native'), model: '' },
+  ]);
+
+  const update = (index: number, patch: Partial<CollabMemberInput>) => {
+    setMembers((prev) => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)));
+  };
+  // 模型只对「按模型调用」的 harness 有意义；echo / mcp / 信箱的模型字段会被忽略。
+  const usesModel = (harnessId: string) => ['native', 'dsh', 'acp'].includes(harnessId);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-[520px] max-w-full rounded-2xl border border-neutral-200 bg-white shadow-2xl dark:border-stone-700 dark:bg-stone-900"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center gap-2 border-b border-neutral-200 px-5 py-3 dark:border-stone-700">
+          <Network size={18} className="text-indigo-600 dark:text-indigo-400" />
+          <div>
+            <div className="text-sm font-semibold text-neutral-800 dark:text-stone-100">混编协作房间</div>
+            <div className="mt-0.5 text-[11px] text-neutral-400 dark:text-stone-500">
+              每个成员独立选择 harness 与模型，第一位成员负责主导。
+            </div>
+          </div>
+        </header>
+        <div className="space-y-3 p-5 text-xs">
+          {members.map((member, index) => (
+            <div
+              key={index}
+              className="space-y-1.5 rounded-xl border border-neutral-200 p-3 dark:border-stone-700"
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  value={member.name ?? ''}
+                  onChange={(event) => update(index, { name: event.target.value })}
+                  placeholder={index === 0 ? '主导' : `成员${index + 1}`}
+                  className="w-24 rounded-lg border border-neutral-300 bg-white px-2 py-1.5 text-sm outline-none focus:border-indigo-400 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-100"
+                />
+                <select
+                  value={member.harnessId}
+                  onChange={(event) => {
+                    const harnessId = event.target.value;
+                    // 切到不用模型的 harness 时清空，避免把旧模型悄悄带进任务元数据。
+                    update(index, usesModel(harnessId) ? { harnessId } : { harnessId, model: '' });
+                  }}
+                  className="min-w-0 flex-1 rounded-lg border border-neutral-300 bg-white px-2 py-1.5 text-sm outline-none focus:border-indigo-400 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-100"
+                >
+                  {options.map((harness) => (
+                    <option key={harness.id} value={harness.id}>
+                      {harness.name}
+                    </option>
+                  ))}
+                </select>
+                <span className="shrink-0 text-[11px] text-neutral-400 dark:text-stone-500">
+                  {index === 0 ? 'lead' : '执行'}
+                </span>
+                {members.length > 2 && (
+                  <button
+                    onClick={() => setMembers((prev) => prev.filter((_, i) => i !== index))}
+                    className="btn-press shrink-0 rounded-lg p-1 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-stone-800"
+                    title="移除该成员"
+                  >
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
+              <input
+                value={member.model ?? ''}
+                onChange={(event) => update(index, { model: event.target.value })}
+                disabled={!usesModel(member.harnessId)}
+                placeholder={
+                  usesModel(member.harnessId)
+                    ? '成员模型：provider/model 或模型 id，留空跟随默认'
+                    : '该 harness 不使用成员模型'
+                }
+                className="w-full rounded-lg border border-neutral-300 bg-white px-2 py-1.5 text-sm outline-none focus:border-indigo-400 disabled:opacity-50 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-100"
+              />
+            </div>
+          ))}
+          <div className="text-[11px] leading-relaxed text-neutral-400 dark:text-stone-500">
+            应用内置模型、DeepSeek、MCP 与 .Talk 信箱可以同室；发消息默认派给首位成员。
+          </div>
+          <div className="flex items-center justify-between pt-1">
+            <button
+              onClick={() =>
+                setMembers((prev) =>
+                  prev.length >= 4
+                    ? prev
+                    : [...prev, { name: `成员${prev.length + 1}`, harnessId: pick('native', 'echo'), model: '' }],
+                )
+              }
+              disabled={members.length >= 4}
+              className="btn-press rounded-lg border border-neutral-300 px-3 py-1.5 text-xs text-neutral-600 hover:bg-neutral-100 disabled:opacity-40 dark:border-stone-600 dark:text-stone-300 dark:hover:bg-stone-800"
+            >
+              + 添加成员
+            </button>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={onClose}
+                className="btn-press rounded-lg border border-neutral-300 px-3 py-1.5 text-xs text-neutral-600 hover:bg-neutral-100 dark:border-stone-600 dark:text-stone-300 dark:hover:bg-stone-800"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => onCreate(members)}
+                className="btn-press rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
+              >
+                创建房间
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export const AiCollabView = memo(function AiCollabView({
   room,
   events,
@@ -381,6 +520,8 @@ export const AiCollabView = memo(function AiCollabView({
   onCreateMcpRoom,
   onCreateNativeRoom,
   nativeAvailable,
+  harnesses,
+  onCreateCustomRoom,
   onCreateStreamJsonRoom,
   streamJsonAvailable,
   onCreateMailboxRoom,
@@ -402,6 +543,7 @@ export const AiCollabView = memo(function AiCollabView({
   const [importOpen, setImportOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
   const [multiOpen, setMultiOpen] = useState(false);
+  const [mixedOpen, setMixedOpen] = useState(false);
   const [leadModel, setLeadModel] = useState('');
   const [workerModel, setWorkerModel] = useState('');
 
@@ -436,6 +578,15 @@ export const AiCollabView = memo(function AiCollabView({
             >
               Echo 演示房间
             </button>
+            {onCreateCustomRoom && (harnesses?.length ?? 0) > 0 && (
+              <button
+                onClick={() => setMixedOpen(true)}
+                title="每个成员各自选择 harness 与模型"
+                className="btn-press rounded-full border border-indigo-500/40 bg-indigo-500/10 px-5 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-500/20 dark:text-indigo-300"
+              >
+                混编房间
+              </button>
+            )}
             {deepseekAvailable && onCreateDeepSeekRoom && (
               <button
                 onClick={onCreateDeepSeekRoom}
@@ -518,6 +669,16 @@ export const AiCollabView = memo(function AiCollabView({
         </div>
         {importDialog}
         {mcpOpen && <McpDialog onClose={() => setMcpOpen(false)} />}
+        {mixedOpen && onCreateCustomRoom && (
+          <MixedRoomDialog
+            harnesses={harnesses ?? []}
+            onClose={() => setMixedOpen(false)}
+            onCreate={(members) => {
+              onCreateCustomRoom(members);
+              setMixedOpen(false);
+            }}
+          />
+        )}
         {multiOpen && (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -601,7 +762,7 @@ export const AiCollabView = memo(function AiCollabView({
               {room.agents.map((agent) => (
                 <span
                   key={agent.id}
-                  title={agent.persona || agent.harnessId}
+                  title={[agent.harnessId, agent.model, agent.persona].filter(Boolean).join(' · ')}
                   className="rounded-full border border-neutral-200 bg-white/60 px-2 py-0.5 text-[10px] text-neutral-500 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-400"
                 >
                   {agent.name}
