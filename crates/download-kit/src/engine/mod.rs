@@ -7,6 +7,7 @@ pub mod aria2;
 pub mod curl;
 pub(crate) mod external;
 pub mod ffmpeg;
+pub mod gopeed;
 pub mod native;
 pub mod simple;
 pub(crate) mod tool;
@@ -193,6 +194,13 @@ pub const DESCRIPTORS: &[EngineDescriptor] = &[
         builtin: false,
         platform: "跨平台",
     },
+    EngineDescriptor {
+        kind: EngineKind::Gopeed,
+        name: "Gopeed 外部引擎",
+        description: "调用外部 gopeed：BT / 磁力 / ed2k，补足 P2P 覆盖；需用户自备，不随包分发",
+        builtin: false,
+        platform: "跨平台",
+    },
 ];
 
 pub fn descriptor(kind: EngineKind) -> Option<&'static EngineDescriptor> {
@@ -207,6 +215,7 @@ pub fn build_registry(
     let aria2 = tool::resolve(app, config.aria2_path.as_deref(), &["aria2c.exe", "aria2c"]);
     let curl = tool::resolve(app, config.curl_path.as_deref(), &["curl.exe", "curl"]);
     let wget = tool::resolve(app, config.wget_path.as_deref(), &["wget.exe", "wget"]);
+    let gopeed = tool::resolve(app, config.gopeed_path.as_deref(), &["gopeed.exe", "gopeed"]);
 
     let mut registry: HashMap<EngineKind, Arc<dyn DownloadEngine>> = HashMap::new();
     registry.insert(
@@ -232,6 +241,10 @@ pub fn build_registry(
     registry.insert(
         EngineKind::Wget,
         Arc::new(wget::WgetEngine::new(config.clone(), wget)),
+    );
+    registry.insert(
+        EngineKind::Gopeed,
+        Arc::new(gopeed::GopeedEngine::new(gopeed)),
     );
     registry
 }

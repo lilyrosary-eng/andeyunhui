@@ -1,5 +1,6 @@
 //! 无副作用小工具：时间戳、文件名、人读大小、aria2/ffmpeg 进度解析。
 
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
@@ -68,6 +69,38 @@ pub fn percent_decode(value: &str) -> String {
 pub fn is_hls_url(url: &str) -> bool {
     let path = url.split(['?', '#']).next().unwrap_or(url);
     path.to_ascii_lowercase().ends_with(".m3u8")
+}
+
+/// 是否是 P2P 链接：磁力、ed2k、或 `.torrent` 文件/地址。
+/// P2P 没有 HTTP 的 Content-Length/Range 语义，不能走探针与分片规划。
+pub fn is_p2p_url(url: &str) -> bool {
+    let value = url.trim().to_ascii_lowercase();
+    if value.starts_with("magnet:") || value.starts_with("ed2k://") {
+        return true;
+    }
+    let path = value.split(['?', '#']).next().unwrap_or(&value);
+    path.ends_with(".torrent")
+}
+
+/// 递归统计目录大小（P2P 任务完成后用来回填下载量）。
+pub fn dir_size(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let child = entry.path();
+        match entry.metadata() {
+            Ok(meta) if meta.is_dir() => {
+                total = total.saturating_add(dir_size(&child));
+            }
+            Ok(meta) => {
+                total = total.saturating_add(meta.len());
+            }
+            Err(_) => {}
+        }
+    }
+    total
 }
 
 /// 解析 `1.2MiB` / `34MB` / `512K` / `123` 这类人读大小。
@@ -172,5 +205,29 @@ mod tests {
         );
         assert!(is_hls_url("https://x.test/live/index.m3u8?x=1"));
         assert!(!is_hls_url("https://x.test/file.mp4"));
+    }
+
+    #[test]
+    fn p2p_url_detection() {
+        assert!(is_p2p_url("magnet:?xt=urn:btih:abcdef"));
+        assert!(is_p2p_url("ed2k://|file|a.bin|1024|abcdef|/"));
+        assert!(is_p2p_url("D:/downloads/a.torrent"));
+        assert!(is_p2p_url("https://x.test/a.torrent?token=1"));
+        assert!(!is_p2p_url("https://x.test/a.mp4"));
+        assert!(!is_p2p_url("ftp://x.test/a.bin"));
+    }
+
+    #[test]
+    fn directory_size_counts_recursively() {
+        let base = std::env::temp_dir().join(format!(
+            "download-kit-dirsize-{}",
+            std::process::id()
+        ));
+        let nested = base.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(base.join("a.bin"), vec![0u8; 10]).unwrap();
+        std::fs::write(nested.join("b.bin"), vec![0u8; 25]).unwrap();
+        assert_eq!(dir_size(&base), 35);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

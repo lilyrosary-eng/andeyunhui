@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 
 /// 下载引擎。
 ///
-/// - `Auto`：由内核按任务形态选择（HLS → ffmpeg，多段 → native）；
+/// - `Auto`：由内核按任务形态选择（HLS → ffmpeg，P2P → gopeed，多段 → native）；
 /// - `Native`：综合下载引擎1，内置分块多连接；
 /// - `Simple`：综合下载引擎2，内置单连接兼容；
-/// - 其余为外部引擎（aria2c / ffmpeg / curl / wget）。
+/// - 其余为外部引擎（aria2c / ffmpeg / curl / wget / gopeed）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum EngineKind {
@@ -26,6 +26,7 @@ pub enum EngineKind {
     Ffmpeg,
     Curl,
     Wget,
+    Gopeed,
 }
 
 impl EngineKind {
@@ -38,6 +39,7 @@ impl EngineKind {
             Self::Ffmpeg => "ffmpeg",
             Self::Curl => "curl",
             Self::Wget => "wget",
+            Self::Gopeed => "gopeed",
         }
     }
 
@@ -50,6 +52,7 @@ impl EngineKind {
             "ffmpeg" => Some(Self::Ffmpeg),
             "curl" => Some(Self::Curl),
             "wget" => Some(Self::Wget),
+            "gopeed" => Some(Self::Gopeed),
             _ => None,
         }
     }
@@ -258,6 +261,10 @@ pub struct EngineConfig {
     /// wget 可执行文件路径；留空则自动在 external-deps / PATH 查找。
     #[serde(default)]
     pub wget_path: Option<String>,
+    /// gopeed 可执行文件路径；留空则自动在 external-deps / PATH 查找。
+    /// 仅用于 P2P（磁力 / BT / ed2k），不随包分发。
+    #[serde(default)]
+    pub gopeed_path: Option<String>,
     /// 启动时是否自动续传上一进程遗留的活动任务；false 则置为暂停。
     pub resume_on_start: bool,
 }
@@ -278,6 +285,7 @@ impl Default for EngineConfig {
             ffmpeg_path: None,
             curl_path: None,
             wget_path: None,
+            gopeed_path: None,
             resume_on_start: true,
         }
     }
@@ -301,6 +309,7 @@ impl EngineConfig {
         self.ffmpeg_path = normalize_path(self.ffmpeg_path);
         self.curl_path = normalize_path(self.curl_path);
         self.wget_path = normalize_path(self.wget_path);
+        self.gopeed_path = normalize_path(self.gopeed_path);
         self
     }
 }

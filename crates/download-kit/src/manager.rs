@@ -21,7 +21,7 @@ use crate::types::{
     DownloadPart, DownloadSpec, DownloadTask, EngineConfig, EngineInfo, EngineKind, EngineStatus,
     PartState, ProbeRequest, ProbeResult, ProgressPayload, TaskDetail, TaskStatus,
 };
-use crate::util::{filename_from_url, now_ms, sanitize_filename};
+use crate::util::{dir_size, filename_from_url, is_p2p_url, now_ms, sanitize_filename};
 use crate::{EVENT_PROGRESS, EVENT_STATE};
 
 /// 任务控制信号。
@@ -233,9 +233,14 @@ impl Inner {
         let Some(task) = self.store.task(id)? else {
             return Ok(());
         };
-        let size = std::fs::metadata(&task.save_path)
-            .map_err(|e| format!("下载文件不存在或不可读: {e}"))?
-            .len();
+        let metadata = std::fs::metadata(&task.save_path)
+            .map_err(|e| format!("下载文件不存在或不可读: {e}"))?;
+        // P2P 任务落盘为目录（种子可能多文件），按目录递归统计。
+        let size = if metadata.is_dir() {
+            dir_size(std::path::Path::new(&task.save_path))
+        } else {
+            metadata.len()
+        };
         // 只有「单地址 + 内置/CLI 直写引擎」的总长等于最终文件字节数。
         // 多段拼接与 ffmpeg 转封装会重写容器，输出大小允许与探测值不同。
         let strict_size = task.urls.len() == 1
@@ -269,10 +274,14 @@ impl Inner {
         Ok(())
     }
 
-    /// auto 规则的唯一出处：HLS → ffmpeg；多段 → native（内部再调 ffmpeg 合并）。
+    /// auto 规则的唯一出处：P2P → gopeed；HLS → ffmpeg；多段 → native。
     fn resolve_engine(&self, task: &DownloadTask) -> (EngineKind, bool) {
         if task.engine != EngineKind::Auto {
             return (task.engine, true);
+        }
+        if task.urls.len() == 1 && is_p2p_url(&task.urls[0]) {
+            // P2P 没有 HTTP 探针/分片语义，必须交给支持 BT/磁力/ed2k 的引擎。
+            return (EngineKind::Gopeed, true);
         }
         if task.urls.len() == 1 && engines::is_hls(&task.urls[0]) {
             // HLS 形态决定必须用 ffmpeg；这是硬约束，不能在缺 ffmpeg 时退回 native
@@ -283,6 +292,10 @@ impl Inner {
             return (EngineKind::Native, false);
         }
         let default = self.config().default_engine;
+        if default == EngineKind::Gopeed {
+            // Gopeed 只适合 P2P；HTTP 任务即使被设为默认也不能落到它。
+            return (EngineKind::Native, false);
+        }
         if default != EngineKind::Auto {
             return (default, false);
         }
@@ -347,32 +360,57 @@ impl DownloadManager {
             return Err("缺少下载地址".to_string());
         }
 
+        let id = uuid::Uuid::new_v4().to_string();
         let raw_save = spec.save_path.trim();
         if raw_save.is_empty() {
             return Err("缺少保存路径".to_string());
         }
+        let p2p = spec.engine == EngineKind::Gopeed || is_p2p_url(&urls[0]);
         let mut save_path = PathBuf::from(raw_save);
-        let directory_target = raw_save.ends_with('/')
-            || raw_save.ends_with('\\')
-            || save_path.is_dir();
-        if directory_target {
-            let name = filename_from_url(&urls[0]).unwrap_or_else(|| "download.bin".to_string());
-            save_path = save_path.join(sanitize_filename(&name));
+        let filename;
+        if p2p {
+            // P2P 的落盘单位是目录（种子内可能多文件）。
+            // 目标目录已存在且非空时追加任务专属子目录，避免取消任务时误删用户已有内容。
+            let non_empty = save_path.is_dir()
+                && std::fs::read_dir(&save_path)
+                    .map(|mut entries| entries.next().is_some())
+                    .unwrap_or(false);
+            let dir = if non_empty {
+                save_path.join(format!("torrent-{}", &id[..8]))
+            } else {
+                save_path
+            };
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("创建 P2P 下载目录失败 {}: {e}", dir.display()))?;
+            filename = dir
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "torrent".to_string());
+            save_path = dir;
+        } else {
+            let directory_target = raw_save.ends_with('/')
+                || raw_save.ends_with('\\')
+                || save_path.is_dir();
+            if directory_target {
+                let name =
+                    filename_from_url(&urls[0]).unwrap_or_else(|| "download.bin".to_string());
+                save_path = save_path.join(sanitize_filename(&name));
+            }
+            if let Some(parent) = save_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("创建下载目录失败 {}: {e}", parent.display()))?;
+            }
+            filename = save_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "download.bin".to_string());
         }
-        if let Some(parent) = save_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("创建下载目录失败 {}: {e}", parent.display()))?;
-        }
-        let filename = save_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "download.bin".to_string());
 
         let config = self.inner.config();
         let connections = spec.connections.unwrap_or(config.connections).clamp(1, 32);
         let now = now_ms();
         let task = DownloadTask {
-            id: uuid::Uuid::new_v4().to_string(),
+            id,
             urls,
             save_path: save_path.to_string_lossy().into_owned(),
             filename,
@@ -486,9 +524,14 @@ impl DownloadManager {
         // 只有真正开始写过盘的才删；刚入队就取消时不能误删用户已有的同名文件。
         let touched = task.status != TaskStatus::Queued || task.downloaded_bytes > 0;
         if delete_file && touched {
+            let target = std::path::Path::new(&task.save_path);
             let _ = std::fs::remove_dir_all(temp_dir_for(&task.save_path));
             let _ = std::fs::remove_file(format!("{}.aria2", task.save_path));
-            let _ = std::fs::remove_file(&task.save_path);
+            if target.is_dir() {
+                let _ = std::fs::remove_dir_all(target);
+            } else {
+                let _ = std::fs::remove_file(target);
+            }
         }
         self.inner.emit_state_by_id(id);
         Ok(())
@@ -1056,11 +1099,12 @@ mod tests {
             .iter()
             .map(|descriptor| descriptor.name)
             .collect();
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 7);
         assert!(names.contains(&"综合下载引擎1"));
         assert!(names.contains(&"综合下载引擎2"));
         assert!(names.contains(&"cURL 外部引擎"));
         assert!(names.contains(&"Wget 外部引擎"));
+        assert!(names.contains(&"Gopeed 外部引擎"));
     }
 }
 
