@@ -57,16 +57,12 @@ React + Rust，基于 Tauri v2 构建，同一套代码同时产出 Windows 桌�
 
 ## 截图 / 演示
 
->
-> | 内容 | 约定路径 |
-> | --- | --- |
-> | 主界面 | `docs/screenshots/main.png` |
-> | 阅读 · 三色堇 | `docs/screenshots/reader.png` |
-> | 全局截图（Ctrl+Shift+S） | `docs/screenshots/screenshot.gif` |
-> | 插件热插拔 | `docs/screenshots/plugins.gif` |
-> | 桌宠互动 | `docs/screenshots/deskpet.gif` |
-> | 莲花启动动画（浅色 / 深色） | `docs/screenshots/boot-light.gif` / `docs/screenshots/boot.gif` |
->
+| | |
+| :---: | :---: |
+| **笔记 · 鸢尾花（编辑 / 预览）**<br>![笔记 · 鸢尾花](screenshots/notes.png) | **AI 对话**<br>![AI 对话](screenshots/ai-chat.png) |
+| **音乐 · 铃兰（正在播放 · 歌词）**<br>![音乐 · 铃兰](screenshots/music-now-playing.png) | **图片 · 莲花（OCR 文字识别）**<br>![图片 · 莲花 OCR](screenshots/images-ocr.png) |
+| **图片 · 莲花（沉浸预览）**<br>![图片 · 莲花 沉浸预览](screenshots/images-immersive.png) | **阅读 · 三色堇**<br>![阅读 · 三色堇](screenshots/reading.png) |
+| **专业 · 薄荷（全部工具）**<br>![专业 · 薄荷](screenshots/tools.png) | **浮窗与中转站**<br>![浮窗与中转站](screenshots/floating-windows.png) |
 
 ## 技术栈
 
