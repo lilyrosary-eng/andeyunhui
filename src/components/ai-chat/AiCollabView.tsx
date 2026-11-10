@@ -10,10 +10,12 @@ import {
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  CollabAgent, CollabAssignment, CollabAssignmentStatus, CollabEvent, CollabHarnessInfo, CollabMcpInfo,
+  CollabAssignment, CollabAssignmentStatus, CollabEvent, CollabHarnessInfo, CollabMcpInfo,
   CollabMemberInput, CollabPermissionRequest, CollabRoom, DshSessionSummary,
 } from '@/core/ai/aiCollab';
 import { DshSessionImportDialog } from '@/components/ai-chat/DshSessionImportDialog';
+import { CollabCanvas } from '@/components/ai-chat/CollabCanvas';
+import { agentMeta } from '@/components/ai-chat/collabDisplay';
 import { TurnRail } from '@/components/chat/TurnRail';
 
 interface AiCollabViewProps {
@@ -60,29 +62,6 @@ const STATUS_META: Record<CollabAssignmentStatus, { label: string; cls: string; 
 function agentName(room: CollabRoom | null, agentId: string | null | undefined): string {
   if (!room || !agentId) return '系统';
   return room.agents.find((agent) => agent.id === agentId)?.name ?? agentId;
-}
-
-/** harness 短名：界面上不直接抛 `stream-json` / `native` 这类内部 id。 */
-const HARNESS_LABEL: Record<string, string> = {
-  echo: 'Echo',
-  native: '安得云荟',
-  dsh: 'DeepSeek',
-  mcp: 'MCP',
-  acp: 'ACP',
-  'stream-json': 'CLI',
-  mailbox: '.Talk 信箱',
-};
-
-function harnessLabel(harnessId: string): string {
-  return HARNESS_LABEL[harnessId] ?? harnessId;
-}
-
-/** 成员副标签：harness 名 + 成员模型。
- *  只有我们确实知道模型时才显示：自有 harness（安得云荟）与 dsh 的模型由本应用配置；
- *  MCP / 信箱 / CLI 的模型在对方侧，写出来就是假信息。 */
-function agentMeta(agent: CollabAgent): string {
-  const model = agent.model?.trim();
-  return model ? `${harnessLabel(agent.harnessId)} · ${model}` : harnessLabel(agent.harnessId);
 }
 
 function shortPath(path: string | null | undefined): string {
@@ -669,6 +648,8 @@ export const AiCollabView = memo(function AiCollabView({
   const [editOpen, setEditOpen] = useState(false);
   /** 本条消息派给谁；null = 跟随房间主导。 */
   const [targetId, setTargetId] = useState<string | null>(null);
+  /** 房间呈现方式：列表（时间线）/ 画布（成员与任务流向）。默认列表，不影响原有使用习惯。 */
+  const [view, setView] = useState<'list' | 'canvas'>('list');
 
   // 切房间时回到「派给主导」，避免把上一个房间的成员 id 带过来。
   useEffect(() => {
@@ -806,6 +787,21 @@ export const AiCollabView = memo(function AiCollabView({
               ))}
             </div>
             <div className="ml-auto flex items-center gap-2">
+              <div className="flex items-center rounded-lg border border-neutral-300 p-0.5 dark:border-stone-600">
+                {([['list', '列表'], ['canvas', '画布']] as const).map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => setView(key)}
+                    className={`rounded-md px-2.5 py-1 text-[11px] transition-colors ${
+                      view === key
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-neutral-500 hover:bg-neutral-100 dark:text-stone-400 dark:hover:bg-stone-800'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
               <button
                 onClick={() => setEditOpen(true)}
                 title="编辑成员、模型与主导（保留历史）"
@@ -875,7 +871,16 @@ export const AiCollabView = memo(function AiCollabView({
           </div>
         )}
 
-        <Timeline room={room} events={events} />
+        {view === 'canvas' ? (
+          <CollabCanvas
+            room={room}
+            assignments={assignments}
+            selectedId={target?.id ?? room.leadId}
+            onSelect={(agentId) => setTargetId(agentId === room.leadId ? null : agentId)}
+          />
+        ) : (
+          <Timeline room={room} events={events} />
+        )}
 
         {permission && (
           <div className="mx-5 mb-1 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2.5">
