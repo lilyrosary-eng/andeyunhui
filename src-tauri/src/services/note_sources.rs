@@ -104,31 +104,41 @@ async fn arxiv_throttle() {
 }
 
 /// 入口：按源分发。`source` 为 "arxiv" / "huggingface" / "github" / "semantic"。
-pub async fn search(source: &str, query: &str, limit: Option<usize>) -> Result<Vec<NoteWebResult>, String> {
+///
+/// `offset` 是**翻页游标**（默认 0）：前端「无限下拉 / 分页」加载更多时会带上累计条数，
+/// 各源按自己的分页参数换算（arXiv=start、GitHub=page、S2=offset）。
+/// HuggingFace 的 models 接口不支持偏移，只能在首屏取一批（offset>0 时返回空表示「没有更多」）。
+pub async fn search(
+    source: &str,
+    query: &str,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<NoteWebResult>, String> {
     let q = query.trim();
     if q.is_empty() {
         return Err("请输入搜索关键词".to_string());
     }
     let n = clamp_limit(limit);
+    let off = offset.unwrap_or(0);
     match source {
-        "arxiv" => search_arxiv(q, n).await,
-        "huggingface" => search_huggingface(q, n).await,
-        "github" => search_github(q, n).await,
-        "semantic" => search_semantic_scholar(q, n).await,
+        "arxiv" => search_arxiv(q, n, off).await,
+        "huggingface" => search_huggingface(q, n, off).await,
+        "github" => search_github(q, n, off).await,
+        "semantic" => search_semantic_scholar(q, n, off).await,
         other => Err(format!("未知的网络源：{other}")),
     }
 }
 
 // ========== arXiv ==========
 
-async fn search_arxiv(query: &str, limit: usize) -> Result<Vec<NoteWebResult>, String> {
+async fn search_arxiv(query: &str, limit: usize, offset: usize) -> Result<Vec<NoteWebResult>, String> {
     arxiv_throttle().await;
     let resp = client()?
         .get("https://export.arxiv.org/api/query")
         // all: 覆盖标题/摘要/作者；按相关度排序更符合「搜索」语义
         .query(&[
             ("search_query", format!("all:{query}")),
-            ("start", "0".to_string()),
+            ("start", offset.to_string()),
             ("max_results", limit.to_string()),
             ("sortBy", "relevance".to_string()),
         ])
@@ -278,7 +288,16 @@ struct HfModel {
     last_modified: Option<String>,
 }
 
-async fn search_huggingface(query: &str, limit: usize) -> Result<Vec<NoteWebResult>, String> {
+async fn search_huggingface(
+    query: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<NoteWebResult>, String> {
+    // HF 的 models 接口没有 offset/start 参数，只能按 limit 取首屏；
+    // 翻页请求（offset>0）直接返回空，让前端把该源标成「已取完」而不是反复重试同一批。
+    if offset > 0 {
+        return Ok(Vec::new());
+    }
     let resp = client()?
         .get("https://huggingface.co/api/models")
         .query(&[
@@ -356,14 +375,18 @@ struct GhOwner {
     login: String,
 }
 
-async fn search_github(query: &str, limit: usize) -> Result<Vec<NoteWebResult>, String> {
+async fn search_github(query: &str, limit: usize, offset: usize) -> Result<Vec<NoteWebResult>, String> {
+    // GitHub search 用 page + per_page 翻页（per_page 上限 100，总量上限 1000）。
+    let per_page = limit.min(100).max(1);
+    let page = offset / per_page + 1;
     let resp = client()?
         .get("https://api.github.com/search/repositories")
         .query(&[
             ("q", query.to_string()),
             ("sort", "stars".to_string()),
             ("order", "desc".to_string()),
-            ("per_page", limit.to_string()),
+            ("per_page", per_page.to_string()),
+            ("page", page.to_string()),
         ])
         .header("Accept", "application/vnd.github+json")
         .send()
@@ -435,7 +458,12 @@ struct S2Author {
     name: String,
 }
 
-async fn search_semantic_scholar(query: &str, limit: usize) -> Result<Vec<NoteWebResult>, String> {
+async fn search_semantic_scholar(
+    query: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<NoteWebResult>, String> {
+    // Graph API：limit ≤ 100，offset 用于翻页（匿名配额有限，翻太多会 429）。
     let resp = client()?
         .get("https://api.semanticscholar.org/graph/v1/paper/search")
         .query(&[
@@ -445,6 +473,7 @@ async fn search_semantic_scholar(query: &str, limit: usize) -> Result<Vec<NoteWe
             ),
             ("query", query.to_string()),
             ("limit", limit.to_string()),
+            ("offset", offset.to_string()),
         ])
         .send()
         .await

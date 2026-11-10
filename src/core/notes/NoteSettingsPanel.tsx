@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { StickyNote, Sparkles } from 'lucide-react';
+import { StickyNote, Sparkles, ListFilter } from 'lucide-react';
 import { Switch } from "@/components/ui/switch"
 import { Slider } from "@/components/ui/slider"
 import { invoke } from '@tauri-apps/api/core';
@@ -38,6 +38,15 @@ export function NoteSettingsPanel() {
   // AI 润色偏好（持久化到 localStorage，NotesEditor 点击润色时读取）
   const [polishStyle, setPolishStyle] = useState(() => storage.getString(KEYS.aiPolish.style.key, 'keep'));
   const [polishLength, setPolishLength] = useState(() => storage.getString(KEYS.aiPolish.length.key, 'keep'));
+
+  // 网络检索结果的呈现方式（paged=分页 / infinite=无限下拉），搜索结果页会监听事件立即生效
+  const [networkLayout, setNetworkLayout] = useState(() => storage.getString(KEYS.notes.networkLayout.key, 'infinite'));
+  const handleNetworkLayout = (v: string) => {
+    setNetworkLayout(v);
+    storage.setString(KEYS.notes.networkLayout.key, v);
+    // 同窗口事件（storage 事件不跨同页面触发）
+    window.dispatchEvent(new Event('andy:notes-network-layout'));
+  };
 
   const handlePolishStyle = (v: string) => {
     setPolishStyle(v);
@@ -152,6 +161,37 @@ export function NoteSettingsPanel() {
               </button>
             ))}
           </div>
+        </div>
+      </div>
+
+      {/* 网络检索结果呈现 */}
+      <div className="glass-panel p-4 flex flex-col gap-3">
+        <div className="flex items-center gap-2">
+          <ListFilter size={15} className="text-[var(--element-color-raw)]" />
+          <div>
+            <span className="text-sm font-medium block">网络检索结果呈现</span>
+            <p className="text-xs text-neutral-500 dark:text-stone-500 mt-0.5">
+              聚合搜索是流式的（哪个源先回来先显示），这里只决定结果列表怎么翻
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {[
+            { value: 'infinite', label: '无限下拉' },
+            { value: 'paged', label: '分页' },
+          ].map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => handleNetworkLayout(opt.value)}
+              className={`btn-press px-3 py-1 rounded-lg text-xs transition-all ${
+                networkLayout === opt.value
+                  ? 'bg-[var(--element-bg)] text-white shadow-sm'
+                  : 'bg-black/5 dark:bg-white/5 text-neutral-600 dark:text-stone-300 hover:bg-black/10 dark:hover:bg-white/10'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
         </div>
       </div>
 

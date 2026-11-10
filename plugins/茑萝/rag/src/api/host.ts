@@ -268,7 +268,13 @@ export interface RerankOptions {
   endpoint?: string;
   apiKey?: string;
   model?: string;
-  /** 单次请求超时（毫秒）；后端缺省 3000，钳制 500~15000。 */
+  /**
+   * 实现方式：
+   * - `api`（默认）：标准 `/v1/rerank`；
+   * - `llm`：用对话模型打分（LM Studio / Ollama 没有 rerank 端点时的可用路径）。
+   */
+  mode?: 'api' | 'llm';
+  /** 单次请求超时（毫秒）；后端缺省 3000（llm 模式缺省 20000），钳制后生效。 */
   timeoutMs?: number;
 }
 
@@ -302,6 +308,7 @@ export function ragRerankApi(
     endpoint: opts.endpoint,
     apiKey: opts.apiKey,
     model: opts.model,
+    mode: opts.mode,
     timeoutMs: opts.timeoutMs,
   });
 }

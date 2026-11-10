@@ -28,7 +28,8 @@ export function IngestDialog({ onIngested }: IngestDialogProps) {
       const files = await window.__HOST_API__.invoke<string[]>('pick_file', {
         title: '选择要摄取的文档',
         filters: [
-          { name: '文档', extensions: ['txt', 'md', 'pdf', 'docx', 'pptx', 'xlsx', 'epub', 'csv'] },
+          // 只列解析器真支持的：epub 没有原生解析分支，列出来就是"选了必报错"
+          { name: '文档', extensions: ['txt', 'md', 'pdf', 'docx', 'pptx', 'xlsx', 'csv'] },
           { name: '全部', extensions: ['*'] },
         ],
       });

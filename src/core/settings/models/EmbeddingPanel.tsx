@@ -33,6 +33,8 @@ const labelCls = 'block text-[11px] text-neutral-500 dark:text-stone-400 mb-1';
 interface Candidate {
   name: string;
   provider: string;
+  /** 所属供应商端点：只用来把「当前算力来源」的模型排到前面，不参与生效判定 */
+  baseUrl: string;
   /** 该模型被标了「向量」能力（供应商能力探测扫出来或用户手勾） */
   tagged: boolean;
 }
@@ -84,20 +86,25 @@ export function EmbeddingPanel({
       for (const m of p.models ?? []) {
         const name = (m.model ?? '').trim();
         if (!name || !p.base_url) continue;
-        all.push({ name, provider: p.name || p.id, tagged: !!m.caps?.embedding });
+        all.push({ name, provider: p.name || p.id, baseUrl: p.base_url, tagged: !!m.caps?.embedding });
       }
     }
     const tagged = all.filter((c) => c.tagged);
     const list = tagged.length ? tagged : all;
+    // ★ 当前算力来源的模型排最前。否则列表按供应商顺序排，模型多的远端供应商
+    //   （实测 NVIDIA 有 7 个嵌入模型）会占据开头 —— 用户随手一点/键盘一按就选中远端，
+    //   正文会被发去第三方。这和运行时 pickAutoEmbedTarget 的「先同供应商」是同一条教训。
+    const curBase = profiles.find((p) => p.id === active)?.base_url;
+    if (curBase) list.sort((a, b) => Number(b.baseUrl === curBase) - Number(a.baseUrl === curBase));
     // 已选中的那个必须在列表里 —— 否则用户之前选的模型没被标「向量」时，
     // 下拉会显示成空白，看起来像"设置丢了"，而配置其实还在。
     const v = value.trim();
     if (v && !list.some((c) => c.name === v)) {
       const owner = all.find((c) => c.name === v);
-      list.push(owner ? { ...owner, tagged: false } : { name: v, provider: '?', tagged: false });
+      list.unshift(owner ? { ...owner, tagged: false } : { name: v, provider: '?', baseUrl: '', tagged: false });
     }
     return list;
-  }, [providers, value]);
+  }, [providers, value, profiles, active]);
 
   const groups = useMemo(() => {
     const byProvider = new Map<string, Candidate[]>();
@@ -193,7 +200,7 @@ export function EmbeddingPanel({
               onChange={onChange}
               placeholder={t('modelSettings.embedding.unset')}
               title={t('modelSettings.embedding.pick')}
-              className="w-full justify-between"
+              className="w-full max-w-none justify-between"
               groups={[
                 { label: '', options: [{ value: '', label: t('modelSettings.embedding.unset') }] },
                 ...groups.map(([provider, list]) => ({

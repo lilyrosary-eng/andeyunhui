@@ -25,6 +25,7 @@ const FALLBACK_ZH: Record<string, string> = {
   'rag.retrieve.mode': '端点来源',
   'rag.retrieve.modeAuto': '自动匹配重排模型',
   'rag.retrieve.modeManual': '手动填端点',
+  'rag.retrieve.modeLlm': '对话模型打分（免 rerank 端点）',
   'rag.retrieve.baseUrl': '重排端点（baseURL 或完整 /v1/rerank）',
   'rag.retrieve.apiKey': 'API Key（本地服务可留空）',
   'rag.retrieve.model': '重排模型名',

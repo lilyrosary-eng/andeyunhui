@@ -463,6 +463,10 @@ pub struct RagRerankRequest {
     pub api_key: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// 重排实现：`"llm"` = 用对话模型打分（LM Studio/Ollama 没有 /v1/rerank 时的可用路径）；
+    /// 缺省/其它 = 标准 `/v1/rerank`。
+    #[serde(default)]
+    pub mode: Option<String>,
     /// 单次请求超时（毫秒）。缺省 3000，钳制在 500~15000。
     #[serde(default)]
     pub timeout_ms: Option<u64>,
@@ -1710,8 +1714,187 @@ fn parse_rerank_items(v: &serde_json::Value, doc_count: usize) -> Result<Vec<Rag
     Ok(out)
 }
 
+/// LLM 打分重排的候选上限：再多，prompt 会过长，本地小模型也分不清。
+const LLM_RERANK_MAX_DOCS: usize = 12;
+/// 每条候选进 prompt 的字符上限（整块塞进去会把上下文吃满）。
+const LLM_RERANK_DOC_CHARS: usize = 600;
+
+/// 用**对话模型**给候选打分（不需要 `/v1/rerank`）。
+///
+/// 动机：LM Studio / Ollama 只提供 chat 与 embeddings，没有 rerank 端点。而「相关性打分」
+/// 不需要交叉编码器也能做得不错——一次请求把所有候选编号列出来，让模型给 0~10 分。
+/// 代价是一次额外的 LLM 调用（比专用 rerank 慢），换来的是**零额外部署**就能有精排。
+async fn rag_rerank_llm(req: &RagRerankRequest) -> Result<RagRerankResponse, String> {
+    let base = req
+        .endpoint
+        .as_deref()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .unwrap_or_default();
+    if base.is_empty() {
+        return Err("LLM 打分需要对话端点：请在「检索设置」里选一个算力来源，或直接填 base_url".to_string());
+    }
+    if !base.starts_with("http://") && !base.starts_with("https://") {
+        return Err(format!("LLM 打分的端点必须是 http(s) 地址，收到「{base}」"));
+    }
+    let url = if base.ends_with("/chat/completions") {
+        base.clone()
+    } else if base.ends_with("/v1") {
+        format!("{base}/chat/completions")
+    } else {
+        format!("{base}/v1/chat/completions")
+    };
+    let model = req.model.clone().unwrap_or_default().trim().to_string();
+    if model.is_empty() {
+        return Err("LLM 打分需要模型名（填你的对话模型）".to_string());
+    }
+    if req.query.trim().is_empty() {
+        return Err("重排失败：查询为空。".to_string());
+    }
+    if req.documents.is_empty() {
+        return Err("重排失败：候选文档为空。".to_string());
+    }
+
+    let docs: Vec<String> = req
+        .documents
+        .iter()
+        .take(LLM_RERANK_MAX_DOCS)
+        .map(|d| truncate_chars(d, LLM_RERANK_DOC_CHARS))
+        .collect();
+    let listing = docs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| format!("[{i}] {d}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let system = "你是检索重排器。为每个候选片段与问题的相关程度打 0-10 分（10=直接回答，0=完全无关）。\
+                  只输出 JSON 数组，例如 [{\"index\":0,\"score\":8}]；不要解释，不要 Markdown 代码块。";
+    let user = format!("问题：{}\n\n候选片段：\n{}", req.query.trim(), listing);
+
+    // LLM 比专用 rerank 端点慢一个数量级：下限 5s、上限 60s（忽略前端 3s 的默认值）。
+    let timeout_ms = req.timeout_ms.unwrap_or(20_000).clamp(5_000, 60_000);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+        .map_err(|e| format!("创建 LLM 打分 HTTP 客户端失败: {e}"))?;
+    let body = serde_json::json!({
+        "model": model,
+        "temperature": 0,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": user },
+        ],
+    });
+    let mut builder = client.post(&url).header("Content-Type", "application/json");
+    if let Some(k) = req.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+        builder = builder.header("Authorization", format!("Bearer {k}"));
+    }
+    let resp = builder.json(&body).send().await.map_err(|e| {
+        if e.is_timeout() {
+            format!("LLM 打分超时（{timeout_ms}ms）：模型可能未加载，或候选太多")
+        } else {
+            format!("LLM 打分请求失败: {e}")
+        }
+    })?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        log::warn!("[rag-rerank-llm] 上游拒绝 HTTP {status} · url={url} · model={model}");
+        return Err(format!("LLM 打分 HTTP {status}: {}", txt.chars().take(300).collect::<String>()));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析 LLM 打分响应失败: {e}"))?;
+    let content = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| {
+            format!(
+                "LLM 打分响应里没有 choices[0].message.content：{}",
+                v.to_string().chars().take(200).collect::<String>()
+            )
+        })?;
+    let mut results = parse_llm_rerank_scores(content, docs.len())?;
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(RagRerankResponse {
+        results,
+        model,
+        endpoint: url,
+    })
+}
+
+/// 解析 LLM 输出的打分数组：容忍 ```json 代码块包裹、十分制与百分制、字符串数字。
+fn parse_llm_rerank_scores(content: &str, doc_count: usize) -> Result<Vec<RagRerankItem>, String> {
+    let s = content.trim();
+    let s = s
+        .strip_prefix("```json")
+        .or_else(|| s.strip_prefix("```JSON"))
+        .or_else(|| s.strip_prefix("```"))
+        .unwrap_or(s);
+    let s = s.strip_suffix("```").unwrap_or(s).trim();
+    let start = s.find('[').ok_or_else(|| {
+        format!("LLM 没输出 JSON 数组（前 200 字：{}）", s.chars().take(200).collect::<String>())
+    })?;
+    let end = s
+        .rfind(']')
+        .ok_or_else(|| "LLM 输出的 JSON 数组没有闭合".to_string())?;
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&s[start..=end]).map_err(|e| {
+        format!(
+            "LLM 打分 JSON 解析失败: {e}（原文前 200 字：{}）",
+            s.chars().take(200).collect::<String>()
+        )
+    })?;
+    let mut out = Vec::new();
+    let mut seen = vec![false; doc_count];
+    for item in arr {
+        let index = item
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .or_else(|| item.get("id").and_then(|v| v.as_u64()))
+            .map(|v| v as usize);
+        let Some(index) = index else { continue };
+        if index >= doc_count || seen[index] {
+            continue;
+        }
+        let raw = item
+            .get("score")
+            .or_else(|| item.get("relevance"))
+            .and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|t| t.trim().parse::<f64>().ok()))
+            });
+        let Some(raw) = raw else { continue };
+        if !raw.is_finite() {
+            continue;
+        }
+        // 十分制归一化到 0~1：与 /v1/rerank 的分数量纲靠近，前端「区分度 > 0」的判据继续成立。
+        let score = if raw > 1.0 { (raw / 10.0) as f32 } else { raw as f32 };
+        seen[index] = true;
+        out.push(RagRerankItem { index, score });
+    }
+    if out.is_empty() {
+        return Err(format!(
+            "LLM 没给出任何可用的分数（前 200 字：{}）",
+            s.chars().take(200).collect::<String>()
+        ));
+    }
+    Ok(out)
+}
+
 /// 代理重排：把 `query` + 候选文档发给配置的重排端点，返回按相关度降序的 `(index, score)`。
+///
+/// 两种实现：
+/// - `mode="llm"`：用**对话模型**打分（不需要 `/v1/rerank`）。这是给 LM Studio / Ollama
+///   这类只提供 chat/embeddings 的运行时准备的——它们没有 rerank 端点，但对话模型足够
+///   做「相关性打分」这件粗活；
+/// - 其它：标准 `/v1/rerank`（Cohere / Jina / SiliconFlow / vLLM / TEI …）。
 pub async fn rag_rerank_api(req: RagRerankRequest) -> Result<RagRerankResponse, String> {
+    if req.mode.as_deref().map(|m| m.eq_ignore_ascii_case("llm")).unwrap_or(false) {
+        return rag_rerank_llm(&req).await;
+    }
     let endpoint = req
         .endpoint
         .map(|s| s.trim().to_string())
@@ -1996,6 +2179,31 @@ mod tests {
         assert_eq!(clamp_rerank_timeout(Some(0)), RERANK_MIN_TIMEOUT_MS);
         assert_eq!(clamp_rerank_timeout(Some(999_999)), RERANK_MAX_TIMEOUT_MS);
         assert_eq!(clamp_rerank_timeout(Some(8000)), 8000);
+    }
+
+    /// LLM 打分：常见输出形态（代码块包裹、十分制、字符串分数）都要能解析。
+    #[test]
+    fn llm打分解析_代码块与十分制() {
+        let content = "```json\n[{\"index\":0,\"score\":9},{\"index\":1,\"score\":2}]\n```";
+        let r = parse_llm_rerank_scores(content, 2).unwrap();
+        assert_eq!(r.len(), 2);
+        let by: std::collections::HashMap<usize, f32> = r.iter().map(|i| (i.index, i.score)).collect();
+        assert!((by[&0] - 0.9).abs() < 1e-6, "十分制应归一化到 0~1");
+        assert!((by[&1] - 0.2).abs() < 1e-6);
+        // 字符串分数 + 0~1 量纲不被二次除
+        let r2 = parse_llm_rerank_scores("[{\"index\":0,\"score\":\"0.7\"}]", 1).unwrap();
+        assert!((r2[0].score - 0.7).abs() < 1e-6);
+    }
+
+    /// LLM 打分：越界下标 / 重复下标 / 非数字要被丢弃，不能把结果搞乱。
+    #[test]
+    fn llm打分解析_丢弃越界与重复() {
+        let content = "[{\"index\":0,\"score\":5},{\"index\":0,\"score\":9},{\"index\":7,\"score\":3},{\"index\":1,\"score\":\"x\"}]";
+        let r = parse_llm_rerank_scores(content, 2).unwrap();
+        assert_eq!(r.len(), 1, "只保留第一条合法的 index=0");
+        assert_eq!(r[0].index, 0);
+        // 完全没有可用分数必须报错，而不是静默给空列表
+        assert!(parse_llm_rerank_scores("我不打分", 2).is_err());
     }
 
     /// 按**字符**截断（不是字节）：中文不能被切成半个字。

@@ -145,6 +145,7 @@ pub async fn rag_rerank_api(
     endpoint: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
+    mode: Option<String>,
     timeout_ms: Option<u64>,
 ) -> Result<RagRerankResponse, String> {
     svc_rag_rerank_api(RagRerankRequest {
@@ -153,6 +154,7 @@ pub async fn rag_rerank_api(
         endpoint,
         api_key,
         model,
+        mode,
         timeout_ms,
     })
     .await

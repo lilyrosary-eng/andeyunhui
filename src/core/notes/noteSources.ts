@@ -11,6 +11,29 @@ import { invoke } from '@tauri-apps/api/core';
 
 export type NoteSourceId = 'arxiv' | 'huggingface' | 'github' | 'semantic';
 
+/**
+ * 检索入口：四个真实源 + `all`（聚合搜索）。
+ *
+ * `all` 是**前端伪源**，Rust 侧不认识它：选中它时由 `searchAllSources` 并发调用四个源，
+ * 合并去重后再交给结果页。这样后端「编译期固定四个适配器」的合规约束不变。
+ */
+export type NoteSourceKey = NoteSourceId | 'all';
+
+export interface NoteSourceScope {
+  id: NoteSourceKey;
+  name: string;
+  desc: string;
+  accent: string;
+}
+
+/** 「聚合搜索」入口定义（与四个源并列显示在最前） */
+export const NOTE_AGGREGATE: NoteSourceScope = {
+  id: 'all',
+  name: '聚合搜索',
+  desc: '同时检索 arXiv / HuggingFace / GitHub / Semantic Scholar',
+  accent: '#7c3aed',
+};
+
 export interface NoteSourceDef {
   id: NoteSourceId;
   name: string;
@@ -63,13 +86,34 @@ export interface NoteWebResult {
   meta: string;
 }
 
-/** 按源搜索。失败时 Rust 会返回可读的中文原因，这里原样抛给调用方展示。 */
+/**
+ * 按源搜索。失败时 Rust 会返回可读的中文原因，这里原样抛给调用方展示。
+ *
+ * `offset` 是翻页游标（默认 0）：聚合页「加载更多」时按各源已取条数递增，
+ * Rust 侧再换算成 arXiv 的 start / GitHub 的 page / Semantic Scholar 的 offset。
+ * （HuggingFace 的 models 接口无偏移参数，offset>0 时返回空 = 该源已到头。）
+ */
 export async function searchNoteSource(
   source: NoteSourceId,
   query: string,
   limit = 12,
+  offset = 0,
 ): Promise<NoteWebResult[]> {
-  return invoke<NoteWebResult[]>('note_web_search', { source, query, limit });
+  return invoke<NoteWebResult[]>('note_web_search', { source, query, limit, offset });
+}
+
+/** 聚合结果：额外带上「它来自哪个源」，用于结果页的来源徽标与收藏时的出处。 */
+export interface AggregatedNoteResult extends NoteWebResult {
+  sourceId: NoteSourceId;
+  sourceName: string;
+  accent: string;
+}
+
+/** 把 networkSource（含 `all`）解析成展示用的名称/描述/主色。 */
+export function resolveSourceScope(key: NoteSourceKey): NoteSourceScope {
+  if (key === 'all') return NOTE_AGGREGATE;
+  const def = NOTE_SOURCES.find((s) => s.id === key) ?? NOTE_SOURCES[0];
+  return { id: def.id, name: def.name, desc: def.desc, accent: def.accent };
 }
 
 /** 把一条检索结果转成 Markdown 笔记内容（标题行 + 引用信息 + 摘要）。 */

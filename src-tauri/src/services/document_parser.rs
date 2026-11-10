@@ -33,6 +33,14 @@ pub fn convert_document_to_markdown(path: &str, app_data: &Path) -> Result<Strin
         "pptx" | "pptm" => parse_office_pptx(path, app_data),
         "xlsx" | "xlsm" => parse_office_xlsx(path),
         "pdf" => convert_pdf_to_markdown(path, app_data),
+        // 纯文本族：本身就是文本，直接读（md 已是 Markdown；txt/csv 原样交给分块器）。
+        // 以前这些扩展名落到 `_ => Err`，而 RAG 摄取选择器却提供 txt/md/csv ——
+        // 用户选了就报「原生解析不支持该格式」（2026-11-10 真机踩到）。
+        // 用 lossy 而不是 read_to_string：Windows 中文 txt 常见 GBK，不该直接判失败。
+        "txt" | "md" | "markdown" | "csv" | "log" | "json" => {
+            let bytes = std::fs::read(path).map_err(|e| format!("读取文本失败: {}", e))?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        }
         _ => Err(format!("原生解析不支持该格式: {}", ext)),
     }
 }

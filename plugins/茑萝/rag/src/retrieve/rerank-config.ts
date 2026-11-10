@@ -39,8 +39,13 @@ export const RERANK_TIMEOUT_MIN = 500;
 export const RERANK_TIMEOUT_MAX = 15000;
 export const RERANK_TIMEOUT_DEFAULT = 3000;
 
-/** 重排来源模式：auto=从现有 AI 算力来源里挑 rerank 模型；manual=用户自己填端点。 */
-export type RerankMode = 'auto' | 'manual';
+/**
+ * 重排来源模式：
+ *   auto   = 从现有 AI 算力来源里挑**名字像 rerank** 的档案（需要 /v1/rerank）；
+ *   manual = 用户自己填端点；
+ *   llm    = 用**对话模型打分**（不需要 /v1/rerank —— LM Studio / Ollama 的可用路径）。
+ */
+export type RerankMode = 'auto' | 'manual' | 'llm';
 
 export interface RerankSettings {
   /** 总开关（off 时检索链路与改造前逐字一致）。 */
@@ -77,8 +82,10 @@ export interface ResolvedRerank {
   timeoutMs: number;
   candidateK: number;
   finalK: number;
-  /** 命中来源：manual=显式端点 / profile=复用算力来源里的重排模型 / none=不可用。 */
-  source: 'manual' | 'profile' | 'none';
+  /** 实际实现：`api` = /v1/rerank；`llm` = 对话模型打分。 */
+  apiMode: 'api' | 'llm';
+  /** 命中来源：manual=显式端点 / profile=复用算力来源里的重排模型 / llm=对话模型打分 / none=不可用。 */
+  source: 'manual' | 'profile' | 'llm' | 'none';
   /** 展示用一句话（含档案名，便于核对到底用的哪家）。 */
   label: string;
   /** usable=false 的原因（灰字直接显示）。 */
@@ -105,6 +112,11 @@ function clampInt(v: unknown, min: number, max: number, fallback: number): numbe
   return Math.min(max, Math.max(min, n));
 }
 
+/** 模式归一化：未知值一律回 auto（老配置里没有 llm 字段也能平滑升级）。 */
+function normalizeMode(v: unknown): RerankMode {
+  return v === 'manual' ? 'manual' : v === 'llm' ? 'llm' : 'auto';
+}
+
 /** 读并归一化设置（越界值一律钳制，不做「读到脏数据就整个放弃」）。 */
 export function getRerankSettings(): RerankSettings {
   let raw: Partial<RerankSettings> = {};
@@ -122,7 +134,7 @@ export function getRerankSettings(): RerankSettings {
   );
   return {
     enabled: raw.enabled === true,
-    mode: raw.mode === 'manual' ? 'manual' : 'auto',
+    mode: normalizeMode(raw.mode),
     baseUrl: typeof raw.baseUrl === 'string' ? raw.baseUrl.trim() : '',
     apiKey: typeof raw.apiKey === 'string' ? raw.apiKey.trim() : '',
     model: typeof raw.model === 'string' ? raw.model.trim() : '',
@@ -137,7 +149,7 @@ export function saveRerankSettings(patch: Partial<RerankSettings>): RerankSettin
   const merged: RerankSettings = { ...getRerankSettings(), ...patch };
   const normalized: RerankSettings = {
     enabled: merged.enabled === true,
-    mode: merged.mode === 'manual' ? 'manual' : 'auto',
+    mode: normalizeMode(merged.mode),
     baseUrl: (merged.baseUrl ?? '').trim(),
     apiKey: (merged.apiKey ?? '').trim(),
     model: (merged.model ?? '').trim(),
@@ -221,7 +233,7 @@ const CACHE_MS = 30_000;
 
 const DEGRADED = '已降级为向量排序';
 
-function unusable(reason: string, s: RerankSettings, source: 'manual' | 'profile' | 'none'): ResolvedRerank {
+function unusable(reason: string, s: RerankSettings, source: 'manual' | 'profile' | 'llm' | 'none'): ResolvedRerank {
   return {
     usable: false,
     endpoint: '',
@@ -230,9 +242,31 @@ function unusable(reason: string, s: RerankSettings, source: 'manual' | 'profile
     timeoutMs: s.timeoutMs,
     candidateK: s.candidateK,
     finalK: s.finalK,
+    apiMode: s.mode === 'llm' ? 'llm' : 'api',
     source,
     label: DEGRADED,
     reason,
+  };
+}
+
+/** LLM 打分比专用 rerank 慢一个数量级：低于 15s 的配置一律抬到 15s（后端上限 60s）。 */
+const LLM_TIMEOUT_FLOOR = 15000;
+
+/** 找一个可用于「对话打分」的档案：优先当前激活的那个，其次第一个有 base_url + model 的。 */
+async function findLlmProfile(): Promise<{ base_url: string; api_key: string; model: string; label: string } | null> {
+  const raw = await window.__HOST_API__.invoke<{ profiles?: AiProfileLite[]; active?: string | null }>(
+    'ai_get_profiles',
+  );
+  const list = (raw?.profiles ?? []).filter((p) => p && p.base_url);
+  if (list.length === 0) return null;
+  const active = raw?.active ? list.find((p) => p.id === raw.active) : undefined;
+  const hit = active || list.find((p) => p.model) || list[0];
+  if (!hit?.base_url) return null;
+  return {
+    base_url: hit.base_url,
+    api_key: hit.api_key ?? '',
+    model: (hit.model || '').trim(),
+    label: `对话模型打分「${hit.name || hit.id || '未命名'}」· ${(hit.model || '').trim() || '（未填模型）'}`,
   };
 }
 
@@ -264,7 +298,35 @@ async function resolveFromSettings(s: RerankSettings): Promise<ResolvedRerank> {
     return unusable(`重排未启用（${DEGRADED}）`, s, 'none');
   }
   let cfg: ResolvedRerank;
-  if (s.mode === 'manual') {
+  if (s.mode === 'llm') {
+    // 对话模型打分：完全绕开 /v1/rerank，因此 LM Studio / Ollama 也能用。
+    let picked: Awaited<ReturnType<typeof findLlmProfile>> = null;
+    try {
+      picked = await findLlmProfile();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return unusable(`读取算力来源失败：${msg}（${DEGRADED}）`, s, 'llm');
+    }
+    if (!picked) {
+      cfg = unusable(`没有可用的对话模型（${DEGRADED}）`, s, 'llm');
+    } else if (!picked.model) {
+      cfg = unusable(`该算力来源没有填模型名，无法用于打分（${DEGRADED}）`, s, 'llm');
+    } else {
+      cfg = {
+        usable: true,
+        endpoint: picked.base_url,
+        apiKey: picked.api_key,
+        model: picked.model,
+        timeoutMs: Math.max(s.timeoutMs, LLM_TIMEOUT_FLOOR),
+        candidateK: Math.min(s.candidateK, 12),
+        finalK: Math.min(s.finalK, s.candidateK),
+        apiMode: 'llm',
+        source: 'llm',
+        label: picked.label,
+        reason: '',
+      };
+    }
+  } else if (s.mode === 'manual') {
     const endpoint = normalizeRerankEndpoint(s.baseUrl);
     if (!endpoint || !/^https?:\/\//i.test(endpoint)) {
       cfg = unusable(`手动端点无效：「${s.baseUrl || '（空）'}」不是 http(s) 地址（${DEGRADED}）`, s, 'manual');
@@ -279,6 +341,7 @@ async function resolveFromSettings(s: RerankSettings): Promise<ResolvedRerank> {
         timeoutMs: s.timeoutMs,
         candidateK: s.candidateK,
         finalK: s.finalK,
+        apiMode: 'api',
         source: 'manual',
         label: `手动端点 · ${s.model}`,
         reason: '',
@@ -309,6 +372,7 @@ async function resolveFromSettings(s: RerankSettings): Promise<ResolvedRerank> {
         timeoutMs: s.timeoutMs,
         candidateK: s.candidateK,
         finalK: s.finalK,
+        apiMode: 'api',
         source: 'profile',
         label: picked.label,
         reason: '',
@@ -374,6 +438,7 @@ export async function probeRerankConfig(cfg: ResolvedRerank): Promise<RerankProb
       endpoint: cfg.endpoint,
       apiKey: cfg.apiKey || undefined,
       model: cfg.model,
+      mode: cfg.apiMode,
       timeoutMs: cfg.timeoutMs,
     },
   );

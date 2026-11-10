@@ -7,9 +7,13 @@ import { NotesEditor } from '@/core/notes/NotesEditor';
 import { NotesSidebar } from '@/core/notes/NotesSidebar';
 import { NotesNetworkPage } from '@/core/notes/NotesNetworkPage';
 import { NoteSettingsPanel } from '@/core/notes/NoteSettingsPanel';
-import { NOTE_SOURCES } from '@/core/notes/noteSources';
-import { CloudDrawer } from '@shared/CloudDrawer';
-import { Globe, PenTool } from 'lucide-react';
+import { NOTE_SOURCES, NOTE_AGGREGATE, resolveSourceScope, type NoteSourceKey } from '@/core/notes/noteSources';
+// ⚠ 必须用相对路径，不能写 `@shared/CloudDrawer`：
+//   `@shared` 是**插件构建**的别名（plugins/_shared/vite.shared.config.ts），
+//   宿主（src/）的 vite/tsconfig 没有这个 alias —— 写成别名会让运行时 import 失败，
+//   表现就是「点开网络按钮整个模块白屏」。
+import { CloudDrawer } from '../../../plugins/_shared/CloudDrawer';
+import { Cloud, PenTool } from 'lucide-react';
 
 /**
  * 笔记模块 — 超薄壳。
@@ -82,24 +86,34 @@ export function NotesModule() {
             key: 'network',
             title: '网络检索',
             desc: 'arXiv / HuggingFace / GitHub / Semantic Scholar',
-            icon: <Globe size={18} />,
+            icon: <Cloud size={18} />,
             active: networkOpen,
             defaultExpanded: true,
-            items: NOTE_SOURCES.map((s) => ({
-              id: s.id,
-              name: s.name,
-              desc: s.desc,
-              accent: s.accent,
-              badge: s.id === 'arxiv' ? '限速 3s' : undefined,
-            })),
+            items: [
+              // 聚合搜索：前端并发打四个源再合并（后端仍是四个固定适配器）
+              {
+                id: NOTE_AGGREGATE.id,
+                name: NOTE_AGGREGATE.name,
+                desc: NOTE_AGGREGATE.desc,
+                accent: NOTE_AGGREGATE.accent,
+                badge: '并发',
+              },
+              ...NOTE_SOURCES.map((s) => ({
+                id: s.id,
+                name: s.name,
+                desc: s.desc,
+                accent: s.accent,
+                badge: s.id === 'arxiv' ? '限速 3s' : undefined,
+              })),
+            ],
             onPick: (id) => {
-              setNetworkSource(id as (typeof NOTE_SOURCES)[number]['id']);
+              setNetworkSource(id as NoteSourceKey);
               setNetworkOpen(true);
               setNetworkDrawerOpen(false);
             },
           },
         ]}
-        footer={`只看官方开放接口（当前：${NOTE_SOURCES.find((s) => s.id === networkSource)?.name ?? '—'}）。
+        footer={`只看官方开放接口（当前：${resolveSourceScope(networkSource).name}）。
           结果可一键收藏为笔记：保存标题、摘要与原文链接（引用），不复制全文。`}
       />
     </div>

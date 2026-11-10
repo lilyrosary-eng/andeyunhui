@@ -207,6 +207,7 @@ async function applyRerank(
       endpoint: cfg.endpoint,
       apiKey: cfg.apiKey || undefined,
       model: cfg.model,
+      mode: cfg.apiMode,
       timeoutMs: cfg.timeoutMs,
     });
   } catch (e) {

@@ -251,11 +251,16 @@ export function RetrieveSettingsCard() {
           <span className="text-[11px] text-neutral-400 dark:text-stone-500">{T('rag.retrieve.mode')}</span>
           <select
             value={form.mode}
-            onChange={(e: ChangeEvt) => patch({ mode: e.target.value === 'manual' ? 'manual' : 'auto' })}
+            onChange={(e: ChangeEvt) =>
+              patch({
+                mode: e.target.value === 'manual' ? 'manual' : e.target.value === 'llm' ? 'llm' : 'auto',
+              })
+            }
             className={INPUT_CLS}
           >
             <option value="auto">{T('rag.retrieve.modeAuto')}</option>
             <option value="manual">{T('rag.retrieve.modeManual')}</option>
+            <option value="llm">{T('rag.retrieve.modeLlm')}</option>
           </select>
         </label>
         <label className="flex flex-col gap-1">
@@ -293,6 +298,13 @@ export function RetrieveSettingsCard() {
           />
         </label>
       </div>
+
+      {form.mode === 'llm' && (
+        <p className="mt-2 text-[11px] leading-relaxed text-neutral-400 dark:text-stone-500">
+          用**当前算力来源的对话模型**给候选打分：一次额外请求，不需要 /v1/rerank
+          （LM Studio / Ollama 也能用）。候选数自动限制在 12 条以内，超时至少 15 秒。
+        </p>
+      )}
 
       {form.mode === 'manual' && (
         <div className="mt-2 flex flex-col gap-2">

@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api, type NoteInfo } from '@/lib/api';
 import { logger } from '@/lib/logger';
 import { renderMarkdownPreview } from '@/core/notes/markdown';
-import type { NoteSourceId } from '@/core/notes/noteSources';
+import type { NoteSourceKey } from '@/core/notes/noteSources';
 import { resolveLocalImagesInHtml } from '@/lib/localImage';
 import type { CSSProperties } from 'react';
 
@@ -42,13 +42,13 @@ interface NotesState {
   networkOpen: boolean;
   /** 「网络」源选择抽屉是否打开（与侧栏标题栏的云按钮对应） */
   networkDrawerOpen: boolean;
-  /** 「网络」当前选中的源（侧栏列表与结果页共用，保证两边永远一致） */
-  networkSource: NoteSourceId;
+  /** 「网络」当前选中的源（侧栏列表与结果页共用，保证两边永远一致；`all` = 聚合搜索） */
+  networkSource: NoteSourceKey;
 
   // ---- actions ----
   setNetworkOpen: (open: boolean) => void;
   setNetworkDrawerOpen: (open: boolean) => void;
-  setNetworkSource: (source: NoteSourceId) => void;
+  setNetworkSource: (source: NoteSourceKey) => void;
   setNotes: (notes: NoteInfo[]) => void;
   setSearchQuery: (q: string) => void;
   setTitle: (t: string) => void;

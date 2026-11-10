@@ -31,8 +31,9 @@ pub async fn note_web_search(
     source: String,
     query: String,
     limit: Option<usize>,
+    offset: Option<usize>,
 ) -> Result<Vec<crate::services::note_sources::NoteWebResult>, String> {
-    crate::services::note_sources::search(&source, &query, limit).await
+    crate::services::note_sources::search(&source, &query, limit, offset).await
 }
 
 #[tauri::command]
