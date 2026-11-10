@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { Globe, Search, X, Loader2, AlertCircle, BookmarkPlus, Check, ExternalLink, ChevronLeft, ChevronRight } from 'lucide-react';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { invoke } from '@tauri-apps/api/core';
 import { useNotesStore } from '@/stores/notesStore';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
@@ -241,8 +242,10 @@ export function NotesNetworkPage() {
 
   // ===== 呈现层：分页 / 无限下拉 =====
   const pageCount = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+  // 页码兜底：加载更多/重新搜索后页数会变，旧 page 可能越界（越界会让 slice 返回空 → 有数据却不渲染）
+  const pageSafe = Math.min(page, pageCount - 1);
   const shownItems = layout === 'paged'
-    ? items.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE)
+    ? items.slice(pageSafe * PAGE_SIZE, pageSafe * PAGE_SIZE + PAGE_SIZE)
     : items.slice(0, visibleCount);
 
   /** 无限下拉：先多展示一批；已展示到已加载末尾时再向各源要下一批 */
@@ -257,14 +260,17 @@ export function NotesNetworkPage() {
 
   /** 分页：翻到已加载末尾时自动再取一批 */
   const goNextPage = useCallback(() => {
-    if (page < pageCount - 1) {
-      setPage((p) => p + 1);
+    if (pageSafe < pageCount - 1) {
+      setPage(pageSafe + 1);
       return;
     }
     if (hasUnfinishedSources) {
-      void fetchBatch(queryRef.current, false).then(() => setPage((p) => p + 1));
+      void fetchBatch(queryRef.current, false).then(() =>
+        // 新一批返回后页数会变大；这里只前进一页，越界由 pageSafe 兜住
+        setPage((p) => p + 1),
+      );
     }
-  }, [fetchBatch, hasUnfinishedSources, page, pageCount]);
+  }, [fetchBatch, hasUnfinishedSources, pageCount, pageSafe]);
 
   /** 滚动到底部附近自动追加（无限下拉模式） */
   const onListScroll = useCallback(
@@ -276,10 +282,29 @@ export function NotesNetworkPage() {
     [layout, loadMore],
   );
 
+  /**
+   * 打开原文：优先用**独立浏览器窗口**（browser_open，与视频/图片/Web 接口同一套）。
+   *
+   * 为什么不在主界面内嵌：Windows/WebView2 下子 webview 会被宿主合成层盖住（白屏），
+   * 视频模块已经踩过这个坑（见 src-tauri/src/embedded_browser.rs 头注释）。
+   * 独立窗口既能带着登录态浏览，又不会把人甩到系统 Edge。
+   * 命令失败（内核拒绝等）时才退回到系统浏览器，保证有兜底。
+   */
   const openOriginal = useCallback((url: string) => {
     if (!url) return;
-    void openUrl(url).catch(() => {
-      window.open(url, '_blank', 'noopener');
+    void invoke('browser_open', {
+      target: 'note-web',
+      url,
+      title: '安得云荟 · 笔记原文',
+      // 位置/尺寸由窗口管理器接管，保留字段只为兼容旧签名
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+    }).catch(() => {
+      void openUrl(url).catch(() => {
+        window.open(url, '_blank', 'noopener');
+      });
     });
   }, []);
 
@@ -463,7 +488,7 @@ export function NotesNetworkPage() {
                   <button
                     onClick={() => openOriginal(item.url)}
                     className="block flex-1 min-w-0 text-left"
-                    title="在系统浏览器打开原文"
+                    title="在应用内的浏览器窗口打开原文"
                   >
                     <p className="text-sm font-medium text-neutral-800 dark:text-stone-100 leading-snug line-clamp-2">
                       {item.title}
@@ -515,14 +540,14 @@ export function NotesNetworkPage() {
                 <ChevronLeft size={13} /> 上一页
               </button>
               <span className="tabular-nums">
-                第 {page + 1} / {pageCount} 页 · 已加载 {items.length} 条
+                第 {pageSafe + 1} / {pageCount} 页 · 已加载 {items.length} 条
               </span>
               <button
                 onClick={goNextPage}
-                disabled={loading || loadingMore || (page >= pageCount - 1 && !hasUnfinishedSources)}
+                disabled={loading || loadingMore || (pageSafe >= pageCount - 1 && !hasUnfinishedSources)}
                 className="btn-press inline-flex items-center gap-0.5 rounded-lg px-2 py-1 hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent"
               >
-                {page < pageCount - 1 ? (
+                {pageSafe < pageCount - 1 ? (
                   <>下一页 <ChevronRight size={13} /></>
                 ) : loadingMore ? (
                   <>加载中… <Loader2 size={13} className="animate-spin" /></>

@@ -987,8 +987,27 @@ pub fn destroy(app: &AppHandle, password: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn audit_log(app: &AppHandle, limit: usize) -> Result<Vec<AuditEntry>, String> {
+/// 凭据引用桥取用：返回条目密钥（password 字段）。只读，不刷新自动锁计时。
+pub fn secret_by_id(app: &AppHandle, id: &str) -> Result<String, String> {
     let mut m = lock_memory();
+    load_into_memory(app, &mut m)?;
+    check_auto_lock(&mut m);
+    let unlocked = m
+        .unlocked
+        .as_ref()
+        .ok_or_else(|| "密码库已锁定，无法取用引用条目".to_string())?;
+    let items = parse_items(unlocked)?;
+    let item = items
+        .iter()
+        .find(|i| i.id == id && i.deleted_at_ms.is_none())
+        .ok_or_else(|| format!("密码库条目不存在或已在回收站: {id}"))?;
+    if item.password.trim().is_empty() {
+        return Err(format!("密码库条目「{}」没有密钥内容", item.title));
+    }
+    Ok(item.password.clone())
+}
+
+pub fn audit_log(app: &AppHandle, limit: usize) -> Result<Vec<AuditEntry>, String> {    let mut m = lock_memory();
     load_into_memory(app, &mut m)?;
     require_unlocked(&mut m)?;
     let unlocked = m.unlocked.as_ref().ok_or_else(|| "密码库已锁定".to_string())?;

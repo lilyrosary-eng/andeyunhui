@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 use futures_util::StreamExt;
-use crate::services::ai_service::ai_profile::{load_config, resolve_target, compose_persona_system, compose_effective_system, ensure_api_key};
+use crate::services::ai_service::ai_profile::{load_config, resolve_target, resolve_target_live, compose_persona_system, compose_effective_system, ensure_api_key};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
 use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, tool_schemas_for_api, tool_schemas_for_api_without, mcp_tools_guide, skills_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, register_approval, take_subagent_settles};
 use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session_in, persist_agent_session_in, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text, hydrate_images_in, persist_images_in};
@@ -71,7 +71,7 @@ async fn run_agent(
     // 每次都是一次真实模型调用，20 仍然有界，不会失控。
     let max_rounds = max_rounds.unwrap_or(4).clamp(1u32, 20u32);
     let config = load_config(&app);
-    let cfg = resolve_target(&config, profile_id.as_deref());
+    let cfg = resolve_target_live(&app, &config, profile_id.as_deref());
     ensure_api_key(&app, &request_id, &cfg)?;
 
     // ── 图片路由：对话模型能不能「原生看图」 ────────────────────────────────
@@ -942,7 +942,7 @@ pub async fn ai_chat_agent(
 ) -> Result<(), String> {
     // 同步预检：无 API Key 直接拒绝（对齐原契约），无需开后台任务。
     let config = load_config(&app);
-    let cfg = resolve_target(&config, profile_id.as_deref());
+    let cfg = resolve_target_live(&app, &config, profile_id.as_deref());
     ensure_api_key(&app, &request_id, &cfg)?;
 
     // 同 id 已有运行中任务 → 先取消（防重复续聊叠跑）。

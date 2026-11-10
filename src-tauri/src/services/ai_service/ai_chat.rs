@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
-use crate::services::ai_service::ai_profile::{ResolvedTarget, load_config, resolve_target, compose_persona_system, compose_effective_system, ensure_api_key};
+use crate::services::ai_service::ai_profile::{ResolvedTarget, load_config, resolve_target, resolve_target_live, compose_persona_system, compose_effective_system, ensure_api_key};
 
 /// 单条对话消息（OpenAI 格式）
 #[derive(Debug, Deserialize)]
@@ -309,7 +309,7 @@ pub async fn ai_chat(
     let _cancel_guard = ChatCancelGuard { id: request_id.clone() };
 
     let config = load_config(&app);
-    let cfg = resolve_target(&config, profile_id.as_deref());
+    let cfg = resolve_target_live(&app, &config, profile_id.as_deref());
     ensure_api_key(&app, &request_id, &cfg)?;
 
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
@@ -635,7 +635,7 @@ pub async fn ai_quick_ask(
     profile_id: Option<String>,
 ) -> Result<String, String> {
     let config = load_config(&app);
-    let cfg = resolve_target(&config, profile_id.as_deref());
+    let cfg = resolve_target_live(&app, &config, profile_id.as_deref());
     ensure_api_key(&app, "ai-quick-ask", &cfg)?;
 
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));

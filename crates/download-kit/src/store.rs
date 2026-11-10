@@ -328,10 +328,39 @@ impl Store {
         Ok(())
     }
 
+    /// 只忘掉任务记录（含分片明细），**绝不碰磁盘文件**。
+    pub fn delete_task(&self, id: &str) -> Result<bool, String> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM parts WHERE task_id = ?1", params![id])
+            .map_err(|e| format!("删除下载分片失败: {e}"))?;
+        let changed = conn
+            .execute("DELETE FROM tasks WHERE id = ?1", params![id])
+            .map_err(|e| format!("删除下载任务失败: {e}"))?;
+        Ok(changed > 0)
+    }
+
+    /// 改写任务的落盘路径（文件被移动/重命名后必须调用）。
+    ///
+    /// 为什么必须回写：`save_path` 是断点续传、重试、以及宿主侧「这个文件在哪」
+    /// 的唯一锚点。只改磁盘不改库，任务记录就指向一个不存在的文件，
+    /// 用户下次点「重试」会下载到一个他以为已经清理掉的位置。
+    pub fn update_save_path(&self, id: &str, save_path: &str, filename: &str) -> Result<(), String> {
+        let conn = self.lock()?;
+        let changed = conn
+            .execute(
+                "UPDATE tasks SET save_path = ?1, filename = ?2, updated_at = ?3 WHERE id = ?4",
+                params![save_path, filename, now_ms(), id],
+            )
+            .map_err(|e| format!("更新下载任务路径失败: {e}"))?;
+        if changed == 0 {
+            return Err(format!("下载任务不存在: {id}"));
+        }
+        Ok(())
+    }
+
     /// 启动恢复：把上一进程遗留的活动态改成排队或暂停。
     /// 外部引擎（aria2/ffmpeg）的临时产物不动，续传由各自引擎处理。
-    pub fn recover_stale(&self, resume: bool) -> Result<u32, String> {
-        let target = if resume {
+    pub fn recover_stale(&self, resume: bool) -> Result<u32, String> {        let target = if resume {
             TaskStatus::Queued
         } else {
             TaskStatus::Paused

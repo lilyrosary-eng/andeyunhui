@@ -17,6 +17,9 @@ export const EVENTS = {
     confirmed: 'transfer-receive-confirmed', declined: 'transfer-receive-declined', received: 'transfer-received',
     capsuleTook: 'transfer-receive-capsule-took', saveDirInvalid: 'transfer:save-dir-invalid',
     dropzoneChanged: 'dropzone-changed', dropzoneSaving: 'dropzone-saving', dropzoneSavingDone: 'dropzone-saving-done',
+    // download-kit 的任务状态广播。中转站把它当作"列表可能需要刷新"的信号：
+    // 下载落盘之后，那个文件会以 referenced 条目出现在中转站里。
+    downloadTaskState: 'download-kit:state',
   },
   screenshot: { start: 'screenshot-start', ready: 'screenshot-ready', windows: 'screenshot-windows', noteImport: 'screenshot-note-import', open: 'open-screenshot' },
   recorder: {

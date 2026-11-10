@@ -3,6 +3,7 @@ pub mod note_service;
 pub mod note_sources;
 pub mod workflow_service;
 pub mod transfer_station;
+pub mod station;
 pub mod image_service;
 pub mod music_service;
 pub mod music_db;
@@ -42,6 +43,8 @@ pub mod vault_crypto;
 pub mod vault_service;
 // Windows Hello 生物识别（WinRT UserConsentVerifier）：仅作为 device 槽位的门闸。
 pub mod biometric;
+// 凭据引用桥：`vault:<itemId>` → 密码库条目密钥（请求时解析，不迁移既有数据）。
+pub mod credential_ref;
 pub mod checkpoint;
 // 项目工作区 .adyh / 跨 harness 通道 .Talk：规则、记忆、会话、媒体、消息总线。
 pub mod adyh_service;

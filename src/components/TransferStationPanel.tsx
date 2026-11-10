@@ -1,10 +1,10 @@
 import { useSyncExternalStore, useCallback, useEffect, useRef, useState } from 'react';
-import { FileText, File, Trash2, Inbox, ExternalLink, Download, Save, ScanText, Languages, Loader2, X, FileDown } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
+import { FileText, File, Trash2, Inbox, ExternalLink, Download, Save, ScanText, Languages, Loader2, X, FileDown, AlertTriangle } from 'lucide-react';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { save, open } from '@tauri-apps/plugin-dialog';
 import { join } from '@tauri-apps/api/path';
-import { api, type ImportedFile } from '@/lib/api';
+import { api, type ImportedFile, type StationEntry } from '@/lib/api';
 import { useI18n, t as i18nT } from '@/lib/i18n';
 import {
   SOURCE_LANGS,
@@ -81,6 +81,49 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/**
+ * 面板里实际消费的行数据。
+ *
+ * 它是 `ImportedFile`（旧视图）+ 索引层的三个关键属性：
+ * - `id`：稳定身份，所有操作都用它，**不再把路径传给后端**；
+ * - `ownership`：`managed`（dropzone 里的副本，可删）/ `referenced`（用户的真实文件，只忘记录）；
+ * - `status`：`missing` 表示磁盘上已经找不到这个文件了（U 盘拔了、被外部改名）。
+ */
+type StationFile = ImportedFile & {
+  id: string;
+  ownership: 'managed' | 'referenced';
+  status: 'ok' | 'missing';
+  /** `local` | `download` | `external` —— 后端给的来源，用于徽章 */
+  source: string;
+};
+
+/** 把索引条目映射成面板一直用的视图形状，尽量少改渲染代码。 */
+function toStationFile(e: StationEntry): StationFile {
+  return {
+    fileId: e.id,
+    id: e.id,
+    originalName: e.name,
+    extension: e.extension,
+    size: e.size,
+    // storedPath 现在只用于「dropzone 内的单段文件名」这一种场景（托管条目读取），
+    // 不再参与任何拼路径的决策。
+    storedPath: e.ownership === 'managed' ? basename(e.path) : e.path,
+    absolutePath: e.path,
+    importedAt: e.addedAt,
+    isReadable: e.isReadable,
+    origin: e.ownership === 'managed' ? 'local' : 'external',
+    ownership: e.ownership,
+    status: e.status,
+    source: e.source,
+  };
+}
+
+/** 从路径取末段（Windows 两种分隔符都认）。 */
+function basename(p: string): string {
+  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  return i >= 0 ? p.slice(i + 1) : p;
+}
+
 function FileIcon({ extension }: { extension: string }) {
   const textExts = ['md', 'txt', 'json', 'csv', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'log', 'html', 'css', 'js', 'ts', 'tsx', 'jsx', 'py', 'rs', 'go', 'sh', 'bat', 'env', 'sql', 'vue', 'svelte', 'astro'];
   if (textExts.includes(extension)) {
@@ -97,7 +140,9 @@ function isImageFile(ext: string): boolean {
 export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: TransferStationPanelProps) {
   const { t: tr } = useI18n();
   const tick = useSyncExternalStore(subscribe, getTick, getTick);
-  const [files, setFiles] = useState<ImportedFile[]>([]);
+  const [files, setFiles] = useState<StationFile[]>([]);
+  /** 后端降级提示：下载记录读取失败、条目已丢失、索引写不进去…… 必须显示，不能吞 */
+  const [stationNotices, setStationNotices] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   // 悬停时预取图片字节仅用于显示缩略图；原生拖出由 Rust 端 DoDragDrop 完成，无需前端字节缓存
   const [imgUrls, setImgUrls] = useState<Record<string, string>>({});
@@ -137,18 +182,31 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
       const t = e.payload.tempId;
       setSavingItems((prev) => prev.filter((x) => x.tempId !== t));
     });
+    // 下载落盘 → 这个文件要以「仅登记」条目出现在中转站里。
+    // ★ 只在 completed 刷新：progress 事件每秒好几次，而列表要扫目录 + 逐条 stat，
+    //   跟着进度刷新会把 IO 打满（这个项目在同步 IO 上已经踩过一次大坑）。
+    const unDl = listen<{ status?: string }>(EVENTS.transfer.downloadTaskState, (e) => {
+      if (e.payload?.status === 'completed') emitDropzoneChange();
+    });
     return () => {
       void unSaving.then((fn) => fn());
       void unDone.then((fn) => fn());
+      void unDl.then((fn) => fn());
     };
   }, []);
 
   const load = useCallback(() => {
     setLoading(true);
     api
-      .listDropzoneFiles()
-      .then(setFiles)
-      .catch((err) => console.error('[Dropzone] 列表加载失败:', err))
+      .stationList()
+      .then((res) => {
+        setFiles(res.entries.map(toStationFile));
+        setStationNotices(res.notices);
+      })
+      .catch((err) => {
+        console.error('[Dropzone] 列表加载失败:', err);
+        setStationNotices([`列表加载失败：${String(err)}`]);
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -209,21 +267,37 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
     }
   }, [files]);
 
-  // 悬停预取图片字节仅用于渲染缩略图（data URL 直接作 <img> src）
-  const prefetch = useCallback((file: ImportedFile) => {
+  // 悬停预取图片字节，**仅用于 OCR / 翻译**（缩略图直接走 asset 协议，不需要 base64）。
+  // 托管条目从 dropzone 读；引用条目直接从它自己的绝对路径读。
+  const prefetch = useCallback((file: StationFile) => {
     if (imgUrls[file.storedPath] || !isImageFile(file.extension)) return;
-    api
-      .readDropzoneBase64(file.storedPath)
+    const fetchBytes = file.ownership === 'managed'
+      ? api.readDropzoneBase64(file.storedPath)
+      : invoke<string>('read_file_base64', { filePath: file.absolutePath });
+    fetchBytes
       .then((d) => setImgUrls((m) => ({ ...m, [file.storedPath]: d })))
       .catch((err) => console.error('[Dropzone] 缩略图预取失败:', file.storedPath, err));
   }, [imgUrls]);
 
+  /** 取图片字节（data URL）。OCR / 翻译要用，按所有权选读取通道。 */
+  const loadImageBytes = useCallback(async (file: StationFile): Promise<string> => {
+    const cached = imgUrls[file.storedPath];
+    if (cached) return cached;
+    const d = file.ownership === 'managed'
+      ? await api.readDropzoneBase64(file.storedPath)
+      : await invoke<string>('read_file_base64', { filePath: file.absolutePath });
+    setImgUrls((m) => ({ ...m, [file.storedPath]: d }));
+    return d;
+  }, [imgUrls]);
+
   // 原生拖出：在文件行上按下鼠标即发起系统级拖拽（由 Rust 端 DoDragDrop 写出真实文件到桌面/文件夹）。
   // 完全绕过 WebView2 对 JS dataTransfer 拖出的限制，是根治「文件拖不出」的方案。
-  const startNativeDrag = useCallback((e: React.MouseEvent, file: ImportedFile) => {
+  const startNativeDrag = useCallback((e: React.MouseEvent, file: StationFile) => {
     if (e.button !== 0) return; // 仅左键
     if (selectionMode) return; // 多选模式下禁用拖拽，点击改为切换选中
     if (!file.absolutePath) return;
+    // 磁盘上已经没有这个文件了，DoDragDrop 会拖一个空气出去
+    if (file.status === 'missing') return;
     const target = e.target as HTMLElement;
     if (target.closest('button')) return; // 让删除/保存等按钮正常工作
     e.preventDefault();
@@ -259,16 +333,11 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
   // OCR / 翻译：AI 优先，失败时给出与 AI 编程一致的降级提示
   // 结果 / 错误 / loading 状态按 storedPath 维度存储，展开时显示（aiResults 已在上方声明）
   // —— 以下 runOcr / runTranslate 仅用于「中转站浮窗」内联结果（不影响主站工作区）
-  const runOcr = useCallback(async (file: ImportedFile) => {
+  const runOcr = useCallback(async (file: StationFile) => {
     if (!isImageFile(file.extension)) return;
     setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'loading', kindLabel: 'OCR' } }));
     try {
-      // 复用现有 imgUrls（data URL: data:image/png;base64,xxx）
-      let dataUrl = imgUrls[file.storedPath];
-      if (!dataUrl) {
-        dataUrl = await api.readDropzoneBase64(file.storedPath);
-        setImgUrls(m => ({ ...m, [file.storedPath]: dataUrl }));
-      }
+      const dataUrl = await loadImageBytes(file);
       // 拆分 mime 与 base64 部分
       const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl);
       if (!m) throw new Error(tr('transfer.badImageData'));
@@ -283,7 +352,7 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
       if (msg.includes('未配置') || msg.includes('API Key')) {
         try {
           const local = await loadPaddleOcr();
-          const du = imgUrls[file.storedPath] || await api.readDropzoneBase64(file.storedPath);
+          const du = await loadImageBytes(file);
           const t = await local.recognize(du);
           if (t && t.trim()) {
             setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'ocr', text: t } }));
@@ -298,18 +367,14 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
         : '';
       setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'error', text: '⚠ ' + tr('transfer.ocrFailedPrefix') + msg.slice(0, 300) + hint } }));
     }
-  }, [imgUrls, tr]);
+  }, [loadImageBytes, tr]);
 
-  const runTranslate = useCallback(async (file: ImportedFile) => {
+  const runTranslate = useCallback(async (file: StationFile) => {
     if (!isImageFile(file.extension)) return;
     setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'loading', kindLabel: tr('transfer.translateLabel') } }));
     try {
       // 先做 OCR，再翻译
-      let dataUrl = imgUrls[file.storedPath];
-      if (!dataUrl) {
-        dataUrl = await api.readDropzoneBase64(file.storedPath);
-        setImgUrls(m => ({ ...m, [file.storedPath]: dataUrl }));
-      }
+      const dataUrl = await loadImageBytes(file);
       const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl);
       if (!m) throw new Error(tr('transfer.badImageData'));
       const ocrText = await api.aiVisionOcr(m[2], m[1]);
@@ -326,7 +391,7 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
     } catch (err) {
       setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'error', text: '⚠ ' + tr('transfer.translateFailedPrefix') + String(err).slice(0, 200) } }));
     }
-  }, [imgUrls, tr]);
+  }, [loadImageBytes, tr]);
 
   // 浮窗内联结果清除；主站工作区清除
   const clearAiResult = useCallback((storedPath: string) => {
@@ -339,24 +404,18 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
 
   // 主站 OCR / 翻译 工作区：点击实体按钮在左 / 右侧展开自包含工作区（支持拖入 / 选择 / 粘贴图片，不依赖中转站已存文件）
   // 与浮窗的 OcrBox / TranslateBox 行为一致；结果存于工作区自身局部状态，与浮窗 aiResults 完全隔离
-  const openOcr = useCallback((file?: ImportedFile) => {
+  const openOcr = useCallback((file?: StationFile) => {
     if (ocrOpen) {
       setOcrOpen(false);
       return;
     }
     setOcrOpen(true);
-    if (file && isImageFile(file.extension)) {
-      const p = file.storedPath;
-      const existing = imgUrls[p];
-      if (existing) {
-        setOcrPrefill(existing);
-      } else {
-        api.readDropzoneBase64(p).then((d) => setOcrPrefill(d)).catch(() => {});
-      }
+    if (file && isImageFile(file.extension) && file.status !== 'missing') {
+      loadImageBytes(file).then((d) => setOcrPrefill(d)).catch(() => {});
     } else {
       setOcrPrefill(null);
     }
-  }, [ocrOpen, imgUrls]);
+  }, [ocrOpen, loadImageBytes]);
 
   const openTranslate = useCallback(() => {
     setTranslateOpen((v) => !v);
@@ -379,16 +438,43 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
   const onOcr = variant === 'main' ? openOcr : runOcr;
   const onTranslate = variant === 'main' ? openTranslate : runTranslate;
 
+  /**
+   * 移除一条记录（默认动作，**不删用户的文件**）。
+   *
+   * 托管条目：先进回收站再删 dropzone 里的副本；引用条目：只忘掉记录，磁盘一动不动。
+   * 后端会在「回收站没进去 / 删除不可撤销」时返回 notice —— 必须显示出来。
+   */
   const handleDelete = useCallback(
-    async (file: ImportedFile) => {
-    try {
-      await invoke('delete_dropzone_file', { storedPath: file.storedPath });
-      load();
+    async (file: StationFile) => {
+      try {
+        const out = await api.stationRemoveRecord(file.id);
+        if (out.notice) setDragNotice(out.notice);
+        load();
       } catch (err) {
-        console.error('[Dropzone] 删除失败:', err);
+        console.error('[Dropzone] 移除记录失败:', err);
+        setDragNotice(`移除失败：${String(err)}`);
       }
     },
     [load],
+  );
+
+  /**
+   * 删除**真实文件**（第二动作）。对引用条目来说这是删掉用户唯一一份，不可逆，
+   * 所以单独一个函数、单独一个按钮、单独一次确认，绝不和"移除记录"共用入口。
+   */
+  const handleDeleteRealFile = useCallback(
+    async (file: StationFile) => {
+      const warn = tr('transfer.confirmDeleteRealFile', { name: file.originalName });
+      if (!confirm(warn)) return;
+      try {
+        await api.stationDeleteFile(file.id);
+        load();
+      } catch (err) {
+        console.error('[Dropzone] 删除文件失败:', err);
+        setDragNotice(`删除文件失败：${String(err)}`);
+      }
+    },
+    [load, tr],
   );
 
   // 复选模式切换：退出时清空已选
@@ -426,37 +512,60 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
     setSelectionMode(false);
     setSelectedIds(new Set());
   }, [files, selectedIds]);
-  // 批量删除：删除所有选中文件（「存档」快照不受影响）
+  // 批量移除记录：托管条目会进回收站，引用条目只忘掉记录（**不会删任何用户文件**）
   const batchDelete = useCallback(async () => {
     if (selectedIds.size === 0) return;
+    const notices: string[] = [];
     for (const f of files) {
       if (!selectedIds.has(f.storedPath)) continue;
-      await invoke('delete_dropzone_file', { storedPath: f.storedPath }).catch(() => {});
+      try {
+        const out = await api.stationRemoveRecord(f.id);
+        if (out.notice) notices.push(`${f.originalName}: ${out.notice}`);
+      } catch (err) {
+        notices.push(`${f.originalName}: 移除失败（${String(err)}）`);
+      }
     }
+    if (notices.length) setDragNotice(notices.slice(0, 3).join('；') + (notices.length > 3 ? `…（共 ${notices.length} 条）` : ''));
     await load();
     setSelectionMode(false);
     setSelectedIds(new Set());
   }, [files, selectedIds, load]);
 
+  /**
+   * 清空列表。走和单条一样的「移除记录」路径，而不是后端的 `clear_dropzone`：
+   * 只有这样才能对引用条目也只删记录、对托管条目先进回收站。
+   * （`clear_dropzone` 仍然保留，但它只管 dropzone 目录，不认引用条目。）
+   */
   const handleClearAll = useCallback(async () => {
     if (!confirm(tr('transfer.confirmClearAll'))) return;
-    try {
-      await invoke('clear_dropzone');
-      setImgUrls({});
-      load();
-    } catch (err) {
-      console.error('[Dropzone] 清空失败:', err);
+    const notices: string[] = [];
+    for (const f of files) {
+      try {
+        const out = await api.stationRemoveRecord(f.id);
+        if (out.notice) notices.push(`${f.originalName}: ${out.notice}`);
+      } catch (err) {
+        notices.push(`${f.originalName}: 移除失败（${String(err)}）`);
+      }
     }
-  }, [load]);
+    if (notices.length) {
+      setDragNotice(notices.slice(0, 3).join('；') + (notices.length > 3 ? `…（共 ${notices.length} 条）` : ''));
+    }
+    setImgUrls({});
+    load();
+  }, [files, load, tr]);
 
   const handleOpenFile = useCallback(
-    async (file: ImportedFile) => {
-      if (!file.isReadable) return;
+    async (file: StationFile) => {
+      if (!file.isReadable || file.status === 'missing') return;
       try {
-        const content: string = await invoke('read_dropzone_file', { storedPath: file.storedPath });
+        // 托管条目走中转站读取（只接受单段文件名）；引用条目直接读它自己的绝对路径。
+        const content: string = file.ownership === 'managed'
+          ? await invoke('read_dropzone_file', { storedPath: file.storedPath })
+          : await invoke('read_text_file', { path: file.absolutePath });
         onOpenReadableFile?.(file, content);
       } catch (err) {
         console.error('[Dropzone] 读取失败:', err);
+        setDragNotice(`读取失败：${String(err)}`);
       }
     },
     [onOpenReadableFile],
@@ -586,7 +695,7 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
           <div className="flex-1 flex flex-col items-center justify-center py-16 gap-3 text-neutral-400 dark:text-stone-500">
             <p className="text-sm">{tr('common.loading')}</p>
           </div>
-        ) : files.length === 0 && savingItems.length === 0 ? (
+        ) : files.length === 0 && savingItems.length === 0 && stationNotices.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center py-16 gap-3 text-neutral-400 dark:text-stone-500">
             <Inbox size={40} className="opacity-30" />
             <p className="text-sm">{tr('transfer.noFiles')}</p>
@@ -594,6 +703,21 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
           </div>
         ) : (
           <div className="space-y-2 overflow-y-auto flex-1 min-h-0 pr-1">
+            {/* 后端降级提示（下载记录读不到 / 条目已丢失 / 索引写不进去）——
+                这类事不能让用户自己猜"为什么列表少了一半" */}
+            {stationNotices.length > 0 && (
+              <div className="rounded-lg border border-amber-200 dark:border-amber-800/40 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs text-amber-700 dark:text-amber-300 space-y-1">
+                {stationNotices.slice(0, 3).map((n, i) => (
+                  <div key={i} className="flex items-start gap-1.5">
+                    <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
+                    <span className="break-all">{n}</span>
+                  </div>
+                ))}
+                {stationNotices.length > 3 && (
+                  <div className="opacity-70">…共 {stationNotices.length} 条提示</div>
+                )}
+              </div>
+            )}
             {/* 中转站「保存中」占位行：巨大文件后台拷贝时即时占位，绝不静默 */}
             {savingItems.map((s) => (
               <div
@@ -614,7 +738,13 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
               </div>
             ))}
             {files.map((file) => {
-              const imgSrc = isImageFile(file.extension) ? imgUrls[file.storedPath] : undefined;
+              // 缩略图直接走 asset 协议（CSP 已允许、scope 全开），不再把整张图 base64 进内存：
+              // 引用条目的文件可能在任何盘上，走 base64 既慢又受 50MB 限制，而 asset URL 是流式的。
+              // 已经预取到 base64 的（OCR 用过的）优先复用，省一次解码。
+              const imgSrc = isImageFile(file.extension)
+                ? (imgUrls[file.storedPath] ?? convertFileSrc(file.absolutePath))
+                : undefined;
+              const missing = file.status === 'missing';
               // 内联结果仅浮窗显示；主站结果统一在左右工作区展示
               const aiResult = variant === 'floating' ? aiResults[file.storedPath] : undefined;
               const rowContent = (
@@ -651,8 +781,8 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
                       <span>{file.importedAt}</span>
                       <span>{formatSize(file.size)}</span>
                       {file.isReadable && <span className="text-[var(--element-bg)]">· 可预览</span>}
-                      {/* 来源标签：本机中转 / 外部下载。判定靠 sidecar 登记表，不猜 */}
-                      {file.origin === 'external' ? (
+                      {/* 所有权 + 状态：这两件事决定「点了删除会发生什么」，必须一直可见 */}
+                      {file.source === 'download' ? (
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-600 dark:text-sky-400 shrink-0">
                           {tr('transfer.originExternal')}
                         </span>
@@ -661,36 +791,56 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
                           {tr('transfer.originLocal')}
                         </span>
                       )}
+                      {file.ownership === 'referenced' && (
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 shrink-0"
+                          title={tr('transfer.referencedHint')}
+                        >
+                          {tr('transfer.referencedBadge')}
+                        </span>
+                      )}
+                      {missing && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/10 text-red-600 dark:text-red-400 shrink-0 flex items-center gap-1">
+                          <AlertTriangle size={10} />
+                          {tr('transfer.missingBadge')}
+                        </span>
+                      )}
                     </div>
                   </div>
 
                   {/* 操作按钮 */}
                   <div className="flex items-center gap-1 flex-shrink-0">
                     <span
-                      className="btn-press p-1.5 rounded-lg text-neutral-300 dark:text-stone-600"
-                      title={tr('transfer.dragExportHint')}
+                      className={`btn-press p-1.5 rounded-lg ${missing ? 'text-neutral-200 dark:text-stone-700' : 'text-neutral-300 dark:text-stone-600'}`}
+                      title={missing ? tr('transfer.missingBadge') : tr('transfer.dragExportHint')}
                     >
                       <Download size={15} />
                     </span>
-                    <button
-                      onClick={() => handleSave(file)}
-                      className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors"
-                      title={tr('transfer.saveTo')}
-                    >
-                      <Save size={15} />
-                    </button>
+                    {/* 「另存为」只对托管副本有意义：引用条目本来就在用户自己的盘上 */}
+                    {file.ownership === 'managed' && (
+                      <button
+                        onClick={() => handleSave(file)}
+                        disabled={missing}
+                        className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        title={tr('transfer.saveTo')}
+                      >
+                        <Save size={15} />
+                      </button>
+                    )}
                     {isImageFile(file.extension) && (
                       <>
                         <button
                           onClick={() => onOcr(file)}
-                          className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors"
+                          disabled={missing}
+                          className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                           title={tr('transfer.aiOcrTitle')}
                         >
                           <ScanText size={15} />
                         </button>
                         <button
                           onClick={() => onTranslate(file)}
-                          className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors"
+                          disabled={missing}
+                          className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                           title={tr('transfer.aiTranslateTitle')}
                         >
                           <Languages size={15} />
@@ -700,16 +850,28 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
                     {file.isReadable && onOpenReadableFile && (
                       <button
                         onClick={() => handleOpenFile(file)}
-                        className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors"
+                        disabled={missing}
+                        className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         title={tr('common.open')}
                       >
                         <ExternalLink size={15} />
                       </button>
                     )}
+                    {/* 引用条目额外给一个「删真实文件」入口：它是删掉用户唯一一份，
+                        所以独立按钮 + 二次确认，绝不和「移除记录」共用一个图标 */}
+                    {file.ownership === 'referenced' && (
+                      <button
+                        onClick={() => handleDeleteRealFile(file)}
+                        className="btn-press p-1.5 rounded-lg text-red-400/70 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                        title={tr('transfer.deleteRealFile')}
+                      >
+                        <X size={15} />
+                      </button>
+                    )}
                     <button
                       onClick={() => handleDelete(file)}
                       className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-                      title={tr('common.delete')}
+                      title={file.ownership === 'managed' ? tr('transfer.removeRecordArchived') : tr('transfer.removeRecord')}
                     >
                       <Trash2 size={15} />
                     </button>

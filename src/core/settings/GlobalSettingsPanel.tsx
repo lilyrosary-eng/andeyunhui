@@ -15,7 +15,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 import { logger } from '@/lib/logger';
-import { api, type ArchiveEntry, type PluginManifest } from '@/lib/api';
+import { api, type ArchiveEntry, type ArchiveUsage, type PluginManifest } from '@/lib/api';
 import { useTheme } from '@/lib/ThemeProvider';
 import { useSystemFonts } from '@/lib/useSystemFonts';
 import { previewBootScreen } from '@/lib/bootPreview';
@@ -116,6 +116,18 @@ function formatArchiveTime(modified: string): string {
   const m = modified.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/);
   if (!m) return modified;
   return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+}
+
+/** 字节数 → 人类可读（回收站配额要显示得能一眼判断大小）。 */
+function formatBytes(n: number): string {
+  const units = ['B', 'KiB', 'MiB', 'GiB'];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return i === 0 ? `${n} ${units[0]}` : `${v.toFixed(1)} ${units[i]}`;
 }
 
 // 本地账号：显示名 + 头像（复用 userAvatar 积木）。只存本机，不接任何云服务。
@@ -356,14 +368,22 @@ export function GlobalSettingsPanel() {
     setEditingShortcutId(id);
   };
 
-  // 通用存档（快照）列表
+  // 通用存档（快照）列表 —— 设置页里它就是**中转站的回收站**
   const [archives, setArchives] = useState<ArchiveEntry[]>([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
+  const [archiveUsage, setArchiveUsage] = useState<ArchiveUsage | null>(null);
 
   const loadArchives = useCallback(() => {
     setArchiveLoading(true);
-    api.listArchives()
-      .then((items) => setArchives(items))
+    Promise.all([
+      api.listArchives(),
+      // 用量单独取：配额是后端常量，前端不该硬编码一份"看起来像真的"的上限
+      api.archivesUsage().catch(() => null),
+    ])
+      .then(([items, usage]) => {
+        setArchives(items);
+        setArchiveUsage(usage);
+      })
       .catch((err) => logger.transferStation.listFailed(err))
       .finally(() => setArchiveLoading(false));
   }, []);
@@ -1080,8 +1100,17 @@ export function GlobalSettingsPanel() {
                   {t('settings.transfer.archiveTitle')}
                 </h2>
                 <p className="text-xs text-neutral-400 dark:text-stone-500 mb-3">
-                  {t('settings.transfer.archiveDesc')}
+                  {t('settings.transfer.archiveRecycleHint')}
                 </p>
+                {archiveUsage && (
+                  <p className="text-xs text-neutral-500 dark:text-stone-400 mb-3">
+                    {t('settings.transfer.archiveUsage', {
+                      used: formatBytes(archiveUsage.totalBytes),
+                      limit: formatBytes(archiveUsage.limitBytes),
+                      count: archiveUsage.count,
+                    })}
+                  </p>
+                )}
                 <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 overflow-hidden">
                   {archiveLoading ? (
                     <div className="p-6 text-center text-sm text-neutral-400 dark:text-stone-500">{t('common.loading')}</div>
@@ -1122,16 +1151,27 @@ export function GlobalSettingsPanel() {
                                 </div>
                                 <div className="text-xs text-neutral-400 dark:text-stone-500 flex items-center gap-2">
                                   <span>{formatArchiveTime(a.modified)}</span>
-                                  <span>{(a.size / 1024).toFixed(1)} KB</span>
+                                  <span>{formatBytes(a.size)}</span>
                                 </div>
+                                {a.originPath && (
+                                  <div
+                                    className="text-[11px] text-neutral-400/80 dark:text-stone-600 truncate max-w-[380px]"
+                                    title={a.originPath}
+                                  >
+                                    {a.originPath}
+                                  </div>
+                                )}
                               </div>
                             </div>
                             <div className="flex items-center gap-1 flex-shrink-0">
                               <button
                                 onClick={() => {
+                                  // 还原会写回真实文件（可能是上百 MB），后端已挪到阻塞线程池，
+                                  // 这里只负责把「到底写到了哪」如实告诉用户：
+                                  // 原目录不在了会回退到中转站，不说清楚用户会以为还原失败。
                                   api.restoreArchive(a.id)
-                                    .then(() => {
-                                      alert(t('settings.transfer.restored', { name: a.name }));
+                                    .then((landed) => {
+                                      alert(t('settings.transfer.restoredTo', { path: landed }));
                                       loadArchives();
                                     })
                                     .catch(err => alert(t('settings.transfer.restoreFailed', { err: String(err) })));

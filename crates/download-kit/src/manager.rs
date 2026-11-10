@@ -540,6 +540,28 @@ impl DownloadManager {
         self.inner.config()
     }
 
+    /// 文件被移动/重命名后，把新的落盘路径同步回任务记录。
+    ///
+    /// 只在文件**已经**移到位之后调用：先动磁盘再改库，中间失败最多是记录指向旧路径，
+    /// 反过来则会出现「记录说在新地方、文件还在老地方」，续传会写坏另一个文件。
+    pub fn relocate(&self, id: &str, save_path: &str, filename: &str) -> Result<(), String> {
+        self.inner.store.update_save_path(id, save_path, filename)?;
+        self.inner.emit_state_by_id(id);
+        Ok(())
+    }
+
+    /// 忘掉一条已完成任务：只删库里的记录，**磁盘文件原封不动**。
+    ///
+    /// 这是「移除记录」在下载侧的对应动作。和 `cancel(.., delete_file=true)`
+    /// 是两件完全不同的事，别混用：那个会删文件，这个不会。
+    pub fn forget(&self, id: &str) -> Result<(), String> {
+        if !self.inner.store.delete_task(id)? {
+            return Err(format!("下载任务不存在: {id}"));
+        }
+        eprintln!("[download-kit] 已移除任务记录（未动文件）: {id}");
+        Ok(())
+    }
+
     pub fn set_config(&self, config: EngineConfig) -> Result<EngineConfig, String> {
         let config = config.normalize();
         crate::config::save(&self.inner.base, &config)?;

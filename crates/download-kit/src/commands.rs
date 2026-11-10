@@ -15,7 +15,12 @@ use crate::types::{
 static MANAGER: OnceLock<DownloadManager> = OnceLock::new();
 static INIT_LOCK: Mutex<()> = Mutex::new(());
 
-fn manager(app: &AppHandle) -> Result<DownloadManager, String> {
+/// 取进程内单例管理器。
+///
+/// `pub` 是给宿主用的：中转站要把「已完成的下载」合并进自己的列表，必须复用**同一个**
+/// 管理器实例——自己 `DownloadManager::init()` 会再起一个 scheduler，
+/// 两个调度器抢同一个 `tasks.db`，表现是任务被重复认领、进度抖动。
+pub fn manager(app: &AppHandle) -> Result<DownloadManager, String> {
     if let Some(existing) = MANAGER.get() {
         return Ok(existing.clone());
     }
@@ -53,6 +58,15 @@ pub fn dl_list(
 #[tauri::command]
 pub fn dl_get(app: AppHandle, id: String) -> Result<TaskDetail, String> {
     manager(&app)?.get(&id)
+}
+
+/// 已完成的下载任务（宿主用，**不是**命令）。
+///
+/// 中转站把「已落盘的文件」并入自己的列表时用它。只返回 completed：
+/// pending/downloading 的文件在磁盘上还不完整，列出来会让用户对一个半成品
+/// 做重命名/删除，那是在改一个正在被写入的文件。
+pub fn completed_tasks(app: &AppHandle, limit: usize) -> Result<Vec<DownloadTask>, String> {
+    manager(app)?.list(Some(TaskStatus::Completed), limit)
 }
 
 #[tauri::command]

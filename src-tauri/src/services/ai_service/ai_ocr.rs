@@ -5,7 +5,7 @@
 use base64::Engine;
 use image::GenericImageView;
 use tauri::AppHandle;
-use crate::services::ai_service::ai_profile::{AiProfile, AiConfig, ResolvedTarget, find_provider_of_model, load_config, resolve_target};
+use crate::services::ai_service::ai_profile::{AiProfile, AiConfig, ResolvedTarget, find_provider_of_model, load_config, resolve_target, resolve_target_live};
 use super::translate_service::{TranslateOutcome, TranslateSettings};
 
 /// 测试 AI 配置是否可用：向端点发起一次极小开销的非流式请求，
@@ -121,7 +121,7 @@ pub async fn vision_ask(
     api_key: Option<&str>,
 ) -> Result<String, String> {
     let config = load_config(app);
-    let cfg = resolve_target(&config, profile_id);
+    let cfg = resolve_target_live(app, &config, profile_id);
     // 端点与凭证：显式覆盖 > **按应用级视觉模型名自动归属的供应商** > 当前档案。
     //
     // 中间这一层解决的是：「对话用 A 家、看图用 B 家的模型」时，B 的模型名会被
@@ -145,6 +145,9 @@ pub async fn vision_ask(
         .map(str::to_string)
         .or_else(|| owner.map(|p| p.api_key.trim().to_string()).filter(|s| !s.is_empty()))
         .unwrap_or_else(|| cfg.api_key.trim().to_string());
+    // 引用桥：显式覆盖/自动归属都可能拿到 `vault:<id>`，请求前统一解析
+    let key = crate::services::credential_ref::resolve(app, &key)
+        .map_err(|e| format!("API Key 引用不可用：{e}"))?;
     if key.is_empty() {
         return Err("未配置 API Key，请先在全局设置 → 模型中填写".to_string());
     }
@@ -292,12 +295,16 @@ pub async fn vision_ask_raw(
     api_key: Option<&str>,
 ) -> Result<String, VisionHttpError> {
     let config = load_config(app);
-    let cfg = resolve_target(&config, profile_id);
+    let cfg = resolve_target_live(app, &config, profile_id);
     let key = api_key
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| cfg.api_key.trim().to_string());
+    let key = match crate::services::credential_ref::resolve(app, &key) {
+        Ok(k) => k,
+        Err(e) => return Err(VisionHttpError { status: 0, body: format!("API Key 引用不可用：{e}") }),
+    };
     if key.is_empty() {
         // 没有 key 是配置问题，用 0 表示「未发出请求」——探测据此判未知
         return Err(VisionHttpError { status: 0, body: "未配置 API Key".to_string() });
@@ -431,7 +438,7 @@ pub async fn ai_ocr_enhance(
     profile_id: Option<String>,
 ) -> Result<String, String> {
     let config = load_config(&app);
-    let cfg = resolve_target(&config, profile_id.as_deref());
+    let cfg = resolve_target_live(&app, &config, profile_id.as_deref());
     if cfg.api_key.trim().is_empty() {
         return Err("未配置 API Key，请先在全局设置 → 模型中填写".to_string());
     }

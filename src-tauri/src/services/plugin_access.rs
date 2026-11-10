@@ -65,6 +65,9 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("scan_reading_root", "fs.read"),
     ("cancel_scan", "fs.read"),
     ("cancel_open_book", "fs.read"),
+    // 中转站列表 / 回收站用量：只读（路径来自索引，不接受前端给路径）
+    ("station_list", "fs.read"),
+    ("archives_usage", "fs.read"),
     // ---- 文件写入 ----
     ("write_file_bytes", "fs.write"),
     ("write_text_file", "fs.write"),
@@ -75,6 +78,12 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("download_video", "fs.write"),
     ("import_to_openwith_dir", "fs.write"),
     ("add_bytes_to_dropzone", "fs.write"),
+    // ---- 中转站索引（全部只收 id，路径由后端查表得出）----
+    // 这三个都会真的改动磁盘：remove_record 对托管条目会删 dropzone 副本，
+    // delete_file / relocate 更是直接对用户文件下手，所以按 fs.write 收紧。
+    ("station_remove_record", "fs.write"),
+    ("station_delete_file", "fs.write"),
+    ("station_relocate", "fs.write"),
     ("delete_image_cache", "fs.write"),
     ("delete_music_cache", "fs.write"),
     ("delete_video_cache", "fs.write"),

@@ -48,11 +48,40 @@ pub fn list_archives(app: tauri::AppHandle) -> Result<Vec<transfer_station::Arch
     Ok(transfer_station::list_archives(&app_data))
 }
 
-/// 恢复存档到原位置（笔记 → notes 目录；文件/图片 → 中转站暂存目录）。
+/// 回收站用量摘要（条数 / 已占用字节 / 配额）。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveUsage {
+    pub count: usize,
+    pub total_bytes: u64,
+    pub limit_bytes: u64,
+    pub limit_entries: usize,
+}
+
 #[tauri::command]
-pub fn restore_archive(app: tauri::AppHandle, id: String) -> Result<(), String> {
+pub fn archives_usage(app: tauri::AppHandle) -> Result<ArchiveUsage, String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    transfer_station::restore_archive(&app_data, &id)
+    Ok(ArchiveUsage {
+        count: transfer_station::list_archives(&app_data).len(),
+        total_bytes: transfer_station::archive_total_bytes(&app_data),
+        limit_bytes: transfer_station::MAX_ARCHIVE_BYTES,
+        limit_entries: transfer_station::MAX_ARCHIVE_ENTRIES,
+    })
+}
+
+/// 恢复存档到原位置（原目录不可用时回退到中转站），返回实际写入的绝对路径。
+///
+/// ★ async + spawn_blocking：这里要 `fs::read` 整个快照再 `fs::write` 出去。
+///   回收站里可能有上百 MB 的文件，同步命令跑在主线程上会让整个界面卡住
+///   （与 `load_image_cache` 同一类事故），所以必须挪到阻塞线程池。
+#[tauri::command]
+pub async fn restore_archive(app: tauri::AppHandle, id: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        transfer_station::restore_archive(&app_data, &id)
+    })
+    .await
+    .map_err(|e| format!("restore_archive 任务失败: {e}"))?
 }
 
 /// 删除单个存档快照。

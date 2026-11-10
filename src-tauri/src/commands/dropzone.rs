@@ -233,14 +233,16 @@ pub fn import_to_dropzone(
         );
     }
 
-    // 后台线程执行实际复制与快照，避免巨大文件阻塞命令/前台（保存秒结束）。
+    // 后台线程执行实际复制，避免巨大文件阻塞命令/前台（保存秒结束）。
+    //
+    // ★ 这里**不再**顺手做一份存档快照。旧实现在导入时就 `fs::read` 整个文件塞进
+    //   archives，后果是每个拖进来的文件都白占双份磁盘（40GB 视频 = 80GB），
+    //   而用户根本没删它。真正的回收站语义是「删除时才归档」，
+    //   由 `station_remove_record` 在移除托管条目时用流式复制完成。
+    //   （截图侧早就这么判断了，见 screenshot.rs 的同类注释。）
     let app_thread = app.clone();
     let source_path_t = source_path;
     let dest_path_t = dest_path;
-    let extension_t = extension;
-    let size_t = size;
-    let timestamp_t = timestamp;
-    let file_name_t = file_name;
     let temp_id_t = file_id;
     std::thread::spawn(move || {
         let move_src = move_source.unwrap_or(false);
@@ -273,18 +275,6 @@ pub fn import_to_dropzone(
                     Path::new(&source_path_t).parent().unwrap_or_else(|| Path::new("")),
                 );
             }
-        }
-        // 同时生成「存档」快照（设置「中转站 / 存档」：文件一拖入即快照，可恢复/删除）。
-        // 超大文件（>100MB）跳过快照，避免整文件读入内存导致 OOM。
-        if size_t <= 100 * 1024 * 1024 {
-            let _ = transfer_station::archive_snapshot(
-                &app_data,
-                "file",
-                &format!("{}", timestamp_t),
-                &file_name_t,
-                &std::fs::read(&dest_path_t).unwrap_or_default(),
-                &extension_t,
-            );
         }
         // 复制完成：广播真实文件已就位，并移除占位。
         let _ = app_thread.emit("dropzone-changed", ());
@@ -384,12 +374,44 @@ pub fn clear_openwith_dir(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// `stored_path` 是否是安全的单段文件名。
+///
+/// ★ **安全边界**：只接受单段文件名。带分隔符、`..`、盘符、绝对路径一律拒绝。
+///
+/// 为什么必须显式校验：读/删/base64/导出这几个命令都是
+/// `join("transfer_station").join("dropzone").join(stored_path)`。旧模型下目录边界
+/// 确实兜住了（拼进来就出不去），但那是**靠"没人传坏值"**，不是写在代码里的约束。
+/// 中转站一旦支持指向任意路径的条目，`stored_path = "../../../config.json"`
+/// 就是一个任意文件读/删接口 —— 本项目 CSP 全放行、插件也能调命令，这不是理论风险。
+///
+/// 抽成纯函数是为了能单测：这类边界判定最怕写完没人验，等出事才发现 `..` 那条漏了。
+pub(crate) fn is_safe_stored_path(stored_path: &str) -> bool {
+    !(stored_path.is_empty()
+        || stored_path.contains("..")
+        || stored_path.contains('/')
+        || stored_path.contains('\\')
+        || stored_path.contains(':')
+        || stored_path.contains('\0')
+        || std::path::Path::new(stored_path).is_absolute())
+}
+
+fn dropzone_file(app: &tauri::AppHandle, stored_path: &str) -> Result<std::path::PathBuf, String> {
+    if !is_safe_stored_path(stored_path) {
+        eprintln!("[中转站] 拒绝非法文件名: {:?}", stored_path);
+        return Err(format!("非法的中转站文件名: {}", stored_path));
+    }
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(app_data
+        .join("transfer_station")
+        .join("dropzone")
+        .join(stored_path))
+}
+
 /// 读取中转站中的文本文件内容
 #[tauri::command]
 pub fn read_dropzone_file(app: tauri::AppHandle, stored_path: String) -> Result<String, String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let file_path = app_data.join("transfer_station").join("dropzone").join(&stored_path);
-    
+    let file_path = dropzone_file(&app, &stored_path)?;
+
     if !file_path.exists() {
         return Err(format!("文件不存在: {}", stored_path));
     }
@@ -468,12 +490,13 @@ pub fn list_dropzone_files(app: tauri::AppHandle) -> Result<Vec<ImportedFile>, S
     Ok(files)
 }
 
-/// 删除中转站导入文件
+/// 删除中转站托管文件（**只对 dropzone 内的副本生效**，即 ownership = managed）。
+///
+/// 引用条目（下载到用户目录的文件）不在这里删——它们只收 id，走 `station_delete_file`。
 #[tauri::command]
 pub fn delete_dropzone_file(app: tauri::AppHandle, stored_path: String) -> Result<(), String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let file_path = app_data.join("transfer_station").join("dropzone").join(&stored_path);
-    
+    let file_path = dropzone_file(&app, &stored_path)?;
+
     if file_path.exists() {
         std::fs::remove_file(&file_path).map_err(|e| format!("删除文件失败: {}", e))?;
     }
@@ -484,24 +507,31 @@ pub fn delete_dropzone_file(app: tauri::AppHandle, stored_path: String) -> Resul
     Ok(())
 }
 
-/// 清空所有导入文件
+/// 清空所有**托管**文件（dropzone 目录里的副本）。
+///
+/// ★ 必须跳过 `.` 开头的 sidecar：`.station.json` 是索引本身，
+///   把它删了会让所有条目的 id 重新生成，前端选中态、回收站还原全断。
 #[tauri::command]
 pub fn clear_dropzone(app: tauri::AppHandle) -> Result<u32, String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let dropzone_dir = app_data.join("transfer_station").join("dropzone");
-    
+
     if !dropzone_dir.exists() {
         return Ok(0);
     }
-    
+
     let mut count = 0u32;
     if let Ok(entries) = std::fs::read_dir(&dropzone_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() {
-                std::fs::remove_file(&path).ok();
-                count += 1;
+            if !path.is_file() {
+                continue;
             }
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            std::fs::remove_file(&path).ok();
+            count += 1;
         }
     }
 
@@ -514,11 +544,7 @@ pub fn clear_dropzone(app: tauri::AppHandle) -> Result<u32, String> {
 /// 以 base64 data URL 读取中转站文件（用于拖出到系统）。
 #[tauri::command]
 pub fn read_dropzone_base64(app: tauri::AppHandle, stored_path: String) -> Result<String, String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let file_path = app_data
-        .join("transfer_station")
-        .join("dropzone")
-        .join(&stored_path);
+    let file_path = dropzone_file(&app, &stored_path)?;
     // 超大文件防护：避免整文件读入内存 + base64 编码导致 OOM
     if let Ok(meta) = std::fs::metadata(&file_path) {
         if meta.len() > 50 * 1024 * 1024 {
@@ -541,11 +567,7 @@ pub fn prepare_drop_export(
     stored_path: String,
     original_name: String,
 ) -> Result<String, String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let src = app_data
-        .join("transfer_station")
-        .join("dropzone")
-        .join(&stored_path);
+    let src = dropzone_file(&app, &stored_path)?;
     if !src.exists() {
         return Err(format!("文件不存在: {}", stored_path));
     }
@@ -576,7 +598,9 @@ pub fn copy_file_to_dropzone(
             .to_string_lossy()
             .to_string(),
     };
-    let extension = source
+    // `extension` 原本用于生成导入时的存档快照，那个行为已移除（见下方注释），
+    // 但调用方签名保持不变；这里显式丢弃以免留下"看起来还在用"的假象。
+    let _extension = source
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
@@ -588,37 +612,10 @@ pub fn copy_file_to_dropzone(
     std::fs::create_dir_all(&dropzone_dir).map_err(|e| format!("创建目录失败: {}", e))?;
     let dest = dropzone_dir.join(format!("{}_{}", timestamp, file_name));
     std::fs::copy(source_path, &dest).map_err(|e| format!("复制文件失败: {}", e))?;
-    // 优先使用调用方已持有的内存字节（如刚编码好的 PNG），避免「写盘后又整文件读回」的冗余 I/O。
-    // 超大文件跳过快照：与 import_to_dropzone 同一条红线 —— 快照要整文件读进内存，
-    // 打开一个 2 GB 视频就会直接吃掉 2 GB 内存（这正是传输模块卡死的同款成因）。
-    const SNAPSHOT_MAX_BYTES: u64 = 100 * 1024 * 1024;
-    let snapshot_bytes: Option<Vec<u8>> = match content {
-        Some(bytes) => Some(bytes),
-        None => {
-            let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-            if size <= SNAPSHOT_MAX_BYTES {
-                std::fs::read(&dest).ok()
-            } else {
-                eprintln!(
-                    "[中转站] 跳过大文件存档快照（{} MiB > {} MiB 上限）: {}",
-                    size / 1024 / 1024,
-                    SNAPSHOT_MAX_BYTES / 1024 / 1024,
-                    file_name
-                );
-                None
-            }
-        }
-    };
-    if let Some(bytes) = snapshot_bytes {
-        transfer_station::archive_snapshot(
-            app_data,
-            "file",
-            &format!("{}", timestamp),
-            &file_name,
-            &bytes,
-            &extension,
-        );
-    }
+    // `content` 保留在签名里只是为了不改动所有调用方；导入时不再据此生成存档快照。
+    // （理由见 `import_to_dropzone`：新增文件不需要「旧版本存档」语义，
+    //   回收站由删除路径 `station_remove_record` 用流式复制负责。）
+    let _ = content;
     Ok(dest)
 }
 
@@ -730,11 +727,7 @@ pub fn export_dropzone_file(
     stored_path: String,
     dest_path: String,
 ) -> Result<(), String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let src = app_data
-        .join("transfer_station")
-        .join("dropzone")
-        .join(&stored_path);
+    let src = dropzone_file(&app, &stored_path)?;
     if !src.exists() {
         return Err(format!("文件不存在: {}", stored_path));
     }
@@ -784,5 +777,35 @@ pub(crate) fn mime_from_ext(path: &str) -> &'static str {
         "bmp" => "image/bmp",
         "ico" => "image/x-icon",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_stored_path;
+
+    /// 这条测试是本次改造的安全底线：中转站一旦能指向任意路径，
+    /// `stored_path` 就是攻击面，必须是一条**断言**而不是"应该没人传坏值"。
+    #[test]
+    fn rejects_path_traversal_and_absolute_paths() {
+        assert!(!is_safe_stored_path("../../../config.json"));
+        assert!(!is_safe_stored_path("..\\..\\credentials.json"));
+        assert!(!is_safe_stored_path("/etc/passwd"));
+        assert!(!is_safe_stored_path("C:\\Windows\\win.ini"));
+        assert!(!is_safe_stored_path("a/b.txt"));
+        assert!(!is_safe_stored_path("a\\b.txt"));
+        assert!(!is_safe_stored_path(""));
+        assert!(!is_safe_stored_path("dots..in..name"));
+        // NUL 截断（Windows 上 `a\0b` 传给某些 API 会被截成 `a`）
+        assert!(!is_safe_stored_path("a\0b"));
+    }
+
+    #[test]
+    fn accepts_plain_file_names() {
+        assert!(is_safe_stored_path("1700000000000_report.pdf"));
+        assert!(is_safe_stored_path("带空格 的中文名.txt"));
+        assert!(is_safe_stored_path("a.b.c.d"));
+        // 点开头是允许的（列表层会跳过 sidecar，但"以点开头"本身不非法）
+        assert!(is_safe_stored_path(".station.json"));
     }
 }

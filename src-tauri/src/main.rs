@@ -1947,9 +1947,15 @@ fn main() {
             start_native_file_drag,
             delete_dropzone_file,
             clear_dropzone,
+            // ========== 核心：中转站索引（只收 id，不收路径）==========
+            station_list,
+            station_remove_record,
+            station_delete_file,
+            station_relocate,
             // ========== 核心：存档快照 ==========
             archive_snapshot,
             list_archives,
+            archives_usage,
             restore_archive,
             delete_archive,
             clear_archives,

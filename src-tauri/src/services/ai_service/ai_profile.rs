@@ -742,6 +742,10 @@ fn write_config(app: &AppHandle, cfg: &AiConfig) -> Result<(), String> {
             if p.api_key.is_empty() {
                 continue;
             }
+            // 密码库引用是指针而不是机密：原样落盘，不加密（否则无法从密文里还原条目 id）
+            if crate::services::credential_ref::is_ref(&p.api_key) {
+                continue;
+            }
             let enc = match enc_guard.get(&p.api_key) {
                 Some(e) => e.clone(),
                 None => encrypt_secret(&p.api_key)?,
@@ -1006,6 +1010,24 @@ pub fn resolve_target(config: &AiConfig, model_id: Option<&str>) -> ResolvedTarg
     }
 }
 
+/// 运行时解析：在 resolve_target 基础上把密码库引用展开成真实密钥。
+/// 解析失败（未解锁/条目缺失）保留原始指针，由 ensure_api_key 给出明确错误，
+/// 绝不把 `vault:` 指针当作密钥发到网络上。
+pub fn resolve_target_live(
+    app: &AppHandle,
+    config: &AiConfig,
+    model_id: Option<&str>,
+) -> ResolvedTarget {
+    let mut target = resolve_target(config, model_id);
+    if crate::services::credential_ref::is_ref(&target.api_key) {
+        match crate::services::credential_ref::resolve(app, &target.api_key) {
+            Ok(secret) => target.api_key = secret,
+            Err(e) => log::warn!("[ai_profile] 密码库引用解析失败 ({}): {}", target.id, e),
+        }
+    }
+    target
+}
+
 /// 读取 v2 配置（新代码一律走这个）。
 /// scrypt 解密是 CPU 密集的，剥离到阻塞线程，避免同步命令占死事件循环。
 #[tauri::command]
@@ -1033,7 +1055,7 @@ pub async fn ai_set_config(app: AppHandle, payload: AiConfig) -> Result<(), Stri
 pub async fn ai_model_vision_native(app: AppHandle, profile_id: Option<String>) -> bool {
     tauri::async_runtime::spawn_blocking(move || {
         let config = load_config(&app);
-        let cfg = resolve_target(&config, profile_id.as_deref());
+        let cfg = resolve_target_live(&app, &config, profile_id.as_deref());
         let entry = config
             .providers
             .iter()
@@ -1212,6 +1234,14 @@ pub(crate) fn compose_effective_system(system: &Option<String>, persona: &str) -
 
 /// 预检 API Key：为空则 emit ai-error 并返回 Err。供 ai_chat / ai_chat_agent 共用预检。
 pub(crate) fn ensure_api_key(app: &AppHandle, request_id: &str, cfg: &ResolvedTarget) -> Result<(), String> {
+    if crate::services::credential_ref::is_ref(&cfg.api_key) {
+        let msg = match crate::services::credential_ref::resolve(app, &cfg.api_key) {
+            Err(e) => format!("API Key 引用的密码库条目不可用：{e}"),
+            Ok(_) => "API Key 引用的密码库条目不可用".to_string(),
+        };
+        let _ = app.emit("ai-error", serde_json::json!({ "requestId": request_id, "error": &msg }));
+        return Err(msg);
+    }
     if cfg.api_key.trim().is_empty() {
         let msg = "未配置 API Key，请先在全局设置 → 模型 中填写".to_string();
         let _ = app.emit("ai-error", serde_json::json!({ "requestId": request_id, "error": msg }));

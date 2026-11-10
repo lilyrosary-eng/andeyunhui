@@ -157,7 +157,7 @@ export interface ImportedFile {
   origin: string;
 }
 
-// 通用存档快照（笔记 / 文件 / 图片）
+// 通用存档快照（笔记 / 文件 / 图片）—— 设置页里它扮演的是**回收站**
 export interface ArchiveEntry {
   id: string;
   kind: string; // note | file | image
@@ -166,6 +166,60 @@ export interface ArchiveEntry {
   ext: string;
   size: number;
   modified: string;
+  /** 快照对应的原始绝对路径；还原时优先回到这里。旧数据可能没有。 */
+  originPath?: string | null;
+}
+
+/** 回收站用量（设置页展示「占多少 / 上限多少」） */
+export interface ArchiveUsage {
+  count: number;
+  totalBytes: number;
+  limitBytes: number;
+  limitEntries: number;
+}
+
+/**
+ * 中转站条目。**这是一条索引，不是文件**。
+ *
+ * - `ownership: 'managed'` —— 文件在中转站的 dropzone 目录里，中转站拥有它；
+ * - `ownership: 'referenced'` —— 文件在用户自己的目录里，中转站只是"记得"它。
+ *
+ * 所有权决定删除语义：managed 可以删（只是扔掉自己的副本，且会先进回收站），
+ * referenced 千万别删文件 —— 那是用户唯一一份。
+ *
+ * 所有操作都用 `id`，**不要**把 `path` 传给后端（后端只认 id，路径由它自己查）。
+ */
+export interface StationEntry {
+  id: string;
+  name: string;
+  path: string;
+  size: number;
+  extension: string;
+  modifiedAt: string;
+  addedAt: string;
+  ownership: 'managed' | 'referenced';
+  source: string;
+  status: 'ok' | 'missing';
+  isReadable: boolean;
+  downloadId?: string;
+}
+
+export interface StationList {
+  entries: StationEntry[];
+  /** 降级提示（下载记录读取失败 / 索引写不进去 / 条目已丢失）。非空时必须展示。 */
+  notices: string[];
+}
+
+export interface StationRemoveOutcome {
+  deletedFile: boolean;
+  archived: boolean;
+  /** 非空表示这次操作用户必须知道的事（比如回收站没进去、删除不可撤销） */
+  notice?: string | null;
+}
+
+export interface StationRelocateResult {
+  path: string;
+  notice?: string | null;
 }
 
 // 封装 API 调用
@@ -401,6 +455,21 @@ export const api = {
   exportDropzoneFile: (storedPath: string, destPath: string) =>
     invoke<void>('export_dropzone_file', { storedPath, destPath }),
 
+  // ===== 中转站索引（只收 id，不收路径）=====
+  /** 列出中转站全部条目：托管文件 + 已完成的下载。 */
+  stationList: () => invoke<StationList>('station_list'),
+  /**
+   * 移除一条记录。**默认动作，不删用户的文件。**
+   * 托管条目会先进回收站；引用条目只忘掉记录，磁盘文件一动不动。
+   */
+  stationRemoveRecord: (id: string) =>
+    invoke<StationRemoveOutcome>('station_remove_record', { id }),
+  /** 显式删除真实文件（第二动作，不可逆，UI 必须二次确认）。 */
+  stationDeleteFile: (id: string) => invoke<void>('station_delete_file', { id }),
+  /** 改名/移动。`newPath` 必须是绝对路径，返回实际落点。 */
+  stationRelocate: (id: string, newPath: string) =>
+    invoke<StationRelocateResult>('station_relocate', { id, newPath }),
+
   // ===== 通用存档（快照）=====
   archiveSnapshot: (
     kind: string,
@@ -410,7 +479,9 @@ export const api = {
     ext: string,
   ) => invoke<void>('archive_snapshot', { kind, sourceId, name, contentBase64, ext }),
   listArchives: () => invoke<ArchiveEntry[]>('list_archives'),
-  restoreArchive: (id: string) => invoke<void>('restore_archive', { id }),
+  archivesUsage: () => invoke<ArchiveUsage>('archives_usage'),
+  /** 还原到原路径（原目录不可用时回退到中转站），返回实际写入的绝对路径。 */
+  restoreArchive: (id: string) => invoke<string>('restore_archive', { id }),
   deleteArchive: (id: string) => invoke<void>('delete_archive', { id }),
   clearArchives: () => invoke<number>('clear_archives'),
 

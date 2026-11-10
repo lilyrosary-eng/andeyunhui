@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronDown, ChevronRight, Plus, RefreshCw, Trash2, Search, Pencil, TestTube2, Check, X, Eye, EyeOff, ExternalLink } from 'lucide-react';
+import { ChevronDown, ChevronRight, Plus, RefreshCw, Trash2, Search, Pencil, TestTube2, Check, X, Eye, EyeOff, ExternalLink, KeyRound } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import type { ModelUi, ProviderUi } from '../aiConfigCodec';
@@ -8,6 +8,7 @@ import { ModelEditorDrawer } from './ModelEditorDrawer';
 import { capTags } from './capsTags';
 import { newModelKey } from './providerMatch';
 import { capacitySourceLabel } from './ModelEditorDrawer';
+import { VaultRefPicker } from './VaultRefPicker';
 
 /** 手填的容量打个 ✎ —— 一眼看出「这个数是我自己填的、重扫不会覆盖」。 */
 function sourceMark(source: string, value: string): string {
@@ -73,6 +74,7 @@ export function ProviderCard(props: ProviderCardProps) {
   const [filter, setFilter] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showKey, setShowKey] = useState(false);
+  const [showRefPicker, setShowRefPicker] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const q = filter.trim();
@@ -310,18 +312,58 @@ export function ProviderCard(props: ProviderCardProps) {
             </div>
             <div>
               <label className={labelCls}>{t('modelSettings.apiKeyLabel')}</label>
-              <div className="relative">
-                <input className={`${inputCls} pr-10`} type={showKey ? 'text' : 'password'} value={p.api_key} placeholder="sk-..."
-                  autoComplete="off"
-                  onChange={(e) => props.onPatchProvider({ api_key: e.target.value })} />
-                <button
-                  onClick={() => setShowKey((s) => !s)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-200 transition-colors"
-                  title={showKey ? t('modelSettings.hide') : t('modelSettings.show')}
-                >
-                  {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
-              </div>
+              {p.api_key.startsWith('vault:') ? (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm bg-neutral-50 dark:bg-stone-800/60 border border-neutral-200 dark:border-stone-700">
+                  <KeyRound size={14} className="text-neutral-400 shrink-0" />
+                  <span className="flex-1 text-xs text-neutral-600 dark:text-stone-300 truncate">
+                    已引用密码库条目（不保存明文；锁定或条目失效时请求会明确报错）
+                  </span>
+                  <button
+                    onClick={() => setShowRefPicker(true)}
+                    className="shrink-0 text-[11px] px-2 py-0.5 rounded-md border border-neutral-200 dark:border-stone-600 hover:bg-black/5 dark:hover:bg-white/10"
+                  >
+                    更换
+                  </button>
+                  <button
+                    onClick={() => props.onPatchProvider({ api_key: '' })}
+                    className="shrink-0 text-[11px] px-2 py-0.5 rounded-md text-red-500 hover:bg-red-500/10"
+                  >
+                    取消引用
+                  </button>
+                </div>
+              ) : (
+                <div className="relative">
+                  <input className={`${inputCls} pr-20`} type={showKey ? 'text' : 'password'} value={p.api_key} placeholder="sk-..."
+                    autoComplete="off"
+                    onChange={(e) => props.onPatchProvider({ api_key: e.target.value })} />
+                  <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                    <button
+                      onClick={() => setShowRefPicker(true)}
+                      title="从密码库引用（不复制明文）"
+                      className="p-1 rounded text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-200"
+                    >
+                      <KeyRound size={15} />
+                    </button>
+                    <button
+                      onClick={() => setShowKey((s) => !s)}
+                      className="p-1 rounded text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-200 transition-colors"
+                      title={showKey ? t('modelSettings.hide') : t('modelSettings.show')}
+                    >
+                      {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {showRefPicker && (
+                <VaultRefPicker
+                  onClose={() => setShowRefPicker(false)}
+                  onPick={(id) => {
+                    // 只存指针；write_config 对 vault: 前缀原样落盘，不会加密/复制明文
+                    props.onPatchProvider({ api_key: `vault:${id}` });
+                    setShowRefPicker(false);
+                  }}
+                />
+              )}
             </div>
             {/* DeepSeek 充值入口：仅当端点是 deepseek 时显示（v2 重构漏搬，现恢复） */}
             {/deepseek/i.test(p.base_url) && (
