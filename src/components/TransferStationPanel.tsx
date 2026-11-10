@@ -651,6 +651,16 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
                       <span>{file.importedAt}</span>
                       <span>{formatSize(file.size)}</span>
                       {file.isReadable && <span className="text-[var(--element-bg)]">· 可预览</span>}
+                      {/* 来源标签：本机中转 / 外部下载。判定靠 sidecar 登记表，不猜 */}
+                      {file.origin === 'external' ? (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-600 dark:text-sky-400 shrink-0">
+                          {tr('transfer.originExternal')}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-500/10 text-neutral-500 dark:text-stone-400 shrink-0">
+                          {tr('transfer.originLocal')}
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -832,6 +842,10 @@ function DocTranslateWorkspace({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [out, setOut] = useState<DocTranslateOutcome | null>(null);
+  // PDF 走另一条路（提取文本重排），且必须让用户知道「版面会坏」
+  const isPdf = /\.pdf$/i.test(path);
+  // 装了 LibreOffice 才能把 docx 再转回 PDF；默认开，失败会显式提示（不静默）
+  const [toPdf, setToPdf] = useState(true);
 
   const pick = useCallback(async () => {
     try {
@@ -839,7 +853,10 @@ function DocTranslateWorkspace({
         title: tr('transfer.docTranslatePickTitle'),
         multiple: false,
         filters: [
-          { name: tr('transfer.docTranslateFilter'), extensions: ['docx', 'docm', 'pptx', 'pptm'] },
+          {
+            name: tr('transfer.docTranslateFilter'),
+            extensions: ['docx', 'docm', 'pptx', 'pptm', 'pdf'],
+          },
         ],
       });
       if (files?.[0]) {
@@ -858,7 +875,10 @@ function DocTranslateWorkspace({
     setErr(null);
     setOut(null);
     try {
-      const res = await api.translateDocument(path, targetLang, 'auto', translateSettingsFor(node));
+      const st = translateSettingsFor(node);
+      const res = isPdf
+        ? await api.translatePdf(path, targetLang, 'auto', st, undefined, toPdf)
+        : await api.translateDocument(path, targetLang, 'auto', st);
       setOut(res);
     } catch (e) {
       // 后端 Err 已带 `[阶段]` 前缀与完整原因，原样显示 —— 截断就是让人猜
@@ -866,7 +886,7 @@ function DocTranslateWorkspace({
     } finally {
       setBusy(false);
     }
-  }, [path, targetLang, node]);
+  }, [path, targetLang, node, isPdf, toPdf]);
 
   const copyPath = useCallback(() => {
     if (!out?.outPath) return;
@@ -911,6 +931,21 @@ function DocTranslateWorkspace({
           </span>
         </div>
 
+        {/* ★ PDF 必须先把话说清楚：我们只做尝试，且大概率破坏版面。
+            这不是免责话术 —— 实测（arXiv 1706.03762）字体全是子集写不进中文、
+            62% 的文本块按原字号会溢出、一个文本块可能跨整节正文。 */}
+        {isPdf && (
+          <div className="rounded-lg border border-amber-300/60 dark:border-amber-700/50 bg-amber-500/5 p-2 flex flex-col gap-1.5 flex-shrink-0">
+            <p className="text-[10px] leading-relaxed m-0 text-amber-700 dark:text-amber-400">
+              {tr('transfer.docTranslatePdfWarn')}
+            </p>
+            <label className="flex items-center gap-1.5 text-[10px] text-neutral-600 dark:text-stone-300">
+              <input type="checkbox" checked={toPdf} onChange={(e) => setToPdf(e.target.checked)} />
+              {tr('transfer.docTranslateToPdf')}
+            </label>
+          </div>
+        )}
+
         {/* 目标语言 + 翻译节点 */}
         <div className="flex items-center gap-2 flex-wrap flex-shrink-0">
           <span className="text-xs text-neutral-500 dark:text-stone-400">{tr('transfer.targetLang')}</span>
@@ -952,7 +987,11 @@ function DocTranslateWorkspace({
           className="btn-press px-3 py-1.5 rounded-lg text-xs flex items-center justify-center gap-1.5 border border-[var(--element-border)] text-neutral-600 dark:text-stone-300 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors disabled:opacity-40 flex-shrink-0"
         >
           {busy ? <Loader2 size={14} className="animate-spin" /> : <FileDown size={14} />}
-          {busy ? tr('transfer.docTranslateRunning') : tr('transfer.docTranslateRun')}
+          {busy
+            ? tr('transfer.docTranslateRunning')
+            : isPdf
+              ? tr('transfer.docTranslatePdfRun')
+              : tr('transfer.docTranslateRun')}
         </button>
 
         <p className="text-[10px] leading-relaxed text-neutral-400 dark:text-stone-500 flex-shrink-0">

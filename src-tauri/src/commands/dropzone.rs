@@ -22,6 +22,74 @@ pub struct ImportedFile {
     pub absolute_path: String,
     pub imported_at: String,
     pub is_readable: bool,
+    /// 文件来源：`local` = 本机（拖入 / 导入 / 截图 / 录屏），
+    /// `external` = 外部下载（huggingface、音乐、视频等）。
+    ///
+    /// 判定靠 sidecar 登记表 `<dropzone>/.origin.json`（只记 external，未登记一律 local）——
+    /// **不靠猜**：扩展名/大小/目录都推断不出来源，猜错比不标更糟。
+    pub origin: String,
+}
+
+/// 来源登记表文件名。以 `.` 开头，扫描列表时必须跳过（见 `list_dropzone_files`）。
+const ORIGIN_FILE: &str = ".origin.json";
+
+/// 读登记表。坏 JSON 当作空表（**坏数据不该让整个列表打不开**）。
+pub(crate) fn read_origin_map(dropzone_dir: &std::path::Path) -> std::collections::HashMap<String, String> {
+    let path = dropzone_dir.join(ORIGIN_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str::<std::collections::HashMap<String, String>>(&s).unwrap_or_else(|e| {
+            eprintln!("[中转站] 来源登记表解析失败（当作空表）: {} — {}", path.display(), e);
+            Default::default()
+        }),
+        Err(_) => Default::default(),
+    }
+}
+
+fn write_origin_map(
+    dropzone_dir: &std::path::Path,
+    map: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    let path = dropzone_dir.join(ORIGIN_FILE);
+    let s = serde_json::to_string_pretty(map).map_err(|e| format!("序列化来源表失败: {e}"))?;
+    std::fs::write(&path, s).map_err(|e| format!("写入来源表失败: {e}"))
+}
+
+/// 给某个中转站文件打来源标签。
+///
+/// `path_or_id` 接受绝对路径或 file_id（两种调用方都常见）。
+/// **只对已在中转站里的文件生效**：路径不在 dropzone 内就静默忽略并返回 false ——
+/// 下载到别的目录的文件本来就不该出现在这个列表里。
+#[tauri::command]
+pub fn mark_dropzone_origin(
+    app: tauri::AppHandle,
+    path_or_id: String,
+    origin: String,
+) -> Result<bool, String> {
+    let norm = if origin.eq_ignore_ascii_case("external") { "external" } else { "local" };
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let dropzone_dir = app_data.join("transfer_station").join("dropzone");
+    let input = std::path::PathBuf::from(&path_or_id);
+    let file_id = if input.is_absolute() {
+        let parent = input.parent().unwrap_or(&dropzone_dir);
+        // 路径必须在 dropzone 内，否则不登记
+        if parent.canonicalize().ok() != dropzone_dir.canonicalize().ok() {
+            eprintln!("[中转站] 忽略来源登记（不在中转站内）: {}", path_or_id);
+            return Ok(false);
+        }
+        input.file_name().map(|s| s.to_string_lossy().to_string())
+    } else {
+        Some(path_or_id.clone())
+    };
+    let Some(file_id) = file_id else { return Ok(false) };
+    if !dropzone_dir.join(&file_id).exists() {
+        eprintln!("[中转站] 忽略来源登记（文件不存在）: {}", file_id);
+        return Ok(false);
+    }
+    let mut map = read_origin_map(&dropzone_dir);
+    map.insert(file_id.clone(), norm.to_string());
+    write_origin_map(&dropzone_dir, &map)?;
+    eprintln!("[中转站] 来源登记 {} → {}", file_id, norm);
+    Ok(true)
 }
 
 /// 原生文件拖出：把中转站里的文件以 OS 原生拖放（Windows DoDragDrop / CF_HDROP）写到桌面或文件夹。
@@ -147,6 +215,8 @@ pub fn import_to_dropzone(
     let result = ImportedFile {
         file_id: file_id.clone(),
         original_name: file_name.clone(),
+        // 这条路径是「用户导入/拖入」—— 一定是本机产生
+        origin: "local".to_string(),
         extension: extension.clone(),
         size,
         stored_path: file_id.clone(),
@@ -344,6 +414,7 @@ pub fn list_dropzone_files(app: tauri::AppHandle) -> Result<Vec<ImportedFile>, S
         return Ok(Vec::new());
     }
     
+    let origin_map = read_origin_map(&dropzone_dir);
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dropzone_dir) {
         for entry in entries.flatten() {
@@ -351,6 +422,9 @@ pub fn list_dropzone_files(app: tauri::AppHandle) -> Result<Vec<ImportedFile>, S
             if !path.is_file() { continue; }
             
             let file_name = entry.file_name().to_string_lossy().to_string();
+            // ★ 跳过 sidecar / 系统隐藏文件：`.origin.json` 不是用户文件，
+            //   不过滤的话它会以「来源登记表」的身份出现在中转站列表里。
+            if file_name.starts_with('.') { continue; }
             let metadata = entry.metadata().ok();
             let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
             
@@ -373,9 +447,14 @@ pub fn list_dropzone_files(app: tauri::AppHandle) -> Result<Vec<ImportedFile>, S
                 .unwrap_or(&file_name)
                 .to_string();
             
+            let origin = origin_map
+                .get(&file_name)
+                .cloned()
+                .unwrap_or_else(|| "local".to_string());
             files.push(ImportedFile {
                 file_id: file_name.clone(),
                 original_name,
+                origin,
                 extension,
                 size,
                 stored_path: file_name.clone(),
@@ -633,6 +712,8 @@ pub fn add_bytes_to_dropzone(
     Ok(ImportedFile {
         file_id: file_name.clone(),
         original_name,
+        // 同上：这条路径也是本机写入
+        origin: "local".to_string(),
         extension,
         size,
         stored_path: file_name.clone(),

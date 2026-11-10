@@ -153,6 +153,8 @@ export interface ImportedFile {
   absolutePath: string;
   importedAt: string;
   isReadable: boolean;
+  /** 来源：`local` = 本机（拖入/导入/截图/录屏），`external` = 外部下载 */
+  origin: string;
 }
 
 // 通用存档快照（笔记 / 文件 / 图片）
@@ -340,6 +342,25 @@ export const api = {
       sourceLang,
       settings,
       outPath,
+    }),
+
+  // PDF 翻译：提取文本 → 翻译 → 输出 docx（装了 LibreOffice 时可再转回 PDF）。
+  // ⚠️ 只做尝试：**不保留原版面**，输出是重排后的新文档；原 PDF 不会被修改。
+  translatePdf: (
+    path: string,
+    targetLang?: string,
+    sourceLang?: string,
+    settings?: TranslateSettings,
+    outPath?: string,
+    toPdf?: boolean,
+  ) =>
+    invoke<DocTranslateOutcome>('translate_pdf', {
+      path,
+      targetLang,
+      sourceLang,
+      settings,
+      outPath,
+      toPdf,
     }),
 
   // OCR 文本校对 / 整理：将 OCR 原文交给文本模型纠错整理（用于 DeepSeek 等不支持识图的模型）

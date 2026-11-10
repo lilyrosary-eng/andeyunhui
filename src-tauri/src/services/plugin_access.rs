@@ -126,6 +126,7 @@ const EXACT_RULES: &[(&str, &str)] = &[
     // 文档格式保留翻译：会调翻译节点（走网络），同时会读/写本地文件。
     // 先按 net 归类 —— 这是插件调用时最需要收紧的那一项。
     ("translate_document", "net"),
+    ("translate_pdf", "net"),
     // ---- 窗口 / 浮层 ----
     ("show_lyrics_widget", "window"),
     ("hide_lyrics_widget", "window"),

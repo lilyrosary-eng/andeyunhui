@@ -370,14 +370,14 @@ pub struct DocTranslateOutcome {
     pub notices: Vec<String>,
 }
 
-fn push_notice(v: &mut Vec<String>, s: impl Into<String>) {
+pub(crate) fn push_notice(v: &mut Vec<String>, s: impl Into<String>) {
     let s = s.into();
     eprintln!("[doc-translate] {}", s);
     v.push(s);
 }
 
 /// 目标语言用于文件名的安全片段（`zh-CN` → `zh-CN`，去掉路径分隔符）。
-fn lang_suffix(target: Option<&str>) -> String {
+pub(crate) fn lang_suffix(target: Option<&str>) -> String {
     let t = target.unwrap_or("").trim();
     let cleaned: String = t
         .chars()
@@ -405,7 +405,7 @@ fn default_out_path(src: &Path, target: Option<&str>) -> PathBuf {
 /// 用 `\n` 连接、按 `\n` 切回：这依赖 `translate_service::split_segments` 的
 /// 「按行切、行数守恒」性质（每段单独一行且 ≤ 450 字符时成立）。
 /// 行数不符就**整批判失败**，由调用方退化为逐段 —— 宁可慢，不把段落错位。
-async fn translate_batch(
+pub(crate) async fn translate_batch(
     app: &AppHandle,
     texts: &[String],
     source: Option<&str>,
@@ -462,7 +462,7 @@ async fn translate_batch(
     out
 }
 
-async fn translate_one(
+pub(crate) async fn translate_one(
     app: &AppHandle,
     text: &str,
     source: Option<&str>,
@@ -485,7 +485,7 @@ async fn translate_one(
     }
 }
 
-fn truncate(s: &str, n: usize) -> String {
+pub(crate) fn truncate(s: &str, n: usize) -> String {
     let mut out: String = s.chars().take(n).collect();
     if s.chars().count() > n {
         out.push('…');
@@ -494,7 +494,7 @@ fn truncate(s: &str, n: usize) -> String {
 }
 
 /// 把一段（可能超长）译文规范成单行：内核二次切分后会带 `\n`，压回空格。
-fn flatten(text: String) -> String {
+pub(crate) fn flatten(text: String) -> String {
     let mut out = String::with_capacity(text.len());
     let mut prev_space = false;
     for c in text.chars() {
