@@ -12,9 +12,9 @@
       http://www.apache.org/licenses/LICENSE-2.0
 
   源代码（参考用，未以二进制形式进入发行物，仅作协议实现参考）：
-    - got-it/localsend-main   (LocalSend 主仓库：Flutter 应用 + Rust core)
-    - got-it/web-main         (LocalSend Web 前端)
-    - got-it/protocol-main    (LocalSend 协议文档 v1/v2)
+    - got-it/03-应用与工具/LocalSend/localsend-main   (LocalSend 主仓库：Flutter 应用 + Rust core)
+    - got-it/03-应用与工具/LocalSend/web-main         (LocalSend Web 前端)
+    - got-it/03-应用与工具/LocalSend/protocol-main    (LocalSend 协议文档 v1/v2)
 
   本应用中的实现说明：
     - 我们未照搬其 Flutter/Dart 源码（技术栈不兼容），而是依据其 Apache-2.0 许可的

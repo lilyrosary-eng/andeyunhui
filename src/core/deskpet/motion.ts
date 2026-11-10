@@ -3,7 +3,7 @@
 // 抽出后逻辑零依赖，可在任意环境单测。
 
 // 由文件名推断该待机图朝向（屏幕坐标 y 向下）：正脸 / 左 / 左上 / 右上 / 右下 / 左下…
-// 用于「鼠标方位 → 多角度待机图」的帧选择（与 got-it/桌宠 的多角度素材命名约定一致）。
+// 用于「鼠标方位 → 多角度待机图」的帧选择（与 got-it/03-应用与工具/桌宠 的多角度素材命名约定一致）。
 export function dirVectorOf(name: string): { x: number; y: number } | null {
   const n = name.toLowerCase();
   const hasLeft = n.includes("left") || n.includes("左");

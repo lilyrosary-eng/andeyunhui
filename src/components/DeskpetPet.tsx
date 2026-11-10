@@ -887,7 +887,7 @@ export function DeskpetPet() {
   };
 
   // 全局设备监听：光标跟随（全局）、拖拽（根治「拖动时窗口闪没」）、多角度换帧与视差倾斜。
-  // 参考 got-it/BongoCat 方案：Rust 端 rdev 全局钩子 emit device-changed，前端按事件驱动。
+  // 参考 got-it/03-应用与工具/BongoCat-master 方案：Rust 端 rdev 全局钩子 emit device-changed，前端按事件驱动。
   // 关键：朝向/倾斜的实时更新放在 device-changed 回调里，而非 rAF——浮窗失焦时浏览器会
   // 节流甚至停跑 requestAnimationFrame，导致「鼠标在窗外时朝向卡死、只显示初始一两帧」。
   useEffect(() => {
