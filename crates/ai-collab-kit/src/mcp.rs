@@ -213,7 +213,11 @@ fn tool_defs() -> Value {
                     "roomId": { "type": "string" },
                     "assigneeId": { "type": "string", "description": "成员 id，见 collab_room_info" },
                     "brief": { "type": "string", "description": "任务说明" },
-                    "parentId": { "type": "string", "description": "可选父任务 id" }
+                    "parentId": { "type": "string", "description": "可选父任务 id" },
+                    "priority": {
+                        "type": "integer",
+                        "description": "调度优先级：0 高 / 1 普通（默认）/ 2 低；只在房间限并发、任务排队时影响出队顺序"
+                    }
                 },
                 "required": ["roomId", "assigneeId", "brief"],
                 "additionalProperties": false
@@ -387,8 +391,15 @@ fn call_tool(base: &Path, params: &Value) -> Result<Value, String> {
                 return Err("任务描述不能为空".to_string());
             }
             let parent_id = optional_str(&args, "parentId");
-            let created =
-                runtime::create_assignment_core(base, &room, parent_id, &assignee_id, brief.trim())?;
+            let priority = optional_u64(&args, "priority").map(|value| value.min(2) as u8);
+            let created = runtime::create_assignment_core_with_priority(
+                base,
+                &room,
+                parent_id,
+                &assignee_id,
+                brief.trim(),
+                priority.unwrap_or(runtime::PRIORITY_NORMAL),
+            )?;
             Ok(json!({ "task": created.assignment, "event": created.event }))
         }
         "collab_claim_task" => {

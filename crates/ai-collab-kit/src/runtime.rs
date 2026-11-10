@@ -10,7 +10,7 @@
 //! P3 继续补（对齐 OpenMausBot 的 Assignment runtime）：
 //! 预算/深度限制、重启恢复、等待用户输入的 parked 状态。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -33,6 +33,14 @@ static CANCELLED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 pub const MAX_TASK_DEPTH: usize = 4;
 /// 单房间同时未结束（queued / running / waiting）的任务上限。
 pub const MAX_ACTIVE_TASKS: usize = 64;
+/// 房间并发数上限：只用于挡住手填的大数字，不是产品语义。
+pub const MAX_ROOM_CONCURRENCY: u8 = 16;
+/// 调度优先级：数字越小越先出队。
+pub const PRIORITY_HIGH: u8 = 0;
+pub const PRIORITY_NORMAL: u8 = 1;
+pub const PRIORITY_LOW: u8 = 2;
+/// 基础设施失败（执行器没起来）自动重试的次数上限。
+const MAX_INFRA_RETRIES: u8 = 1;
 /// 自有模型单次调用上限：端点偶发不返回时不能把任务永久卡在 running。
 const NATIVE_TIMEOUT_SECS: u64 = 300;
 
@@ -51,6 +59,27 @@ pub fn now_ms() -> i64 {
 pub fn new_id(prefix: &str) -> String {
     let n = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}_{}_{}", now_ms(), n)
+}
+
+/// 房间并发上限：0 = 不限（None）；其它值夹到 1..=MAX_ROOM_CONCURRENCY。
+pub fn room_concurrency(room: &Room) -> Option<usize> {
+    if room.concurrency == 0 {
+        return None;
+    }
+    Some(usize::from(room.concurrency.min(MAX_ROOM_CONCURRENCY)))
+}
+
+/// 手填的并发数归一：None / 0 = 不限，负数不存在（u8），过大夹住。
+pub fn normalize_concurrency(value: Option<u8>) -> u8 {
+    match value {
+        None | Some(0) => 0,
+        Some(value) => value.clamp(1, MAX_ROOM_CONCURRENCY),
+    }
+}
+
+/// 优先级归一：没传按普通，超出范围按最低。
+pub fn normalize_priority(value: Option<u8>) -> u8 {
+    value.unwrap_or(PRIORITY_NORMAL).min(PRIORITY_LOW)
 }
 
 /// 单个成员用哪个模型：`provider/model` 或纯模型名；为空则跟随 dsh.json 的全局默认。
@@ -177,6 +206,25 @@ pub fn create_assignment_core(
     assignee_id: &str,
     brief: &str,
 ) -> Result<CreatedAssignment, String> {
+    create_assignment_core_with_priority(
+        base,
+        room,
+        parent_id,
+        assignee_id,
+        brief,
+        PRIORITY_NORMAL,
+    )
+}
+
+/// 带优先级的建任务入口。优先级只在房间限并发、任务需要排队时影响出队顺序。
+pub fn create_assignment_core_with_priority(
+    base: &Path,
+    room: &Room,
+    parent_id: Option<String>,
+    assignee_id: &str,
+    brief: &str,
+    priority: u8,
+) -> Result<CreatedAssignment, String> {
     // 预算型保护放在 core 里：UI 派单与 MCP 建任务走同一入口，规则不会漂移。
     let existing = store::read_assignments(base)
         .remove(&room.id)
@@ -231,6 +279,8 @@ pub fn create_assignment_core(
         started_at: None,
         duration_ms: None,
         usage: None,
+        priority: normalize_priority(Some(priority)),
+        attempts: 0,
         created_at: now,
         updated_at: now,
     };
@@ -269,7 +319,28 @@ pub fn create_assignment(
     assignee_id: &str,
     brief: &str,
 ) -> Result<Assignment, String> {
-    let created = create_assignment_core(base, room, parent_id, assignee_id, brief)?;
+    create_assignment_with_priority(
+        app,
+        base,
+        room,
+        parent_id,
+        assignee_id,
+        brief,
+        PRIORITY_NORMAL,
+    )
+}
+
+pub fn create_assignment_with_priority(
+    app: &AppHandle,
+    base: &Path,
+    room: &Room,
+    parent_id: Option<String>,
+    assignee_id: &str,
+    brief: &str,
+    priority: u8,
+) -> Result<Assignment, String> {
+    let created =
+        create_assignment_core_with_priority(base, room, parent_id, assignee_id, brief, priority)?;
     let _ = app.emit("collab-event", created.event);
     Ok(created.assignment)
 }
@@ -732,7 +803,14 @@ async fn run_stream_json_assignment(
                 None,
             );
         }
-        Err(error) => fail_assignment(&app, &base, &room, &assignment, &error),
+        Err(error) => {
+            // 子进程根本没起来时没有任何副作用，可以安全重试一次。
+            if is_spawn_failure(&error) {
+                retry_or_fail(app, base, room, assignment, &error);
+            } else {
+                fail_assignment(&app, &base, &room, &assignment, &error);
+            }
+        }
     }
 }
 
@@ -904,7 +982,7 @@ async fn run_assignment(app: AppHandle, base: PathBuf, room: Room, assignment: A
                 if is_cancelled(&assignment.id) {
                     return;
                 }
-                fail_assignment(&app, &base, &room, &assignment, &error);
+                retry_or_fail(app, base, room, assignment, &error);
             }
         }
         return;
@@ -926,7 +1004,7 @@ async fn run_assignment(app: AppHandle, base: PathBuf, room: Room, assignment: A
             if is_cancelled(&assignment.id) {
                 return;
             }
-            fail_assignment(&app, &base, &room, &assignment, &error);
+            retry_or_fail(app, base, room, assignment, &error);
         }
     }
 }
@@ -952,6 +1030,63 @@ fn fail_assignment(app: &AppHandle, base: &Path, room: &Room, assignment: &Assig
             None,
         );
     }
+}
+
+/// 尝试次数 +1 并落盘，返回最新值。任务已被删除时返回 Err。
+fn bump_attempts(base: &Path, room_id: &str, assignment_id: &str) -> Result<u8, String> {
+    let _guard = board_lock().lock().map_err(|_| "任务表锁已损坏".to_string())?;
+    store::with_write_lock(base, || {
+        let mut map = store::read_assignments(base);
+        let list = map
+            .get_mut(room_id)
+            .ok_or_else(|| "房间任务表不存在".to_string())?;
+        let assignment = list
+            .iter_mut()
+            .find(|a| a.id == assignment_id)
+            .ok_or_else(|| "任务不存在".to_string())?;
+        assignment.attempts = assignment.attempts.saturating_add(1);
+        let attempts = assignment.attempts;
+        assignment.updated_at = now_ms();
+        store::write_assignments(base, &map)?;
+        Ok(attempts)
+    })
+}
+
+/// 子进程「根本没起来」的失败（`spawn` 失败）。只有这类错误会自动重试：
+/// 进程没起来说明还没有任何写入 / 请求发生，重试不会产生重复副作用。
+fn is_spawn_failure(error: &str) -> bool {
+    error.contains("启动") && error.contains("失败")
+}
+
+/// 只重试「执行器根本没起来」的失败：此时还没有任何副作用，重试是安全的。
+/// 执行中途的失败（超时、退出码非 0、工具报错）一律直接判失败，避免重复写文件。
+fn retry_or_fail(app: AppHandle, base: PathBuf, room: Room, assignment: Assignment, error: &str) {
+    if is_cancelled(&assignment.id) {
+        return;
+    }
+    // 任务已被删除时 bump 会失败，此时不重试，直接走失败收尾（幂等：任务已不在）。
+    let attempts = bump_attempts(&base, &room.id, &assignment.id).unwrap_or(u8::MAX);
+    if attempts <= MAX_INFRA_RETRIES {
+        let _ = emit_event(
+            &app,
+            &base,
+            &room.id,
+            "assignment.progress",
+            Some(assignment.assignee_id.clone()),
+            Some(assignment.id.clone()),
+            Some(format!(
+                "{}，自动重试（{attempts}/{MAX_INFRA_RETRIES}）",
+                clip_text(error, 200)
+            )),
+            None,
+            Some(json!({ "retry": attempts })),
+        );
+        let mut next = assignment;
+        next.attempts = attempts;
+        spawn_assignment(app, base, room, next);
+        return;
+    }
+    fail_assignment(&app, &base, &room, &assignment, error);
 }
 
 fn build_prompt(base: &Path, room: &Room, assignment: &Assignment, include_history: bool) -> String {
@@ -1386,7 +1521,13 @@ async fn run_dsh_assignment(
                 None,
             );
         }
-        Err(error) => fail_assignment(&app, &base, &room, &assignment, &error),
+        Err(error) => {
+            if is_spawn_failure(&error) {
+                retry_or_fail(app, base, room, assignment, &error);
+            } else {
+                fail_assignment(&app, &base, &room, &assignment, &error);
+            }
+        }
     }
 }
 
@@ -1460,7 +1601,8 @@ async fn run_native_assignment(
     let future = match crate::native::run(request) {
         Ok(future) => future,
         Err(error) => {
-            fail_assignment(&app, &base, &room, &assignment, &error);
+            // 宿主的模型 runner 没注册 / 初始化失败：还没开始调用，重试安全。
+            retry_or_fail(app, base, room, assignment, &error);
             return;
         }
     };
@@ -1502,8 +1644,189 @@ async fn run_native_assignment(
     }
 }
 
+/// 排队中的任务：连同执行所需上下文一起存，出队后直接交给 `run_assignment`。
+struct QueuedTask {
+    app: AppHandle,
+    base: PathBuf,
+    room: Room,
+    assignment: Assignment,
+    position: u64,
+}
+
+/// 纯调度键：只保留出队判断需要的字段，便于脱离 AppHandle 单测。
+#[derive(Debug, Clone)]
+struct QueueKey {
+    room_id: String,
+    priority: u8,
+    position: u64,
+    /// None = 该房间不限并发。
+    limit: Option<usize>,
+}
+
+#[derive(Default)]
+struct Scheduler {
+    /// room_id -> 正在执行的任务数。
+    running: HashMap<String, usize>,
+    queue: Vec<QueuedTask>,
+    next_position: u64,
+}
+
+static SCHEDULER: OnceLock<Mutex<Scheduler>> = OnceLock::new();
+
+fn scheduler() -> &'static Mutex<Scheduler> {
+    SCHEDULER.get_or_init(|| Mutex::new(Scheduler::default()))
+}
+
+/// 选下一个可执行任务：房间并发未满，优先级数字小者先，同优先级按入队顺序。
+fn pick_runnable(keys: &[QueueKey], running: &HashMap<String, usize>) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (index, key) in keys.iter().enumerate() {
+        if let Some(limit) = key.limit {
+            if running.get(&key.room_id).copied().unwrap_or(0) >= limit {
+                continue;
+            }
+        }
+        best = match best {
+            None => Some(index),
+            Some(current) => {
+                let (a, b) = (&keys[current], key);
+                if (b.priority, b.position) < (a.priority, a.position) {
+                    Some(index)
+                } else {
+                    Some(current)
+                }
+            }
+        };
+    }
+    best
+}
+
+/// 槽位守卫：任务结束（含 panic 展开）时释放并发槽，并拉起队列里的下一个。
+struct SlotGuard {
+    room_id: String,
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        if let Ok(mut sched) = scheduler().lock() {
+            if let Some(count) = sched.running.get_mut(&self.room_id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    sched.running.remove(&self.room_id);
+                }
+            }
+        }
+        pump();
+    }
+}
+
+/// 放进调度队列，随后按槽位出队。房间不限并发时这里等价于立刻执行。
+fn enqueue(app: AppHandle, base: PathBuf, room: Room, assignment: Assignment) {
+    let mut task = QueuedTask {
+        app,
+        base,
+        room,
+        assignment,
+        position: 0,
+    };
+    match scheduler().lock() {
+        Ok(mut sched) => {
+            task.position = sched.next_position;
+            sched.next_position += 1;
+            sched.queue.push(task);
+        }
+        Err(_) => {
+            // 锁损坏时退回「立刻执行」：宁可丢并发保护，也不能丢任务。
+            let QueuedTask {
+                app,
+                base,
+                room,
+                assignment,
+                ..
+            } = task;
+            tauri::async_runtime::spawn(run_assignment(app, base, room, assignment));
+            return;
+        }
+    }
+    pump();
+}
+
+/// 按房间槽位出队。入队、任务结束、房间并发改大三种时机都调它。
+fn pump() {
+    let mut starts: Vec<QueuedTask> = Vec::new();
+    if let Ok(mut sched) = scheduler().lock() {
+        // 取消是另一条路径落盘的，队列里的残留在这里丢掉。
+        sched.queue.retain(|item| !is_cancelled(&item.assignment.id));
+        loop {
+            let keys: Vec<QueueKey> = sched
+                .queue
+                .iter()
+                .map(|item| QueueKey {
+                    room_id: item.room.id.clone(),
+                    priority: item.assignment.priority,
+                    position: item.position,
+                    limit: room_concurrency(&item.room),
+                })
+                .collect();
+            let Some(index) = pick_runnable(&keys, &sched.running) else {
+                break;
+            };
+            let item = sched.queue.remove(index);
+            *sched.running.entry(item.room.id.clone()).or_insert(0) += 1;
+            starts.push(item);
+        }
+    }
+    for item in starts {
+        let room_id = item.room.id.clone();
+        tauri::async_runtime::spawn(async move {
+            let _slot = SlotGuard { room_id };
+            run_assignment(item.app, item.base, item.room, item.assignment).await;
+        });
+    }
+}
+
+/// 房间配置改过后重排队列：先把排队任务里的并发上限同步成最新值，再尝试出队。
+/// 改小不打断已在跑的任务，只影响之后还能出队多少个。
+pub fn pump_queue(base: &Path) {
+    let rooms = store::read_rooms(base);
+    if let Ok(mut sched) = scheduler().lock() {
+        for item in sched.queue.iter_mut() {
+            if let Some(room) = rooms.iter().find(|room| room.id == item.room.id) {
+                item.room.concurrency = room.concurrency;
+            }
+        }
+    }
+    pump();
+}
+
+/// 取消排队中的任务时把它从队列里摘掉，避免继续占位。
+pub fn discard_queued(assignment_id: &str) {
+    if let Ok(mut sched) = scheduler().lock() {
+        sched.queue.retain(|item| item.assignment.id != assignment_id);
+    }
+}
+
+/// 房间被删除后清掉它排队中的任务：任务表都没了，再执行只会写出一堆失败事件。
+pub fn discard_room_queue(room_id: &str) {
+    if let Ok(mut sched) = scheduler().lock() {
+        sched.queue.retain(|item| item.room.id != room_id);
+    }
+}
+
 pub fn spawn_assignment(app: AppHandle, base: PathBuf, room: Room, assignment: Assignment) {
-    tauri::async_runtime::spawn(run_assignment(app, base, room, assignment));
+    let harness_id = room
+        .agents
+        .iter()
+        .find(|agent| agent.id == assignment.assignee_id)
+        .map(|agent| agent.harness_id.as_str())
+        .unwrap_or(crate::harness::ECHO);
+    // 外部 harness 不占执行槽：mcp 只把任务留在队列里等外部 claim，信箱只投递文件。
+    // 它们几乎立刻返回，占用并发槽反而会挡住真正在跑的任务。
+    if matches!(harness_id, crate::harness::MCP | crate::harness::MAILBOX) {
+        tauri::async_runtime::spawn(run_assignment(app, base, room, assignment));
+        return;
+    }
+    enqueue(app, base, room, assignment);
 }
 
 /// 一条完整的协作演示：主导拆解 → 分派给执行成员 → 执行完成 → 主导汇总。
@@ -1638,6 +1961,8 @@ pub fn cancel_assignment(
     assignment: &Assignment,
 ) -> Result<(), String> {
     mark_cancelled(&assignment.id);
+    // 还在排队的任务直接从队列摘掉，不必等它被出队再判断取消。
+    discard_queued(&assignment.id);
     emit_cancelled(app, base, room, assignment)
 }
 
@@ -1781,6 +2106,7 @@ mod tests {
             workspace: None,
             source: None,
             token_budget: None,
+            concurrency: 0,
             created_at: 0,
             updated_at: 0,
         }
@@ -2188,6 +2514,100 @@ mod tests {
                 .unwrap();
         assert_eq!(resumed.status, AssignmentStatus::Running);
         assert!(resumed.result.is_none());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    fn key(room: &str, priority: u8, position: u64, limit: Option<usize>) -> QueueKey {
+        QueueKey {
+            room_id: room.to_string(),
+            priority,
+            position,
+            limit,
+        }
+    }
+
+    /// 同房间并发满了就不再出队；另一个房间的任务不受影响（房间之间不互相串行）。
+    #[test]
+    fn scheduler_honors_room_slots_and_keeps_rooms_independent() {
+        let queue = vec![
+            key("a", PRIORITY_NORMAL, 0, Some(2)),
+            key("a", PRIORITY_NORMAL, 1, Some(2)),
+            key("a", PRIORITY_NORMAL, 2, Some(2)),
+            key("b", PRIORITY_NORMAL, 3, Some(1)),
+        ];
+        let mut running = HashMap::new();
+        running.insert("a".to_string(), 2usize);
+        running.insert("b".to_string(), 1usize);
+        assert_eq!(pick_runnable(&queue, &running), None);
+
+        running.insert("b".to_string(), 0usize);
+        assert_eq!(pick_runnable(&queue, &running), Some(3));
+
+        // 不限并发的房间永远可以出队。
+        let unlimited = vec![key("c", PRIORITY_NORMAL, 4, None)];
+        let mut busy = HashMap::new();
+        busy.insert("c".to_string(), 99usize);
+        assert_eq!(pick_runnable(&unlimited, &busy), Some(0));
+    }
+
+    /// 高优先级先出队；同优先级按入队顺序，不会插队。
+    #[test]
+    fn scheduler_prefers_priority_then_arrival() {
+        let queue = vec![
+            key("a", PRIORITY_LOW, 0, Some(4)),
+            key("a", PRIORITY_NORMAL, 1, Some(4)),
+            key("a", PRIORITY_HIGH, 2, Some(4)),
+            key("a", PRIORITY_HIGH, 3, Some(4)),
+        ];
+        let none = HashMap::new();
+        assert_eq!(pick_runnable(&queue, &none), Some(2));
+        // 选中后调用方移除该下标，下一次应轮到同优先级的后到者。
+        let rest = vec![queue[0].clone(), queue[1].clone(), queue[3].clone()];
+        assert_eq!(pick_runnable(&rest, &none), Some(2));
+    }
+
+    /// 0 = 不限；手填过大夹到上限，避免一个笔误把并发打到天上。
+    #[test]
+    fn concurrency_normalization_matches_room_field() {
+        let mut room = test_room("room_conc");
+        room.concurrency = 0;
+        assert_eq!(room_concurrency(&room), None);
+        room.concurrency = 3;
+        assert_eq!(room_concurrency(&room), Some(3));
+        room.concurrency = 250;
+        assert_eq!(room_concurrency(&room), Some(MAX_ROOM_CONCURRENCY as usize));
+
+        assert_eq!(normalize_concurrency(None), 0);
+        assert_eq!(normalize_concurrency(Some(0)), 0);
+        assert_eq!(normalize_concurrency(Some(3)), 3);
+        assert_eq!(normalize_concurrency(Some(200)), MAX_ROOM_CONCURRENCY);
+    }
+
+    /// 优先级落到任务表；不传按普通，超范围按最低。
+    #[test]
+    fn priority_is_persisted_on_assignment() {
+        let base = temp_base("priority");
+        let room = test_room("room_priority");
+
+        let high = create_assignment_core_with_priority(&base, &room, None, "worker", "急单", 0)
+            .unwrap()
+            .assignment;
+        let normal = create_assignment_core(&base, &room, None, "worker", "普通单")
+            .unwrap()
+            .assignment;
+        let weird = create_assignment_core_with_priority(&base, &room, None, "worker", "越界", 9)
+            .unwrap()
+            .assignment;
+
+        assert_eq!(high.priority, PRIORITY_HIGH);
+        assert_eq!(normal.priority, PRIORITY_NORMAL);
+        assert_eq!(weird.priority, PRIORITY_LOW);
+        assert_eq!(high.attempts, 0);
+
+        let stored = store::read_assignments(&base).remove(&room.id).unwrap();
+        let find = |id: &str| stored.iter().find(|task| task.id == id).cloned().unwrap();
+        assert_eq!(find(&high.id).priority, PRIORITY_HIGH);
+        assert_eq!(find(&weird.id).priority, PRIORITY_LOW);
         let _ = std::fs::remove_dir_all(base);
     }
 }

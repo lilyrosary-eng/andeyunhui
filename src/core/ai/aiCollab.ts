@@ -59,6 +59,8 @@ export interface CollabRoom {
   source?: CollabRoomSource | null;
   /** token 预算上限；null/缺省 = 不限。超额只拒绝新任务，不打断在跑的 */
   tokenBudget?: number | null;
+  /** 同房间并发执行上限；0/缺省 = 不限（超出进队列，按优先级 + 先后出队） */
+  concurrency?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -97,6 +99,10 @@ export interface CollabAssignment {
   durationMs?: number | null;
   /** 模型用量；外部 harness 不回报时为空 */
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number } | null;
+  /** 调度优先级：0 高 / 1 普通 / 2 低；只在房间限并发时影响出队顺序 */
+  priority?: number;
+  /** 已尝试执行次数（仅基础设施失败会自动重试） */
+  attempts?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -211,9 +217,20 @@ export interface UseAiCollabResult {
   /** 绑定 / 解绑当前房间的工作目录（绑定后事件流镜像到项目 .adyh/collab） */
   setWorkspace: (workspace: string | null) => Promise<void>;
   /** 新建房间：成员各自指定 harness 与模型（native / dsh / mcp / 信箱可同室） */
-  createRoomWithAgents: (members: CollabMemberInput[], name?: string, tokenBudget?: number | null) => Promise<void>;
-  /** 编辑已有房间：改名称 / 成员 / 主导 / 预算，保留事件与任务历史 */
-  updateRoom: (roomId: string, members: CollabMemberInput[], name?: string, tokenBudget?: number | null) => Promise<void>;
+  createRoomWithAgents: (
+    members: CollabMemberInput[],
+    name?: string,
+    tokenBudget?: number | null,
+    concurrency?: number | null,
+  ) => Promise<void>;
+  /** 编辑已有房间：改名称 / 成员 / 主导 / 预算 / 并发，保留事件与任务历史 */
+  updateRoom: (
+    roomId: string,
+    members: CollabMemberInput[],
+    name?: string,
+    tokenBudget?: number | null,
+    concurrency?: number | null,
+  ) => Promise<void>;
   deleteRoom: (roomId: string) => Promise<void>;
   selectRoom: (roomId: string) => Promise<void>;
   /** assigneeId 省略时发给主导成员 */
@@ -488,6 +505,7 @@ export function useAiCollab(): UseAiCollabResult {
     members: CollabMemberInput[],
     name?: string,
     tokenBudget?: number | null,
+    concurrency?: number | null,
   ) => {
     setError(null);
     const agents = toAgents(members);
@@ -505,6 +523,8 @@ export function useAiCollab(): UseAiCollabResult {
         agents,
         leadId: leadIdOf(members, agents),
         tokenBudget: tokenBudget && tokenBudget > 0 ? tokenBudget : null,
+        // null / 0 = 不限并发，与后端 normalize_concurrency 一致。
+        concurrency: concurrency && concurrency > 0 ? concurrency : null,
       });
       await refreshRooms();
       await selectRoom(room.id);
@@ -518,6 +538,7 @@ export function useAiCollab(): UseAiCollabResult {
     members: CollabMemberInput[],
     name?: string,
     tokenBudget?: number | null,
+    concurrency?: number | null,
   ) => {
     setError(null);
     const agents = toAgents(members);
@@ -533,6 +554,8 @@ export function useAiCollab(): UseAiCollabResult {
         agents,
         leadId: leadIdOf(members, agents),
         tokenBudget: tokenBudget && tokenBudget > 0 ? tokenBudget : null,
+        // 编辑弹窗总会给出当前值：0 表示显式改为「不限」；undefined = 不改。
+        concurrency: typeof concurrency === 'number' ? concurrency : null,
       });
       setRooms((prev) => prev.map((item) => (item.id === room.id ? room : item)));
       if (activeIdRef.current === room.id) setActiveRoom(room);

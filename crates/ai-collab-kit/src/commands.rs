@@ -169,6 +169,7 @@ pub fn collab_room_create(
     agents: Option<Vec<AgentSpec>>,
     lead_id: Option<String>,
     token_budget: Option<u64>,
+    concurrency: Option<u8>,
 ) -> Result<Room, String> {
     let base = store::base_dir(&app)?;
     let name = if name.trim().is_empty() {
@@ -203,6 +204,8 @@ pub fn collab_room_create(
         source: None,
         // 0 与 None 同义：不限。
         token_budget: token_budget.filter(|value| *value > 0),
+        // 0 = 不限并发，与多数 harness 默认行为一致；只有显式填数字才排队。
+        concurrency: runtime::normalize_concurrency(concurrency),
         created_at: now,
         updated_at: now,
     };
@@ -235,6 +238,7 @@ pub(crate) fn update_room_agents_core(
     agents: Vec<AgentSpec>,
     lead_id: Option<String>,
     token_budget: Option<u64>,
+    concurrency: Option<u8>,
 ) -> Result<Room, String> {
     let mut rooms = store::read_rooms(base);
     let index = rooms
@@ -306,6 +310,10 @@ pub(crate) fn update_room_agents_core(
     if let Some(budget) = token_budget {
         room.token_budget = if budget == 0 { None } else { Some(budget) };
     }
+    // None = 不改；Some(0) = 改为不限并发。
+    if let Some(value) = concurrency {
+        room.concurrency = runtime::normalize_concurrency(Some(value));
+    }
     room.updated_at = runtime::now_ms();
     rooms[index] = room.clone();
     store::write_rooms(base, &rooms)?;
@@ -320,9 +328,18 @@ pub fn collab_room_update(
     agents: Vec<AgentSpec>,
     lead_id: Option<String>,
     token_budget: Option<u64>,
+    concurrency: Option<u8>,
 ) -> Result<Room, String> {
     let base = store::base_dir(&app)?;
-    let room = update_room_agents_core(&base, &room_id, name, agents, lead_id, token_budget)?;
+    let room = update_room_agents_core(
+        &base,
+        &room_id,
+        name,
+        agents,
+        lead_id,
+        token_budget,
+        concurrency,
+    )?;
     runtime::emit_event(
         &app,
         &base,
@@ -334,6 +351,8 @@ pub fn collab_room_update(
         None,
         Some(json!({ "room": &room })),
     )?;
+    // 并发改大后，队列里本来被挡住的房间可以立刻开工。
+    runtime::pump_queue(&base);
     Ok(room)
 }
 
@@ -346,6 +365,8 @@ pub fn collab_room_delete(app: AppHandle, room_id: String) -> Result<(), String>
     let mut assignments = store::read_assignments(&base);
     assignments.remove(&room_id);
     store::write_assignments(&base, &assignments)?;
+    // 排队中的任务随房间一起作废；已在跑的由执行器自己收尾。
+    runtime::discard_room_queue(&room_id);
     store::remove_room_files(&base, &room_id)
 }
 
@@ -480,6 +501,7 @@ pub fn collab_import_dsh_session(
             session_id: Some(summary.id.clone()),
         }),
         token_budget: None,
+        concurrency: 0,
         created_at: now,
         updated_at: now,
     };
@@ -618,6 +640,7 @@ pub fn collab_room_send(
     room_id: String,
     text: String,
     assignee_id: Option<String>,
+    priority: Option<u8>,
 ) -> Result<CollabEvent, String> {
     let base = store::base_dir(&app)?;
     let room = find_room(&app, &room_id)?;
@@ -645,7 +668,15 @@ pub fn collab_room_send(
         Some(json!({ "role": "user", "target": target })),
     )?;
 
-    let assignment = runtime::create_assignment(&app, &base, &room, None, &target, text)?;
+    let assignment = runtime::create_assignment_with_priority(
+        &app,
+        &base,
+        &room,
+        None,
+        &target,
+        text,
+        runtime::normalize_priority(priority),
+    )?;
     runtime::spawn_assignment(app.clone(), base, room, assignment);
     Ok(user_event)
 }
@@ -657,6 +688,7 @@ pub fn collab_assign(
     assignee_id: String,
     brief: String,
     parent_id: Option<String>,
+    priority: Option<u8>,
 ) -> Result<Assignment, String> {
     let base = store::base_dir(&app)?;
     let room = find_room(&app, &room_id)?;
@@ -666,13 +698,14 @@ pub fn collab_assign(
     if brief.trim().is_empty() {
         return Err("任务描述不能为空".to_string());
     }
-    let assignment = runtime::create_assignment(
+    let assignment = runtime::create_assignment_with_priority(
         &app,
         &base,
         &room,
         parent_id,
         &assignee_id,
         brief.trim(),
+        runtime::normalize_priority(priority),
     )?;
     runtime::spawn_assignment(app.clone(), base, room, assignment.clone());
     Ok(assignment)
@@ -755,6 +788,7 @@ mod tests {
             workspace: None,
             source: None,
             token_budget: None,
+            concurrency: 0,
             created_at: 1,
             updated_at: 1,
         }
@@ -780,9 +814,12 @@ mod tests {
             ],
             Some("worker".to_string()),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(unchanged.lead_id, "worker");
+        // 没传并发 = 不改；旧房间保持「不限」。
+        assert_eq!(unchanged.concurrency, 0);
         assert_eq!(
             unchanged
                 .agents
@@ -804,11 +841,13 @@ mod tests {
             ],
             None,
             Some(50_000),
+            Some(4),
         )
         .unwrap();
         assert_eq!(changed.name, "改名");
         assert_eq!(changed.agents[0].native_session_id, None);
         assert_eq!(changed.token_budget, Some(50_000));
+        assert_eq!(changed.concurrency, 4);
 
         let _ = std::fs::remove_dir_all(base);
     }
@@ -841,6 +880,7 @@ mod tests {
                 agent("lead", harness::ECHO, "", None),
                 agent("extra", harness::ECHO, "", None),
             ],
+            None,
             None,
             None,
         )

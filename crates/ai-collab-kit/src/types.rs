@@ -65,6 +65,11 @@ pub struct Room {
     /// v1 只做「超额拒绝新任务」，不打断已在执行的任务。
     #[serde(default)]
     pub token_budget: Option<u64>,
+    /// 同房间并发执行的任务数上限；0 = 不限（与多数 harness 的默认行为一致）。
+    /// 只限制宿主同时拉起的执行器数量（模型调用 / 子进程），
+    /// 不限制 harness 内部自己的子代理。缺省 0 保证旧房间文件仍能读。
+    #[serde(default)]
+    pub concurrency: u8,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -108,6 +113,11 @@ pub struct TaskUsage {
     pub total_tokens: u64,
 }
 
+/// 旧任务文件没有 priority 字段时按「普通」处理。
+fn default_priority() -> u8 {
+    1
+}
+
 /// 一次任务分派。P0 只做单层与一层子任务，`parent_id` 已为 P1 的树保留。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -132,6 +142,13 @@ pub struct Assignment {
     /// 模型用量；外部 harness 不回报时为空。
     #[serde(default)]
     pub usage: Option<TaskUsage>,
+    /// 调度优先级：0 高 / 1 普通 / 2 低。只在房间限并发、任务需要排队时有意义。
+    #[serde(default = "default_priority")]
+    pub priority: u8,
+    /// 已尝试执行次数。只有「执行器根本没起来」这类基础设施失败会自动重试，
+    /// 幂等性无法保证的执行中途失败不重试，避免重复写文件 / 重复发请求。
+    #[serde(default)]
+    pub attempts: u8,
     pub created_at: i64,
     pub updated_at: i64,
 }

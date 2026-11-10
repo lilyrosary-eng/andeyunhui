@@ -28,9 +28,20 @@ interface AiCollabViewProps {
   /** harness 目录：新建房间时按它列可选项（只列可用的） */
   harnesses?: CollabHarnessInfo[];
   /** 新建房间：成员各自选 harness 与模型，主导由成员里指定 */
-  onCreateRoom?: (members: CollabMemberInput[], name: string, tokenBudget?: number | null) => void;
-  /** 编辑当前房间：改名称 / 成员 / 主导 / 预算，保留事件与任务历史 */
-  onUpdateRoom?: (roomId: string, members: CollabMemberInput[], name: string, tokenBudget?: number | null) => void;
+  onCreateRoom?: (
+    members: CollabMemberInput[],
+    name: string,
+    tokenBudget?: number | null,
+    concurrency?: number | null,
+  ) => void;
+  /** 编辑当前房间：改名称 / 成员 / 主导 / 预算 / 并发，保留事件与任务历史 */
+  onUpdateRoom?: (
+    roomId: string,
+    members: CollabMemberInput[],
+    name: string,
+    tokenBudget?: number | null,
+    concurrency?: number | null,
+  ) => void;
   /** 新建房间弹窗开关由宿主控制：侧栏「新建房间」与空状态按钮走同一条路径 */
   builderOpen: boolean;
   onOpenBuilder: () => void;
@@ -456,6 +467,7 @@ function RoomBuilderDialog({
   initialMembers,
   initialName = '',
   initialBudget = null,
+  initialConcurrency = 0,
   title = '新建协作房间',
   submitLabel = '创建房间',
   onClose,
@@ -467,10 +479,17 @@ function RoomBuilderDialog({
   initialName?: string;
   /** 编辑态回填的 token 预算；空 = 不限 */
   initialBudget?: number | null;
+  /** 编辑态回填的并发上限；0 = 不限 */
+  initialConcurrency?: number;
   title?: string;
   submitLabel?: string;
   onClose: () => void;
-  onCreate: (members: CollabMemberInput[], name: string, tokenBudget: number | null) => void;
+  onCreate: (
+    members: CollabMemberInput[],
+    name: string,
+    tokenBudget: number | null,
+    concurrency: number | null,
+  ) => void;
 }) {
   // 编辑时把现有 harness 也保留在选项里（即便当前不可用），否则下拉显示会错位到第一项。
   const options = harnesses.filter(
@@ -480,6 +499,10 @@ function RoomBuilderDialog({
   const pick = (...wanted: string[]) => wanted.find((id) => ids.includes(id)) ?? ids[0] ?? 'echo';
   const [name, setName] = useState(initialName);
   const [budget, setBudget] = useState(initialBudget && initialBudget > 0 ? String(initialBudget) : '');
+  // 空 = 不限并发；填数字才排队（与多数 harness 的默认行为一致）。
+  const [concurrency, setConcurrency] = useState(
+    initialConcurrency && initialConcurrency > 0 ? String(initialConcurrency) : '',
+  );
   const [members, setMembers] = useState<CollabMemberInput[]>(() =>
     initialMembers?.length
       ? initialMembers.map((member) => ({ ...member }))
@@ -546,6 +569,20 @@ function RoomBuilderDialog({
             />
             <span className="mt-1 block text-[10px] leading-relaxed text-neutral-400 dark:text-stone-500">
               只统计已回报用量的任务（自有模型可统计；外部 harness 不回报时不计入）。
+            </span>
+          </label>
+
+          <label className="block">
+            <span className="font-medium text-neutral-700 dark:text-stone-200">并发任务</span>
+            <input
+              value={concurrency}
+              onChange={(event) => setConcurrency(event.target.value.replace(/[^\d]/g, ''))}
+              inputMode="numeric"
+              placeholder="留空不限；填 1~16 限制同时执行的任务数"
+              className="mt-1 w-full rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-indigo-400 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-100"
+            />
+            <span className="mt-1 block text-[10px] leading-relaxed text-neutral-400 dark:text-stone-500">
+              只限制宿主同时执行的任务数，超出的排队等候；不影响 harness 内部自己的子代理。
             </span>
           </label>
 
@@ -649,7 +686,14 @@ function RoomBuilderDialog({
               <button
                 onClick={() => {
                   const parsed = Number(budget.trim());
-                  onCreate(members, name, Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : null);
+                  const limit = Number(concurrency.trim());
+                  onCreate(
+                    members,
+                    name,
+                    Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : null,
+                    // 0 = 不限；编辑时 0 表示显式清除上限。
+                    Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : 0,
+                  );
                 }}
                 className="btn-press rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
               >
@@ -719,8 +763,8 @@ export const AiCollabView = memo(function AiCollabView({
     <RoomBuilderDialog
       harnesses={harnesses ?? []}
       onClose={onCloseBuilder}
-      onCreate={(members, name, tokenBudget) => {
-        onCreateRoom?.(members, name, tokenBudget);
+      onCreate={(members, name, tokenBudget, concurrency) => {
+        onCreateRoom?.(members, name, tokenBudget, concurrency);
         onCloseBuilder();
       }}
     />
@@ -732,6 +776,7 @@ export const AiCollabView = memo(function AiCollabView({
       harnesses={harnesses ?? []}
       initialName={room.name}
       initialBudget={room.tokenBudget ?? null}
+      initialConcurrency={room.concurrency ?? 0}
       initialMembers={room.agents.map((agent) => ({
         id: agent.id,
         name: agent.name,
@@ -744,8 +789,8 @@ export const AiCollabView = memo(function AiCollabView({
       title="编辑房间"
       submitLabel="保存"
       onClose={() => setEditOpen(false)}
-      onCreate={(members, name, tokenBudget) => {
-        onUpdateRoom?.(room.id, members, name, tokenBudget);
+      onCreate={(members, name, tokenBudget, concurrency) => {
+        onUpdateRoom?.(room.id, members, name, tokenBudget, concurrency);
         setEditOpen(false);
       }}
     />

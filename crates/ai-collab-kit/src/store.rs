@@ -676,6 +676,7 @@ mod tests {
             workspace: None,
             source: None,
             token_budget: None,
+            concurrency: 0,
             created_at: 0,
             updated_at: 0,
         };
@@ -698,6 +699,8 @@ mod tests {
                 started_at: None,
                 duration_ms: None,
                 usage: None,
+                priority: 1,
+                attempts: 0,
                 created_at: 0,
                 updated_at: 0,
             }],
@@ -719,6 +722,7 @@ mod tests {
             workspace: Some(workspace.to_string_lossy().to_string()),
             source: None,
             token_budget: None,
+            concurrency: 0,
             created_at: 0,
             updated_at: 0,
         };
@@ -771,6 +775,7 @@ mod tests {
             workspace: Some(workspace.to_string_lossy().to_string()),
             source: None,
             token_budget: None,
+            concurrency: 0,
             created_at: 0,
             updated_at: 0,
         };
@@ -786,6 +791,8 @@ mod tests {
             started_at: None,
             duration_ms: None,
             usage: None,
+            priority: 1,
+            attempts: 0,
             created_at: 0,
             updated_at: 0,
         };
