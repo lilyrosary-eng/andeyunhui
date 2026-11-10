@@ -45,8 +45,8 @@ pub fn collab_harnesses(app: AppHandle) -> Vec<HarnessInfo> {
     harness::catalog(&app)
 }
 
-/// 启动恢复：把上一进程遗留的 running / queued 任务结掉。
-/// 外部 harness（MCP）拥有的任务保持原状，由对方继续执行。
+/// 启动恢复：上一进程遗留的 running 判失败，queued 重新入队。
+/// 外部 harness（MCP / 信箱）拥有的任务保持原状，由对方继续执行。
 #[tauri::command]
 pub fn collab_recover(app: AppHandle) -> Result<runtime::RecoverySummary, String> {
     let flag = RECOVERY_DONE.get_or_init(|| Mutex::new(false));
@@ -58,7 +58,12 @@ pub fn collab_recover(app: AppHandle) -> Result<runtime::RecoverySummary, String
         *done = true;
     }
     let base = store::base_dir(&app)?;
-    runtime::recover_stale_assignments(&base)
+    let outcome = runtime::recover_stale_assignments(&base)?;
+    // 有并发上限后 queued 是常态：重启不该把整队任务判死，重新入队继续跑。
+    for (room, assignment) in outcome.requeue {
+        runtime::spawn_assignment(app.clone(), base.clone(), room, assignment);
+    }
+    Ok(outcome.summary)
 }
 
 /// 启动事件文件监听：MCP 等外部进程写入后近实时推给前端（线程只启动一次）。
@@ -170,6 +175,7 @@ pub fn collab_room_create(
     lead_id: Option<String>,
     token_budget: Option<u64>,
     concurrency: Option<u8>,
+    task_timeout_secs: Option<u64>,
 ) -> Result<Room, String> {
     let base = store::base_dir(&app)?;
     let name = if name.trim().is_empty() {
@@ -206,6 +212,8 @@ pub fn collab_room_create(
         token_budget: token_budget.filter(|value| *value > 0),
         // 0 = 不限并发，与多数 harness 默认行为一致；只有显式填数字才排队。
         concurrency: runtime::normalize_concurrency(concurrency),
+        // 0 与 None 同义：不限，交给各 harness 自己的超时兜底。
+        task_timeout_secs: task_timeout_secs.filter(|value| *value > 0),
         created_at: now,
         updated_at: now,
     };
@@ -239,6 +247,7 @@ pub(crate) fn update_room_agents_core(
     lead_id: Option<String>,
     token_budget: Option<u64>,
     concurrency: Option<u8>,
+    task_timeout_secs: Option<u64>,
 ) -> Result<Room, String> {
     let mut rooms = store::read_rooms(base);
     let index = rooms
@@ -314,6 +323,10 @@ pub(crate) fn update_room_agents_core(
     if let Some(value) = concurrency {
         room.concurrency = runtime::normalize_concurrency(Some(value));
     }
+    // None = 不改；Some(0) = 清除任务超时。
+    if let Some(secs) = task_timeout_secs {
+        room.task_timeout_secs = if secs == 0 { None } else { Some(secs) };
+    }
     room.updated_at = runtime::now_ms();
     rooms[index] = room.clone();
     store::write_rooms(base, &rooms)?;
@@ -329,6 +342,7 @@ pub fn collab_room_update(
     lead_id: Option<String>,
     token_budget: Option<u64>,
     concurrency: Option<u8>,
+    task_timeout_secs: Option<u64>,
 ) -> Result<Room, String> {
     let base = store::base_dir(&app)?;
     let room = update_room_agents_core(
@@ -339,6 +353,7 @@ pub fn collab_room_update(
         lead_id,
         token_budget,
         concurrency,
+        task_timeout_secs,
     )?;
     runtime::emit_event(
         &app,
@@ -502,6 +517,7 @@ pub fn collab_import_dsh_session(
         }),
         token_budget: None,
         concurrency: 0,
+        task_timeout_secs: None,
         created_at: now,
         updated_at: now,
     };
@@ -753,6 +769,21 @@ pub fn collab_cancel(
     runtime::cancel_assignment(&app, &base, &room, &assignment)
 }
 
+/// 恢复挂起的任务：置回 queued 并重新交给调度器。
+/// 不直接置 running —— 恢复同样要占房间并发槽，否则会突破限流。
+#[tauri::command]
+pub fn collab_resume(
+    app: AppHandle,
+    room_id: String,
+    assignment_id: String,
+) -> Result<Assignment, String> {
+    let base = store::base_dir(&app)?;
+    let room = find_room(&app, &room_id)?;
+    let assignment = runtime::requeue_assignment_core(&base, &room_id, &assignment_id)?;
+    runtime::spawn_assignment(app.clone(), base, room, assignment.clone());
+    Ok(assignment)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -789,6 +820,7 @@ mod tests {
             source: None,
             token_budget: None,
             concurrency: 0,
+            task_timeout_secs: None,
             created_at: 1,
             updated_at: 1,
         }
@@ -813,6 +845,7 @@ mod tests {
                 agent("worker", harness::NATIVE, "", None),
             ],
             Some("worker".to_string()),
+            None,
             None,
             None,
         )
@@ -842,12 +875,14 @@ mod tests {
             None,
             Some(50_000),
             Some(4),
+            Some(120),
         )
         .unwrap();
         assert_eq!(changed.name, "改名");
         assert_eq!(changed.agents[0].native_session_id, None);
         assert_eq!(changed.token_budget, Some(50_000));
         assert_eq!(changed.concurrency, 4);
+        assert_eq!(changed.task_timeout_secs, Some(120));
 
         let _ = std::fs::remove_dir_all(base);
     }
@@ -880,6 +915,7 @@ mod tests {
                 agent("lead", harness::ECHO, "", None),
                 agent("extra", harness::ECHO, "", None),
             ],
+            None,
             None,
             None,
             None,

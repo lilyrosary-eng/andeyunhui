@@ -61,6 +61,8 @@ export interface CollabRoom {
   tokenBudget?: number | null;
   /** 同房间并发执行上限；0/缺省 = 不限（超出进队列，按优先级 + 先后出队） */
   concurrency?: number;
+  /** 单任务超时（秒）；null/缺省 = 不限，由各 harness 自己的超时兜底 */
+  taskTimeoutSecs?: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -144,8 +146,11 @@ export interface CollabPermissionRequest {
 /** 启动恢复结果：上一进程遗留任务的处理统计。 */
 export interface CollabRecovery {
   failedRunning: number;
+  /** 兼容旧字段；queued 任务现在改为重新入队，恒为 0 */
   failedQueued: number;
   keptExternal: number;
+  /** 已重新放回队列继续执行的 queued 任务数 */
+  requeued: number;
 }
 
 /** MCP 控制面接入信息（`collab_mcp_info`）：给 Trae / WorkBuddy 等 harness 直接复制。 */
@@ -222,14 +227,16 @@ export interface UseAiCollabResult {
     name?: string,
     tokenBudget?: number | null,
     concurrency?: number | null,
+    taskTimeoutSecs?: number | null,
   ) => Promise<void>;
-  /** 编辑已有房间：改名称 / 成员 / 主导 / 预算 / 并发，保留事件与任务历史 */
+  /** 编辑已有房间：改名称 / 成员 / 主导 / 预算 / 并发 / 超时，保留事件与任务历史 */
   updateRoom: (
     roomId: string,
     members: CollabMemberInput[],
     name?: string,
     tokenBudget?: number | null,
     concurrency?: number | null,
+    taskTimeoutSecs?: number | null,
   ) => Promise<void>;
   deleteRoom: (roomId: string) => Promise<void>;
   selectRoom: (roomId: string) => Promise<void>;
@@ -242,6 +249,8 @@ export interface UseAiCollabResult {
   replyPermission: (optionId: string | null) => Promise<void>;
   runDemo: () => Promise<void>;
   cancel: (assignmentId: string) => Promise<void>;
+  /** 恢复挂起（waiting）的任务：重新入队，占用房间并发槽 */
+  resume: (assignmentId: string) => Promise<void>;
 }
 
 export function useAiCollab(): UseAiCollabResult {
@@ -297,8 +306,8 @@ export function useAiCollab(): UseAiCollabResult {
         // 先恢复再读快照：否则上一进程遗留的 running 会一直显示为执行中。
         try {
           const recovery = await invoke<CollabRecovery>('collab_recover');
-          if (recovery.failedRunning + recovery.failedQueued > 0) {
-            console.info('[ai-collab] 已结束上次中断的任务:', recovery);
+          if (recovery.failedRunning + recovery.requeued > 0) {
+            console.info('[ai-collab] 上次遗留任务已处理:', recovery);
           }
         } catch {
           // 恢复失败不阻断房间加载；最坏情况是旧任务仍显示执行中。
@@ -506,6 +515,7 @@ export function useAiCollab(): UseAiCollabResult {
     name?: string,
     tokenBudget?: number | null,
     concurrency?: number | null,
+    taskTimeoutSecs?: number | null,
   ) => {
     setError(null);
     const agents = toAgents(members);
@@ -525,6 +535,8 @@ export function useAiCollab(): UseAiCollabResult {
         tokenBudget: tokenBudget && tokenBudget > 0 ? tokenBudget : null,
         // null / 0 = 不限并发，与后端 normalize_concurrency 一致。
         concurrency: concurrency && concurrency > 0 ? concurrency : null,
+        // 0 / null = 不限，交给各 harness 自己的超时兜底。
+        taskTimeoutSecs: taskTimeoutSecs && taskTimeoutSecs > 0 ? taskTimeoutSecs : null,
       });
       await refreshRooms();
       await selectRoom(room.id);
@@ -539,6 +551,7 @@ export function useAiCollab(): UseAiCollabResult {
     name?: string,
     tokenBudget?: number | null,
     concurrency?: number | null,
+    taskTimeoutSecs?: number | null,
   ) => {
     setError(null);
     const agents = toAgents(members);
@@ -556,6 +569,7 @@ export function useAiCollab(): UseAiCollabResult {
         tokenBudget: tokenBudget && tokenBudget > 0 ? tokenBudget : null,
         // 编辑弹窗总会给出当前值：0 表示显式改为「不限」；undefined = 不改。
         concurrency: typeof concurrency === 'number' ? concurrency : null,
+        taskTimeoutSecs: typeof taskTimeoutSecs === 'number' ? taskTimeoutSecs : null,
       });
       setRooms((prev) => prev.map((item) => (item.id === room.id ? room : item)));
       if (activeIdRef.current === room.id) setActiveRoom(room);
@@ -668,6 +682,18 @@ export function useAiCollab(): UseAiCollabResult {
     }
   }, []);
 
+  // 恢复挂起任务：后端只把状态置回 queued，真正执行交给调度器（要占并发槽）。
+  const resume = useCallback(async (assignmentId: string) => {
+    const roomId = activeIdRef.current;
+    if (!roomId) return;
+    try {
+      const updated = await invoke<CollabAssignment>('collab_resume', { roomId, assignmentId });
+      setAssignments((prev) => upsertAssignment(prev, updated));
+    } catch (err) {
+      setError(String(err));
+    }
+  }, []);
+
   return {
     harnesses,
     rooms,
@@ -691,5 +717,6 @@ export function useAiCollab(): UseAiCollabResult {
     replyPermission,
     runDemo,
     cancel,
+    resume,
   };
 }

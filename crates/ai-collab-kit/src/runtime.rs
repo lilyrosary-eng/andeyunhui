@@ -8,7 +8,8 @@
 //! P2 已接入 DeepSeek Harness：导入房间优先 ACP `session/resume`，失败回退 headless。
 //! 与 echo 共用同一套状态机和事件协议。
 //! P3 继续补（对齐 OpenMausBot 的 Assignment runtime）：
-//! 预算/深度限制、重启恢复、等待用户输入的 parked 状态。
+//! 预算/深度限制、重启恢复、等待用户输入的 parked 状态、房间并发槽 + 优先级队列、
+//! 基础设失败重试与房间级任务超时。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -75,6 +76,11 @@ pub fn normalize_concurrency(value: Option<u8>) -> u8 {
         None | Some(0) => 0,
         Some(value) => value.clamp(1, MAX_ROOM_CONCURRENCY),
     }
+}
+
+/// 房间级单任务超时：None / 0 = 不限，由各 harness 自己的超时兜底。
+pub fn room_task_timeout(room: &Room) -> Option<u64> {
+    room.task_timeout_secs.filter(|secs| *secs > 0)
 }
 
 /// 优先级归一：没传按普通，超出范围按最低。
@@ -501,6 +507,57 @@ pub fn park_assignment_core(
         "assignment.waiting",
         Some(text),
     )
+}
+
+/// 把挂起的任务重新放回队列（不直接置 running）。
+///
+/// 刻意不绕过调度器：恢复同样要占并发槽，否则一条挂起任务恢复后可以突破房间并发。
+/// 调用方拿到返回值后负责 `spawn_assignment`，让任务真正回到执行队列。
+pub fn requeue_assignment_core(
+    base: &Path,
+    room_id: &str,
+    assignment_id: &str,
+) -> Result<Assignment, String> {
+    let _guard = board_lock().lock().map_err(|_| "任务表锁已损坏".to_string())?;
+    let updated = store::with_write_lock(base, || -> Result<Assignment, String> {
+        let mut map = store::read_assignments(base);
+        let list = map
+            .get_mut(room_id)
+            .ok_or_else(|| "房间任务表不存在".to_string())?;
+        let task = list
+            .iter_mut()
+            .find(|a| a.id == assignment_id)
+            .ok_or_else(|| format!("任务不存在: {assignment_id}"))?;
+        if !matches!(
+            task.status,
+            AssignmentStatus::Waiting | AssignmentStatus::Queued
+        ) {
+            return Err(format!(
+                "任务当前状态为 {}，无法恢复",
+                task.status.as_str()
+            ));
+        }
+        task.status = AssignmentStatus::Queued;
+        // 挂起时写在 result 里的问题不再算结果；重新排队意味着从头计时。
+        task.result = None;
+        task.started_at = None;
+        task.duration_ms = None;
+        task.updated_at = now_ms();
+        let updated = task.clone();
+        store::write_assignments(base, &map)?;
+        Ok(updated)
+    })?;
+    append_event_core(
+        base,
+        room_id,
+        "assignment.queued",
+        Some(updated.assignee_id.clone()),
+        Some(updated.id.clone()),
+        Some("已重新排队，等待执行槽".to_string()),
+        Some(updated.clone()),
+        None,
+    )?;
+    Ok(updated)
 }
 
 /// 删除任务（只能删未在执行的）：从任务表移除，并在时间线留一条系统消息。
@@ -1722,6 +1779,13 @@ impl Drop for SlotGuard {
 
 /// 放进调度队列，随后按槽位出队。房间不限并发时这里等价于立刻执行。
 fn enqueue(app: AppHandle, base: PathBuf, room: Room, assignment: Assignment) {
+    // 排队提示要用到的字段先留一份：任务随后会被移进队列。
+    let assignment_id = assignment.id.clone();
+    let assignee_id = assignment.assignee_id.clone();
+    let room_id = room.id.clone();
+    let limit = room_concurrency(&room);
+    let app_cb = app.clone();
+    let base_cb = base.clone();
     let mut task = QueuedTask {
         app,
         base,
@@ -1731,6 +1795,8 @@ fn enqueue(app: AppHandle, base: PathBuf, room: Room, assignment: Assignment) {
     };
     match scheduler().lock() {
         Ok(mut sched) => {
+            // 同一个任务重复入队（恢复、重试）时先摘掉旧条目，避免被执行两次。
+            sched.queue.retain(|item| item.assignment.id != task.assignment.id);
             task.position = sched.next_position;
             sched.next_position += 1;
             sched.queue.push(task);
@@ -1749,6 +1815,28 @@ fn enqueue(app: AppHandle, base: PathBuf, room: Room, assignment: Assignment) {
         }
     }
     pump();
+
+    // 出队后仍在队列里 = 被房间并发挡住了。补一条可见原因，
+    // 否则看板上只有「排队」两个字，分不清是等外部认领还是等槽位。
+    let still_queued = scheduler()
+        .lock()
+        .map(|sched| sched.queue.iter().any(|item| item.assignment.id == assignment_id))
+        .unwrap_or(false);
+    if still_queued {
+        if let Some(limit) = limit {
+            let _ = emit_event(
+                &app_cb,
+                &base_cb,
+                &room_id,
+                "assignment.progress",
+                Some(assignee_id),
+                Some(assignment_id),
+                Some(format!("已排队，等待执行槽（房间并发上限 {limit}）")),
+                None,
+                Some(json!({ "queued": true, "limit": limit })),
+            );
+        }
+    }
 }
 
 /// 按房间槽位出队。入队、任务结束、房间并发改大三种时机都调它。
@@ -1778,9 +1866,33 @@ fn pump() {
     }
     for item in starts {
         let room_id = item.room.id.clone();
+        let timeout_secs = room_task_timeout(&item.room);
+        // 超时收尾要用到：先把这几份拷出来，run_assignment 会消费掉原来的。
+        let app_cb = item.app.clone();
+        let base_cb = item.base.clone();
+        let room_cb = item.room.clone();
+        let assignment_cb = item.assignment.clone();
         tauri::async_runtime::spawn(async move {
             let _slot = SlotGuard { room_id };
-            run_assignment(item.app, item.base, item.room, item.assignment).await;
+            let Some(secs) = timeout_secs else {
+                run_assignment(item.app, item.base, item.room, item.assignment).await;
+                return;
+            };
+            // 房间配了超时：到点丢掉执行 future（子进程 kill_on_drop），按失败留痕。
+            let result = tokio::time::timeout(
+                Duration::from_secs(secs),
+                run_assignment(item.app, item.base, item.room, item.assignment),
+            )
+            .await;
+            if result.is_err() && !is_cancelled(&assignment_cb.id) {
+                fail_assignment(
+                    &app_cb,
+                    &base_cb,
+                    &room_cb,
+                    &assignment_cb,
+                    &format!("任务超时（{secs}s），已中止执行"),
+                );
+            }
         });
     }
 }
@@ -1793,6 +1905,7 @@ pub fn pump_queue(base: &Path) {
         for item in sched.queue.iter_mut() {
             if let Some(room) = rooms.iter().find(|room| room.id == item.room.id) {
                 item.room.concurrency = room.concurrency;
+                item.room.task_timeout_secs = room.task_timeout_secs;
             }
         }
     }
@@ -1971,23 +2084,34 @@ pub fn cancel_assignment(
 #[serde(rename_all = "camelCase")]
 pub struct RecoverySummary {
     pub failed_running: usize,
+    /// 兼容旧字段：有并发队列后，queued 任务改为重新入队，这里恒为 0。
     pub failed_queued: usize,
     pub kept_external: usize,
+    /// 本应用执行、已重新放回队列的 queued 任务数。
+    pub requeued: usize,
+}
+
+/// 恢复结果：统计 + 需要由调用方（Tauri 层，带 AppHandle）重新入队的任务。
+#[derive(Debug, Default)]
+pub struct RecoveryOutcome {
+    pub summary: RecoverySummary,
+    pub requeue: Vec<(Room, Assignment)>,
 }
 
 /// 应用启动时清理上一进程遗留的任务。
 ///
 /// 为什么必须做：任务表只落盘状态，进程一退出执行器就不存在了；
-/// 不清理的话 `running` 会永远转圈，`queued` 也没人认领。
+/// 不清理的话 `running` 会永远转圈。
 ///
 /// 归属规则：
-/// - 本应用执行的成员（echo / dsh / 未知）→ 状态一律置 failed，写明「应用重启」；
-/// - `mcp` 成员由**外部进程**执行，应用重启不会中断它 → 保留原状态，交给对方继续处理。
-pub fn recover_stale_assignments(base: &Path) -> Result<RecoverySummary, String> {
+/// - 本应用执行的成员（echo / native / dsh / CLI）且 `running` → 置 failed，写明「应用重启」；
+/// - 本应用执行的 `queued` → 交给调用方重新入队。有并发上限后排队是常态，重启不该丢整队任务；
+/// - `mcp` / 信箱成员由**外部进程**执行，应用重启不会中断它 → 保留原状态。
+pub fn recover_stale_assignments(base: &Path) -> Result<RecoveryOutcome, String> {
     let rooms = store::read_rooms(base);
-    let mut summary = RecoverySummary::default();
+    let mut outcome = RecoveryOutcome::default();
     for (room_id, tasks) in store::read_assignments(base) {
-        let Some(room) = rooms.iter().find(|room| room.id == room_id) else {
+        let Some(room) = rooms.iter().find(|room| room.id == room_id).cloned() else {
             continue;
         };
         for task in tasks {
@@ -2001,29 +2125,29 @@ pub fn recover_stale_assignments(base: &Path) -> Result<RecoverySummary, String>
             if !matches!(task.status, AssignmentStatus::Running | AssignmentStatus::Queued) {
                 continue;
             }
-            if harness == crate::harness::MCP {
-                summary.kept_external += 1;
+            if matches!(harness, crate::harness::MCP | crate::harness::MAILBOX) {
+                outcome.summary.kept_external += 1;
                 continue;
             }
-            let reason = if task.status == AssignmentStatus::Running {
-                summary.failed_running += 1;
-                "应用重启，任务执行中断"
-            } else {
-                summary.failed_queued += 1;
-                "应用重启，任务未开始执行"
-            };
+            if task.status == AssignmentStatus::Queued {
+                outcome.summary.requeued += 1;
+                outcome.requeue.push((room.clone(), task));
+                continue;
+            }
+            outcome.summary.failed_running += 1;
+            let reason = "应用重启，任务执行中断".to_string();
             set_assignment_status_core(
                 base,
                 &room_id,
                 &task.id,
                 AssignmentStatus::Failed,
-                Some(reason.to_string()),
+                Some(reason.clone()),
                 "assignment.failed",
-                Some(reason.to_string()),
+                Some(reason),
             )?;
         }
     }
-    Ok(summary)
+    Ok(outcome)
 }
 
 pub fn snapshot(base: &Path, room: Room) -> Result<RoomSnapshot, String> {
@@ -2107,6 +2231,7 @@ mod tests {
             source: None,
             token_budget: None,
             concurrency: 0,
+            task_timeout_secs: None,
             created_at: 0,
             updated_at: 0,
         }
@@ -2158,13 +2283,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
-    /// 重启恢复只碰本应用执行的任务；外部 harness 的 running/queued 必须原样保留，
-    /// 否则用户重启宿主会把对方正在干的活误判为失败。
+    /// 重启恢复：running 只能判失败；queued 重新入队（有并发上限后排队是常态）；
+    /// 外部 harness（MCP / 信箱）的任务原样保留，否则会把对方正在干的活误判。
     #[test]
-    fn recovery_fails_local_stale_tasks_and_keeps_external() {
+    fn recovery_fails_running_and_requeues_local_queue() {
         let base = temp_base("recovery");
         // 恢复按 rooms.json 判定成员归属，测试里必须先把房间落盘。
-        let room = test_room("room_recovery");
+        let mut room = test_room("room_recovery");
+        room.agents.push(AgentSpec {
+            id: "ide".to_string(),
+            name: "IDE".to_string(),
+            harness_id: crate::harness::MAILBOX.to_string(),
+            persona: String::new(),
+            model: String::new(),
+            native_session_id: None,
+        });
         store::write_rooms(&base, &[room.clone()]).unwrap();
 
         let queued_local = create_assignment_core(&base, &room, None, "worker", "未开始")
@@ -2200,15 +2333,24 @@ mod tests {
             None,
         )
         .unwrap();
+        // 信箱任务已经投递到工作目录，重启后应保持 queued 等外部写回。
+        let queued_mailbox = create_assignment_core(&base, &room, None, "ide", "等 IDE 写回")
+            .unwrap()
+            .assignment;
 
-        let summary = recover_stale_assignments(&base).unwrap();
+        let outcome = recover_stale_assignments(&base).unwrap();
+        let summary = &outcome.summary;
         assert_eq!(summary.failed_running, 1);
-        assert_eq!(summary.failed_queued, 1);
-        assert_eq!(summary.kept_external, 2);
+        assert_eq!(summary.failed_queued, 0);
+        assert_eq!(summary.requeued, 1);
+        assert_eq!(summary.kept_external, 3);
+        assert_eq!(outcome.requeue.len(), 1);
+        assert_eq!(outcome.requeue[0].1.id, queued_local.id);
 
         let tasks = store::read_assignments(&base).remove(&room.id).unwrap();
         let find = |id: &str| tasks.iter().find(|task| task.id == id).cloned().unwrap();
-        assert_eq!(find(&queued_local.id).status, AssignmentStatus::Failed);
+        // queued 任务不再判死：等调用方重新入队。
+        assert_eq!(find(&queued_local.id).status, AssignmentStatus::Queued);
         assert_eq!(find(&running_local.id).status, AssignmentStatus::Failed);
         assert!(find(&running_local.id)
             .result
@@ -2216,6 +2358,7 @@ mod tests {
             .contains("应用重启"));
         assert_eq!(find(&queued_mcp.id).status, AssignmentStatus::Queued);
         assert_eq!(find(&running_mcp.id).status, AssignmentStatus::Running);
+        assert_eq!(find(&queued_mailbox.id).status, AssignmentStatus::Queued);
 
         let events = store::read_events(&base, &room.id, None).unwrap();
         assert_eq!(
@@ -2223,7 +2366,7 @@ mod tests {
                 .iter()
                 .filter(|event| event.kind == "assignment.failed")
                 .count(),
-            2
+            1
         );
         let _ = std::fs::remove_dir_all(base);
     }
@@ -2609,5 +2752,55 @@ mod tests {
         assert_eq!(find(&high.id).priority, PRIORITY_HIGH);
         assert_eq!(find(&weird.id).priority, PRIORITY_LOW);
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 挂起任务恢复走队列：状态回 queued、清掉旧问题、留一条重新排队事件；
+    /// 已结束的任务不能恢复。
+    #[test]
+    fn requeue_moves_waiting_back_to_queue() {
+        let base = temp_base("requeue");
+        let room = test_room("room_requeue");
+
+        let waiting = create_assignment_core(&base, &room, None, "worker", "需要补充信息")
+            .unwrap()
+            .assignment;
+        park_assignment_core(&base, &room.id, &waiting.id, "请提供 API Key").unwrap();
+
+        let requeued = requeue_assignment_core(&base, &room.id, &waiting.id).unwrap();
+        assert_eq!(requeued.status, AssignmentStatus::Queued);
+        assert!(requeued.result.is_none());
+        assert!(requeued.started_at.is_none());
+        assert!(store::read_events(&base, &room.id, None)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "assignment.queued"));
+
+        let done = create_assignment_core(&base, &room, None, "worker", "已完成")
+            .unwrap()
+            .assignment;
+        set_assignment_status_core(
+            &base,
+            &room.id,
+            &done.id,
+            AssignmentStatus::Completed,
+            Some("完成".to_string()),
+            "assignment.completed",
+            None,
+        )
+        .unwrap();
+        assert!(requeue_assignment_core(&base, &room.id, &done.id).is_err());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 任务超时：0 与 None 同义（由 harness 自己兜底），只有正数才生效。
+    #[test]
+    fn room_task_timeout_zero_means_unlimited() {
+        let mut room = test_room("room_timeout");
+        assert_eq!(room_task_timeout(&room), None);
+        room.task_timeout_secs = Some(0);
+        assert_eq!(room_task_timeout(&room), None);
+        room.task_timeout_secs = Some(90);
+        assert_eq!(room_task_timeout(&room), Some(90));
     }
 }

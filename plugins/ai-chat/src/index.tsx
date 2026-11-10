@@ -535,11 +535,17 @@ const Root = memo(function Root() {
         assignments={collab.assignments}
         busy={collab.busy}
         error={collab.error}
-        onCreateRoom={(members, name, tokenBudget, concurrency) =>
-          void collab.createRoomWithAgents(members, name, tokenBudget, concurrency)
+        onCreateRoom={(members, name, tokenBudget, concurrency, taskTimeoutSecs) =>
+          void collab.createRoomWithAgents(
+            members,
+            name,
+            tokenBudget,
+            concurrency,
+            taskTimeoutSecs,
+          )
         }
-        onUpdateRoom={(roomId, members, name, tokenBudget, concurrency) =>
-          void collab.updateRoom(roomId, members, name, tokenBudget, concurrency)
+        onUpdateRoom={(roomId, members, name, tokenBudget, concurrency, taskTimeoutSecs) =>
+          void collab.updateRoom(roomId, members, name, tokenBudget, concurrency, taskTimeoutSecs)
         }
         builderOpen={roomBuilderOpen}
         onOpenBuilder={() => setRoomBuilderOpen(true)}
@@ -556,6 +562,7 @@ const Root = memo(function Root() {
         onSend={(text, assigneeId) => void collab.send(text, assigneeId)}
         onDemo={() => void collab.runDemo()}
         onCancel={(id) => void collab.cancel(id)}
+        onResume={(id) => void collab.resume(id)}
       />
     ) : (
         <AiSubmodulePlaceholder mod={sub} />

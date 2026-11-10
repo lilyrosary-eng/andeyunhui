@@ -677,6 +677,7 @@ mod tests {
             source: None,
             token_budget: None,
             concurrency: 0,
+            task_timeout_secs: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -723,6 +724,7 @@ mod tests {
             source: None,
             token_budget: None,
             concurrency: 0,
+            task_timeout_secs: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -776,6 +778,7 @@ mod tests {
             source: None,
             token_budget: None,
             concurrency: 0,
+            task_timeout_secs: None,
             created_at: 0,
             updated_at: 0,
         };

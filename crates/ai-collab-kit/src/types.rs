@@ -70,6 +70,10 @@ pub struct Room {
     /// 不限制 harness 内部自己的子代理。缺省 0 保证旧房间文件仍能读。
     #[serde(default)]
     pub concurrency: u8,
+    /// 单任务超时（秒）；None / 0 = 不限，由各 harness 自己的超时兜底。
+    /// 到点后任务按失败收尾并留痕，子进程随 future 丢弃一起结束。
+    #[serde(default)]
+    pub task_timeout_secs: Option<u64>,
     pub created_at: i64,
     pub updated_at: i64,
 }

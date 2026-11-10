@@ -33,14 +33,16 @@ interface AiCollabViewProps {
     name: string,
     tokenBudget?: number | null,
     concurrency?: number | null,
+    taskTimeoutSecs?: number | null,
   ) => void;
-  /** 编辑当前房间：改名称 / 成员 / 主导 / 预算 / 并发，保留事件与任务历史 */
+  /** 编辑当前房间：改名称 / 成员 / 主导 / 预算 / 并发 / 超时，保留事件与任务历史 */
   onUpdateRoom?: (
     roomId: string,
     members: CollabMemberInput[],
     name: string,
     tokenBudget?: number | null,
     concurrency?: number | null,
+    taskTimeoutSecs?: number | null,
   ) => void;
   /** 新建房间弹窗开关由宿主控制：侧栏「新建房间」与空状态按钮走同一条路径 */
   builderOpen: boolean;
@@ -56,6 +58,8 @@ interface AiCollabViewProps {
   onSend: (text: string, assigneeId?: string) => void;
   onDemo: () => void;
   onCancel: (assignmentId: string) => void;
+  /** 恢复挂起的任务：重新入队，占用房间并发槽 */
+  onResume?: (assignmentId: string) => void;
   /** 等待用户确认的 ACP 权限请求 */
   permission?: CollabPermissionRequest | null;
   /** 回复权限请求；null 表示拒绝 */
@@ -218,10 +222,12 @@ function Board({
   assignments,
   room,
   onCancel,
+  onResume,
 }: {
   assignments: CollabAssignment[];
   room: CollabRoom;
   onCancel: (assignmentId: string) => void;
+  onResume?: (assignmentId: string) => void;
 }) {
   const ordered = useMemo(
     () => [...assignments].sort((a, b) => b.createdAt - a.createdAt),
@@ -232,12 +238,30 @@ function Board({
     () => assignments.reduce((sum, item) => sum + (item.usage?.totalTokens ?? 0), 0),
     [assignments],
   );
+  // 真正占并发槽的只有宿主自己执行的任务；外部认领（mcp / 信箱）不占槽，不能算进来。
+  const hostRunning = useMemo(
+    () =>
+      assignments.filter((item) => {
+        if (item.status !== 'running') return false;
+        const agent = room?.agents.find((member) => member.id === item.assigneeId);
+        return agent ? agent.harnessId !== 'mcp' && agent.harnessId !== 'mailbox' : true;
+      }).length,
+    [assignments, room],
+  );
   return (
     <aside className="hidden w-72 shrink-0 flex-col border-l border-neutral-200/70 bg-neutral-50/60 dark:border-stone-700/60 dark:bg-stone-900/40 lg:flex">
       <div className="flex items-center gap-2 border-b border-neutral-200/70 px-4 py-3 text-xs font-semibold text-neutral-600 dark:border-stone-700/60 dark:text-stone-300">
         <Network size={14} />
         任务看板
         <span className="ml-auto text-[10px] font-normal text-neutral-400">{assignments.length}</span>
+        {room.concurrency ? (
+          <span
+            className="text-[10px] font-normal text-neutral-400 dark:text-stone-500"
+            title={`同房间并发上限 ${room.concurrency}；超出的任务排队，按优先级与先后出队`}
+          >
+            并发 {hostRunning}/{room.concurrency}
+          </span>
+        ) : null}
         {totalTokens > 0 || room.tokenBudget ? (
           <span
             className="text-[10px] font-normal text-neutral-400 dark:text-stone-500"
@@ -288,6 +312,14 @@ function Board({
                     <span>{formatTokens(assignment.usage.totalTokens)} tokens</span>
                   ) : null}
                 </div>
+              )}
+              {assignment.status === 'waiting' && onResume && (
+                <button
+                  onClick={() => onResume(assignment.id)}
+                  className="btn-press mt-2 text-[11px] text-indigo-600 hover:text-indigo-500 dark:text-indigo-400"
+                >
+                  恢复执行
+                </button>
               )}
               {canCancel && (
                 <button
@@ -468,6 +500,7 @@ function RoomBuilderDialog({
   initialName = '',
   initialBudget = null,
   initialConcurrency = 0,
+  initialTimeout = null,
   title = '新建协作房间',
   submitLabel = '创建房间',
   onClose,
@@ -481,6 +514,8 @@ function RoomBuilderDialog({
   initialBudget?: number | null;
   /** 编辑态回填的并发上限；0 = 不限 */
   initialConcurrency?: number;
+  /** 编辑态回填的任务超时（秒）；空 = 不限 */
+  initialTimeout?: number | null;
   title?: string;
   submitLabel?: string;
   onClose: () => void;
@@ -489,6 +524,7 @@ function RoomBuilderDialog({
     name: string,
     tokenBudget: number | null,
     concurrency: number | null,
+    taskTimeoutSecs: number | null,
   ) => void;
 }) {
   // 编辑时把现有 harness 也保留在选项里（即便当前不可用），否则下拉显示会错位到第一项。
@@ -502,6 +538,10 @@ function RoomBuilderDialog({
   // 空 = 不限并发；填数字才排队（与多数 harness 的默认行为一致）。
   const [concurrency, setConcurrency] = useState(
     initialConcurrency && initialConcurrency > 0 ? String(initialConcurrency) : '',
+  );
+  // 空 = 不限超时，由各 harness 自己的超时兜底。
+  const [timeout, setTimeoutSecs] = useState(
+    initialTimeout && initialTimeout > 0 ? String(initialTimeout) : '',
   );
   const [members, setMembers] = useState<CollabMemberInput[]>(() =>
     initialMembers?.length
@@ -583,6 +623,20 @@ function RoomBuilderDialog({
             />
             <span className="mt-1 block text-[10px] leading-relaxed text-neutral-400 dark:text-stone-500">
               只限制宿主同时执行的任务数，超出的排队等候；不影响 harness 内部自己的子代理。
+            </span>
+          </label>
+
+          <label className="block">
+            <span className="font-medium text-neutral-700 dark:text-stone-200">任务超时（秒）</span>
+            <input
+              value={timeout}
+              onChange={(event) => setTimeoutSecs(event.target.value.replace(/[^\d]/g, ''))}
+              inputMode="numeric"
+              placeholder="留空不限；到点中止执行并按失败留痕"
+              className="mt-1 w-full rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-indigo-400 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-100"
+            />
+            <span className="mt-1 block text-[10px] leading-relaxed text-neutral-400 dark:text-stone-500">
+              留空时沿用各 harness 自己的超时（自有模型 300s；dsh / CLI 用配置值）。
             </span>
           </label>
 
@@ -687,12 +741,16 @@ function RoomBuilderDialog({
                 onClick={() => {
                   const parsed = Number(budget.trim());
                   const limit = Number(concurrency.trim());
+                  const timeoutParsed = Number(timeout.trim());
                   onCreate(
                     members,
                     name,
                     Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : null,
                     // 0 = 不限；编辑时 0 表示显式清除上限。
                     Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : 0,
+                    Number.isFinite(timeoutParsed) && timeoutParsed > 0
+                      ? Math.trunc(timeoutParsed)
+                      : 0,
                   );
                 }}
                 className="btn-press rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
@@ -728,6 +786,7 @@ export const AiCollabView = memo(function AiCollabView({
   onSend,
   onDemo,
   onCancel,
+  onResume,
   permission,
   onReplyPermission,
 }: AiCollabViewProps) {
@@ -763,8 +822,8 @@ export const AiCollabView = memo(function AiCollabView({
     <RoomBuilderDialog
       harnesses={harnesses ?? []}
       onClose={onCloseBuilder}
-      onCreate={(members, name, tokenBudget, concurrency) => {
-        onCreateRoom?.(members, name, tokenBudget, concurrency);
+      onCreate={(members, name, tokenBudget, concurrency, taskTimeoutSecs) => {
+        onCreateRoom?.(members, name, tokenBudget, concurrency, taskTimeoutSecs);
         onCloseBuilder();
       }}
     />
@@ -777,6 +836,7 @@ export const AiCollabView = memo(function AiCollabView({
       initialName={room.name}
       initialBudget={room.tokenBudget ?? null}
       initialConcurrency={room.concurrency ?? 0}
+      initialTimeout={room.taskTimeoutSecs ?? null}
       initialMembers={room.agents.map((agent) => ({
         id: agent.id,
         name: agent.name,
@@ -789,8 +849,8 @@ export const AiCollabView = memo(function AiCollabView({
       title="编辑房间"
       submitLabel="保存"
       onClose={() => setEditOpen(false)}
-      onCreate={(members, name, tokenBudget, concurrency) => {
-        onUpdateRoom?.(room.id, members, name, tokenBudget, concurrency);
+      onCreate={(members, name, tokenBudget, concurrency, taskTimeoutSecs) => {
+        onUpdateRoom?.(room.id, members, name, tokenBudget, concurrency, taskTimeoutSecs);
         setEditOpen(false);
       }}
     />
@@ -1045,7 +1105,7 @@ export const AiCollabView = memo(function AiCollabView({
         </footer>
       </div>
 
-      <Board assignments={assignments} room={room} onCancel={onCancel} />
+      <Board assignments={assignments} room={room} onCancel={onCancel} onResume={onResume} />
       {importDialog}
       {builder}
       {editDialog}
