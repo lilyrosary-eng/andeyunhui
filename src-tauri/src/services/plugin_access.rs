@@ -84,6 +84,9 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("station_remove_record", "fs.write"),
     ("station_delete_file", "fs.write"),
     ("station_relocate", "fs.write"),
+    // 取消移动本身不碰文件，但它是 relocate 的一部分（中止后会删掉目标位的半成品），
+    // 单独归一类反而会让权限判断更难解释。
+    ("station_move_cancel", "fs.write"),
     ("delete_image_cache", "fs.write"),
     ("delete_music_cache", "fs.write"),
     ("delete_video_cache", "fs.write"),

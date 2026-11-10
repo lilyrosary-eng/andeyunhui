@@ -14,6 +14,8 @@
 
 use super::*;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use crate::services::station::{
     self, DownloadRef, RemoveOutcome, StationEntry, StationList,
 };
@@ -83,8 +85,9 @@ pub async fn station_remove_record(
         if entry.is_managed() {
             Ok::<_, String>(station::remove_record(&app_data, &entry))
         } else {
-            // 引用条目：只删索引/任务记录。这里刻意不调 station::remove_record，
-            // 因为那个函数对 referenced 是 no-op（安全兜底），而我们要真正「忘掉」它。
+            // 引用条目分两种来源，处理完全不同：
+            // - 下载任务：记录在 download-kit 的库里，`forget` 只删库不删文件；
+            // - 索引条目（曾经托管、后来被移出 dropzone）：由 remove_record 删索引。
             match &entry.download_id {
                 Some(dl_id) => {
                     download_kit::commands::manager(&app_bg)?.forget(dl_id)?;
@@ -94,7 +97,8 @@ pub async fn station_remove_record(
                         notice: None,
                     })
                 }
-                None => Err(format!("这条记录没有可移除的来源: {}", entry.name)),
+                // 交给 remove_record：它会按"引用条目且无 download_id"分支删索引条目
+                None => Ok(station::remove_record(&app_data, &entry)),
             }
         }
     })
@@ -139,13 +143,45 @@ pub async fn station_delete_file(app: tauri::AppHandle, id: String) -> Result<()
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelocateResult {
-    /// 最终落点绝对路径。前端以它为准提示用户（跨卷移动可能因同名冲突微调）。
+    /// 最终落点绝对路径。前端以它为准提示用户。
     pub path: String,
     /// 降级提示（如路径回写失败）。成功且一致时为 None。
     pub notice: Option<String>,
+    /// 是否走了跨卷「读一块写一块」路径（前端据此决定要不要提示耗时）。
+    pub streamed: bool,
+}
+
+/// 当前移动的取消开关。
+///
+/// 全局单槽而不是按任务 id 索引：移动是用户一次一个的交互动作，
+/// 同时搬两个几十 GB 的文件只会让两块盘一起卡，没有真实收益。
+fn move_cancel_slot() -> &'static Mutex<Option<Arc<AtomicBool>>> {
+    static SLOT: OnceLock<Mutex<Option<Arc<AtomicBool>>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// 取消正在进行的移动。中止后目标位置的半成品会被删掉。
+///
+/// 返回 `true` 表示确实有一个移动在跑并已被要求停止；`false` 表示当前没有移动。
+/// 不用报错表达"没什么可取消的"——用户连点两下取消不该看到红字。
+#[tauri::command]
+pub fn station_move_cancel() -> Result<bool, String> {
+    let slot = move_cancel_slot();
+    let guard = slot.lock().map_err(|_| "移动取消槽损坏".to_string())?;
+    match guard.as_ref() {
+        Some(flag) => {
+            flag.store(true, Ordering::Relaxed);
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 /// 改名 / 移动。`new_path` 必须是绝对路径（由系统保存/选择对话框给出）。
+///
+/// 同卷是原子的 `rename`（瞬时）；跨卷才会走流式复制 —— 那条路径会通过
+/// `station-move-progress` 持续上报 `{ id, done, total }`，可以用
+/// `station_move_cancel` 中止。
 #[tauri::command]
 pub async fn station_relocate(
     app: tauri::AppHandle,
@@ -160,23 +196,63 @@ pub async fn station_relocate(
         return Err("目标路径必须是绝对路径".to_string());
     }
 
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let slot = move_cancel_slot();
+        let mut guard = slot.lock().map_err(|_| "移动取消槽损坏".to_string())?;
+        if guard.is_some() {
+            return Err("已有移动在进行中，请等它结束或先取消".to_string());
+        }
+        *guard = Some(cancel.clone());
+    }
+
     let app_bg = app.clone();
+    let emit_id = id.clone();
+    // 闭包是 move 的，所以给后台线程一份克隆；外面留着 `cancel` 用于收尾时比对同一把锁。
+    let cancel_bg = cancel.clone();
     let result = tokio::task::spawn_blocking(move || {
         let app_data = app_data_of(&app_bg)?;
         let (downloads, _) = collect_downloads(&app_bg);
         let entry = station::resolve(&app_data, &downloads, &id)?;
-        let landed = station::relocate(&app_data, &entry, &target)?;
+
+        // 进度节流：4 MiB 一块，30 GB 就是七千多次回调。全发事件会把
+        // IPC 和前端渲染打满，所以按「百分比变化且间隔 ≥200ms」才发一次。
+        let mut last_pct: i64 = -1;
+        let mut last_at = std::time::Instant::now();
+        let app_evt = app_bg.clone();
+        let mut cb = |done: u64, total: u64| {
+            let pct = if total == 0 {
+                100
+            } else {
+                (done.saturating_mul(100) / total) as i64
+            };
+            let now = std::time::Instant::now();
+            if pct == last_pct && now.duration_since(last_at).as_millis() < 200 {
+                return;
+            }
+            last_pct = pct;
+            last_at = now;
+            let _ = app_evt.emit(
+                "station-move-progress",
+                serde_json::json!({ "id": emit_id, "done": done, "total": total }),
+            );
+        };
+        let mut ctx = station::MoveCtx {
+            cancel: Some(&cancel_bg),
+            progress: Some(&mut cb),
+        };
+        let landed = station::relocate_with(&app_data, &entry, &target, &mut ctx)?;
 
         // 引用了下载任务的文件，路径变了必须回写任务库：
         // `save_path` 是断点续传/重试的锚点，不回写就等于让任务记录指向空气。
         let mut notice = None;
         if let Some(dl_id) = entry.download_id.as_deref() {
-            let filename = Path::new(&landed)
+            let filename = Path::new(&landed.path)
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             if let Err(e) =
-                download_kit::commands::manager(&app_bg)?.relocate(dl_id, &landed, &filename)
+                download_kit::commands::manager(&app_bg)?.relocate(dl_id, &landed.path, &filename)
             {
                 // 文件已经移到位了，这时回滚文件比留着不一致的记录更糟。
                 // 显式告诉用户记录没跟上，让他知道「重试」会下载到旧位置。
@@ -186,13 +262,26 @@ pub async fn station_relocate(
             }
         }
         Ok::<_, String>(RelocateResult {
-            path: landed,
+            path: landed.path,
             notice,
+            streamed: landed.streamed,
         })
     })
-    .await
-    .map_err(|e| format!("station_relocate 任务失败: {e}"))??;
+    .await;
 
+    // 无论成败都要释放取消槽，否则下一次移动会被"已有移动在进行中"永久挡住。
+    // 只清自己放进去的那把，避免误清掉别人刚设置的。
+    if let Ok(mut slot) = move_cancel_slot().lock() {
+        if slot
+            .as_ref()
+            .map(|c| Arc::ptr_eq(c, &cancel))
+            .unwrap_or(false)
+        {
+            *slot = None;
+        }
+    }
+
+    let result = result.map_err(|e| format!("station_relocate 任务失败: {e}"))??;
     let _ = app.emit("dropzone-changed", ());
     Ok(result)
 }

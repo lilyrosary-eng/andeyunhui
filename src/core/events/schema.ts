@@ -20,6 +20,8 @@ export const EVENTS = {
     // download-kit 的任务状态广播。中转站把它当作"列表可能需要刷新"的信号：
     // 下载落盘之后，那个文件会以 referenced 条目出现在中转站里。
     downloadTaskState: 'download-kit:state',
+    // 跨卷移动的进度（同卷改名是即时的，不会有这个事件）
+    stationMoveProgress: 'station-move-progress',
   },
   screenshot: { start: 'screenshot-start', ready: 'screenshot-ready', windows: 'screenshot-windows', noteImport: 'screenshot-note-import', open: 'open-screenshot' },
   recorder: {

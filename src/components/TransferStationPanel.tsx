@@ -1,10 +1,10 @@
 import { useSyncExternalStore, useCallback, useEffect, useRef, useState } from 'react';
-import { FileText, File, Trash2, Inbox, ExternalLink, Download, Save, ScanText, Languages, Loader2, X, FileDown, AlertTriangle } from 'lucide-react';
+import { FileText, File, Trash2, Inbox, ExternalLink, Download, Save, ScanText, Languages, Loader2, X, FileDown, AlertTriangle, FolderInput, Ban } from 'lucide-react';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { save, open } from '@tauri-apps/plugin-dialog';
 import { join } from '@tauri-apps/api/path';
-import { api, type ImportedFile, type StationEntry } from '@/lib/api';
+import { api, type ImportedFile, type StationEntry, type StationMoveProgress } from '@/lib/api';
 import { useI18n, t as i18nT } from '@/lib/i18n';
 import {
   SOURCE_LANGS,
@@ -143,6 +143,8 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
   const [files, setFiles] = useState<StationFile[]>([]);
   /** 后端降级提示：下载记录读取失败、条目已丢失、索引写不进去…… 必须显示，不能吞 */
   const [stationNotices, setStationNotices] = useState<string[]>([]);
+  /** 正在进行的跨卷移动（同卷改名是瞬时的，不会出现在这里） */
+  const [moving, setMoving] = useState<{ id: string; name: string; done: number; total: number } | null>(null);
   const [loading, setLoading] = useState(false);
   // 悬停时预取图片字节仅用于显示缩略图；原生拖出由 Rust 端 DoDragDrop 完成，无需前端字节缓存
   const [imgUrls, setImgUrls] = useState<Record<string, string>>({});
@@ -188,10 +190,17 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
     const unDl = listen<{ status?: string }>(EVENTS.transfer.downloadTaskState, (e) => {
       if (e.payload?.status === 'completed') emitDropzoneChange();
     });
+    // 跨卷移动进度。同卷改名是瞬时 rename，不会有这个事件，所以 UI 只在
+    // 真收到进度时才显示进度条——不预先弹一个"0%"的假进度条。
+    const unMove = listen<StationMoveProgress>(EVENTS.transfer.stationMoveProgress, (e) => {
+      const p = e.payload;
+      setMoving((prev) => (prev && prev.id === p.id ? { ...prev, done: p.done, total: p.total } : prev));
+    });
     return () => {
       void unSaving.then((fn) => fn());
       void unDone.then((fn) => fn());
       void unDl.then((fn) => fn());
+      void unMove.then((fn) => fn());
     };
   }, []);
 
@@ -506,6 +515,43 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
     [load, tr],
   );
 
+  /**
+   * 移动到另一个目录（选目录 → 拼目标文件名 → 后端搬）。
+   *
+   * 同卷是瞬时 rename；跨卷后端会走流式复制并通过事件报进度，这里显示进度条 +
+   * 取消按钮。**移动不会让条目消失**：索引只更新路径与所有权（移出 dropzone 后
+   * 变成「仅登记」），用户只是换了个位置。
+   */
+  const handleMove = useCallback(
+    async (file: StationFile) => {
+      if (file.status === 'missing' || moving) return;
+      const dir = await open({ directory: true, title: tr('transfer.pickMoveDir') }).catch(() => null);
+      if (!dir || typeof dir !== 'string') return;
+      const sep = file.absolutePath.includes('\\') ? '\\' : '/';
+      const target = `${dir}${sep}${file.originalName}`;
+      setMoving({ id: file.id, name: file.originalName, done: 0, total: file.size });
+      try {
+        const res = await api.stationRelocate(file.id, target);
+        if (res.notice) setDragNotice(res.notice);
+      } catch (err) {
+        const msg = String(err);
+        setDragNotice(
+          msg.includes('取消') ? tr('transfer.moveCanceled') : `${tr('transfer.moveFailed')}：${msg}`,
+        );
+      } finally {
+        setMoving(null);
+        load();
+      }
+    },
+    [load, moving, tr],
+  );
+
+  const handleCancelMove = useCallback(() => {
+    api
+      .stationMoveCancel()
+      .catch((err) => setDragNotice(`取消失败：${String(err)}`));
+  }, []);
+
   // 复选模式切换：退出时清空已选
   const toggleSelectMode = useCallback(() => {
     setSelectionMode((prev) => {
@@ -732,6 +778,36 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
           </div>
         ) : (
           <div className="space-y-2 overflow-y-auto flex-1 min-h-0 pr-1">
+            {/* 跨卷移动进度：只在真收到进度时才出现（同卷改名是瞬时的，不该弹一个 0%） */}
+            {moving && (
+              <div className="glass-panel p-3 flex items-center gap-3">
+                <Loader2 size={16} className="animate-spin text-[var(--element-bg)] flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">
+                    {tr('transfer.moving', { name: moving.name })}
+                  </div>
+                  <div className="mt-1 h-1.5 rounded-full bg-neutral-200/70 dark:bg-stone-700 overflow-hidden">
+                    <div
+                      className="h-full bg-[var(--element-bg)] transition-[width] duration-200"
+                      style={{ width: `${moving.total > 0 ? Math.min(100, Math.round((moving.done / moving.total) * 100)) : 0}%` }}
+                    />
+                  </div>
+                  <div className="text-xs text-neutral-400 dark:text-stone-500 mt-1">
+                    {formatSize(moving.done)} / {formatSize(moving.total)}
+                    {moving.total > 0 ? ` · ${Math.round((moving.done / moving.total) * 100)}%` : ''}
+                    {' · '}
+                    {tr('transfer.moveStreamHint')}
+                  </div>
+                </div>
+                <button
+                  onClick={handleCancelMove}
+                  className="btn-press p-1.5 rounded-lg text-red-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors flex-shrink-0"
+                  title={tr('transfer.moveCancel')}
+                >
+                  <Ban size={15} />
+                </button>
+              </div>
+            )}
             {/* 后端降级提示（下载记录读不到 / 条目已丢失 / 索引写不进去）——
                 这类事不能让用户自己猜"为什么列表少了一半" */}
             {stationNotices.length > 0 && (
@@ -863,6 +939,17 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
                         title={tr('transfer.saveTo')}
                       >
                         <Save size={15} />
+                      </button>
+                    )}
+                    {/* 「移动到…」= 真的搬文件；和上面「保存」的复制语义不是一回事 */}
+                    {!missing && (
+                      <button
+                        onClick={() => handleMove(file)}
+                        disabled={!!moving}
+                        className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        title={tr('transfer.moveTo')}
+                      >
+                        <FolderInput size={15} />
                       </button>
                     )}
                     {isImageFile(file.extension) && (

@@ -1952,6 +1952,7 @@ fn main() {
             station_remove_record,
             station_delete_file,
             station_relocate,
+            station_move_cancel,
             // ========== 核心：存档快照 ==========
             archive_snapshot,
             list_archives,

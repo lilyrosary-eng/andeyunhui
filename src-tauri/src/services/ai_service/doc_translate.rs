@@ -228,25 +228,35 @@ pub(crate) fn should_translate(s: &str) -> bool {
     t.chars().any(|c| c.is_alphabetic())
 }
 
-/// 段落文本规范化：段内换行/制表符压成空格。
+/// 段落文本规范化：段内**所有**空白（换行/制表/连续空格）压成单个空格。
 ///
 /// `<w:br/>` 在解析时被拼成了 `\n`，但它在原文档里通常只是排版换行，
 /// 直接送进翻译内核会被当成「段落分隔」切成两个 segment，行数就不守恒了。
+///
+/// ★ 只折叠 ASCII 空白，**不碰全角空格 U+3000**：它在中文排版里是有效字符
+///   （首行缩进就靠它），`char::is_whitespace()` 会把它一起吃掉，那是错的。
+///
+/// 踩过的坑：第一版只对 `\n`/`\t` 做去重，没有折叠**原本就存在**的连续空格，
+/// 于是 `"  a  \n b "` 出来是 `"a   b"` 而不是 `"a b"`。
+/// 单元测试一直挂在那里，但本机 `cargo test` 跑不起来（缺 `test-manifest`
+/// feature），挂了整轮没人发现。
 pub(crate) fn normalize_para_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_space = false;
     for c in s.chars() {
-        if c == '\n' || c == '\r' || c == '\t' {
-            if !prev_space && !out.is_empty() {
+        if c == ' ' || c == '\n' || c == '\r' || c == '\t' {
+            // 只有在「已经写过内容」且「上一个不是空白」时才落一个空格，
+            // 等于把开头空白丢掉、连续空白折成一个。
+            if !out.is_empty() && !prev_space {
                 out.push(' ');
-                prev_space = true;
             }
+            prev_space = true;
         } else {
             out.push(c);
-            prev_space = c == ' ';
+            prev_space = false;
         }
     }
-    out.trim().to_string()
+    out.trim_end().to_string()
 }
 
 /// 把「段落 → 译文」变成一组**文本区间替换指令** `(起点, 终点, 新文本)`。
@@ -778,6 +788,15 @@ mod tests {
     fn 规范化_段内换行压成空格() {
         assert_eq!(normalize_para_text("a\nb\tc"), "a b c");
         assert_eq!(normalize_para_text("  a  \n b "), "a b");
+        // 连续空白（含换行混排）必须折叠成一个
+        assert_eq!(normalize_para_text("a \n\t b"), "a b");
+    }
+
+    /// 全角空格是中文排版的**有效字符**（首行缩进），不能被当成空白折叠掉。
+    /// 这条防的是「用 `char::is_whitespace()` 一把梭」的改法。
+    #[test]
+    fn 规范化_保留全角空格() {
+        assert_eq!(normalize_para_text("\u{3000}\u{3000}第一段"), "\u{3000}\u{3000}第一段");
     }
 
     #[test]

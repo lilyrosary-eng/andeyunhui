@@ -220,6 +220,15 @@ export interface StationRemoveOutcome {
 export interface StationRelocateResult {
   path: string;
   notice?: string | null;
+  /** 是否走了跨卷的流式复制（而不是瞬时改名）—— 据此决定要不要提示耗时。 */
+  streamed: boolean;
+}
+
+/** 移动进度（`station-move-progress` 事件负载）。 */
+export interface StationMoveProgress {
+  id: string;
+  done: number;
+  total: number;
 }
 
 // 封装 API 调用
@@ -469,6 +478,11 @@ export const api = {
   /** 改名/移动。`newPath` 必须是绝对路径，返回实际落点。 */
   stationRelocate: (id: string, newPath: string) =>
     invoke<StationRelocateResult>('station_relocate', { id, newPath }),
+  /**
+   * 取消正在进行的移动（只有跨卷搬大文件才需要）。
+   * 返回 true 表示确实中止了一个进行中的移动。
+   */
+  stationMoveCancel: () => invoke<boolean>('station_move_cancel'),
 
   // ===== 通用存档（快照）=====
   archiveSnapshot: (
