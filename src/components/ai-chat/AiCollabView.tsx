@@ -14,6 +14,7 @@ import type {
   CollabMemberInput, CollabPermissionRequest, CollabRoom, DshSessionSummary,
 } from '@/core/ai/aiCollab';
 import { DshSessionImportDialog } from '@/components/ai-chat/DshSessionImportDialog';
+import { ApprovalBar } from '@/components/ai-chat/ApprovalBar';
 import { CollabCanvas } from '@/components/ai-chat/CollabCanvas';
 import { agentMeta } from '@/components/ai-chat/collabDisplay';
 import { TurnRail } from '@/components/chat/TurnRail';
@@ -883,31 +884,18 @@ export const AiCollabView = memo(function AiCollabView({
         )}
 
         {permission && (
-          <div className="mx-5 mb-1 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2.5">
-            <div className="text-xs font-medium text-amber-800 dark:text-amber-200">
-              需要你确认：{permission.title}
-            </div>
-            <div className="mt-1 text-[11px] leading-relaxed text-amber-700/80 dark:text-amber-300/80">
-              {permission.toolKind ? `类型：${permission.toolKind} · ` : ''}
-              agent 正在等待你的选择，超时按拒绝处理。
-            </div>
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              {permission.options.map((option) => (
-                <button
-                  key={option.optionId}
-                  onClick={() => onReplyPermission?.(option.optionId)}
-                  className="btn-press rounded-lg border border-amber-500/50 bg-white/70 px-3 py-1 text-[11px] font-medium text-amber-800 hover:bg-white dark:bg-stone-800/60 dark:text-amber-200"
-                >
-                  {option.name}
-                </button>
-              ))}
-              <button
-                onClick={() => onReplyPermission?.(null)}
-                className="btn-press rounded-lg border border-neutral-300 px-3 py-1 text-[11px] text-neutral-600 hover:bg-neutral-100 dark:border-stone-600 dark:text-stone-300 dark:hover:bg-stone-800"
-              >
-                拒绝
-              </button>
-            </div>
+          <div className="mx-5 mb-1">
+            {/* 与 Agent 工具审批共用同一个确认条组件，只是动作来自 ACP 选项。 */}
+            <ApprovalBar
+              title={`需要你确认：${permission.title}`}
+              detail={`${permission.toolKind ? `类型：${permission.toolKind} · ` : ''}agent 正在等待你的选择，超时按拒绝处理。`}
+              options={permission.options.map((option) => ({
+                id: option.optionId,
+                label: option.name,
+              }))}
+              onSelect={(optionId) => onReplyPermission?.(optionId)}
+              onReject={() => onReplyPermission?.(null)}
+            />
           </div>
         )}
 

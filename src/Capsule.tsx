@@ -30,6 +30,8 @@ import { api } from '@/lib/api';
 import CapsuleChat from '@/components/capsule/CapsuleChat';
 import CapsuleAide from '@/components/capsule/CapsuleAide';
 import CapsuleSecAide from '@/components/capsule/CapsuleSecAide';
+// Agent 工具审批：浮岛窗口根节点也挂一条，AI 编程/攻防的 agent 请求同样能处理。
+import { ToolApprovalHost } from '@/components/ai-chat/ToolApprovalHost';
 import CapsuleResource from '@/components/capsule/CapsuleResource';
 import {
   CAPSULE_W, CAPSULE_H, EXPANDED_W, EXPANDED_H, CHAT_H, AIDE_W, AIDE_H, SEARCH_H, TRANSFER_H, RESOURCE_H, TOP_Y, GOLD,
@@ -1419,6 +1421,8 @@ export default function Capsule() {
           {expanded && resourceOpen && panelReady && <CapsuleResource />}
         </div>
       </div>
+      {/* Agent 工具审批条：与主窗口共用同一事件源，任一处处理都会同步收起 */}
+      <ToolApprovalHost />
     </div>
   );
 }

@@ -734,12 +734,19 @@ async fn run_agent(
 
 /// 前端回调用以决定一次待审批的 Agent 操作：approved=true 放行，false 拒绝。
 /// approval_id 来自 ai-agent-approval 事件。
+///
+/// 处理完补发 `ai-agent-approval-resolved`：主窗口与浮岛可能同时挂着一个确认条，
+/// 没有这条广播，另一个窗口会一直挂到 120s 超时。
 #[tauri::command]
-pub async fn ai_agent_approve(approval_id: String, approved: bool) -> Result<(), String> {
+pub async fn ai_agent_approve(app: AppHandle, approval_id: String, approved: bool) -> Result<(), String> {
     let pending = approval_store()
         .lock()
         .map_err(|_| "审批存储锁获取失败".to_string())?
         .remove(&approval_id);
+    let _ = app.emit(
+        "ai-agent-approval-resolved",
+        serde_json::json!({ "approvalId": approval_id, "approved": approved }),
+    );
     match pending {
         Some(p) => {
             let _ = p.sender.send(approved);
