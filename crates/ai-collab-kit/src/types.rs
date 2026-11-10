@@ -90,6 +90,20 @@ impl AssignmentStatus {
     }
 }
 
+/// 一次任务的模型用量。
+/// 目前只有自有 harness（native）能从响应里拿到；dsh / CLI / 信箱等外部 harness
+/// 不回报用量时保持 None，界面显示「未知」而不是填 0 假装统计过。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskUsage {
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+}
+
 /// 一次任务分派。P0 只做单层与一层子任务，`parent_id` 已为 P1 的树保留。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +119,15 @@ pub struct Assignment {
     /// serde default 保证旧任务表仍能读。
     #[serde(default)]
     pub claimed_by: Option<String>,
+    /// 真正开始执行的时刻（状态首次进入 running）。用于算 durationMs。
+    #[serde(default)]
+    pub started_at: Option<i64>,
+    /// 执行耗时（毫秒）；排队时间不计入。旧任务没有这个字段时为空。
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// 模型用量；外部 harness 不回报时为空。
+    #[serde(default)]
+    pub usage: Option<TaskUsage>,
     pub created_at: i64,
     pub updated_at: i64,
 }

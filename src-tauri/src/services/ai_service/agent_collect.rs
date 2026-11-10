@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use tauri::AppHandle;
 
-use crate::services::ai_service::agent_turn::{build_agent_body, parse_agent_message};
+use crate::services::ai_service::agent_turn::{build_agent_body, parse_agent_message, AgentUsage};
 use crate::services::ai_service::ai_profile::{
     compose_effective_system, compose_persona_system, ensure_api_key, load_config, resolve_target,
 };
@@ -38,8 +38,14 @@ pub struct CollectRequest {
     pub plan_scope: String,
 }
 
-/// 跑一轮完整的「模型 → 工具 → 模型」循环，返回最终文本。
-pub async fn run_collect(app: AppHandle, request: CollectRequest) -> Result<String, String> {
+/// 一次工具循环的结果：最终文本 + 累计用量（端点不返回 usage 时为 None）。
+pub struct CollectOutput {
+    pub text: String,
+    pub usage: Option<AgentUsage>,
+}
+
+/// 跑一轮完整的「模型 → 工具 → 模型」循环，返回最终文本与累计用量。
+pub async fn run_collect(app: AppHandle, request: CollectRequest) -> Result<CollectOutput, String> {
     let config = load_config(&app);
     let cfg = resolve_target(&config, request.profile_id.as_deref());
     ensure_api_key(&app, &request.request_id, &cfg)?;
@@ -78,6 +84,8 @@ pub async fn run_collect(app: AppHandle, request: CollectRequest) -> Result<Stri
 
     let client = reqwest::Client::new();
     let mut final_text = String::new();
+    // 多轮工具调用会分别产生 usage，按轮累加才是这次任务真实消耗。
+    let mut usage_total: Option<AgentUsage> = None;
     for _ in 0..MAX_ROUNDS {
         let tools = registered_tools();
         let (body, _thinking) = build_agent_body(&cfg, messages.clone(), tool_schemas_for_api(), None);
@@ -98,6 +106,12 @@ pub async fn run_collect(app: AppHandle, request: CollectRequest) -> Result<Stri
         }
         let payload: Value = resp.json().await.map_err(|e| format!("解析响应失败: {e}"))?;
         let turn = parse_agent_message(&payload)?;
+        if let Some(usage) = turn.usage {
+            let total = usage_total.get_or_insert_with(AgentUsage::default);
+            total.prompt_tokens += usage.prompt_tokens;
+            total.completion_tokens += usage.completion_tokens;
+            total.total_tokens += usage.total_tokens;
+        }
 
         if turn.tool_calls.is_empty() {
             final_text.push_str(&turn.content);
@@ -148,5 +162,8 @@ pub async fn run_collect(app: AppHandle, request: CollectRequest) -> Result<Stri
     if text.is_empty() {
         return Err(format!("Agent 在 {MAX_ROUNDS} 轮内未返回文本"));
     }
-    Ok(text.to_string())
+    Ok(CollectOutput {
+        text: text.to_string(),
+        usage: usage_total,
+    })
 }

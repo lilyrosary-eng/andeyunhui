@@ -16,7 +16,7 @@ import type {
 import { DshSessionImportDialog } from '@/components/ai-chat/DshSessionImportDialog';
 import { ApprovalBar } from '@/components/ai-chat/ApprovalBar';
 import { CollabCanvas } from '@/components/ai-chat/CollabCanvas';
-import { agentMeta } from '@/components/ai-chat/collabDisplay';
+import { agentMeta, formatDuration, formatTokens } from '@/components/ai-chat/collabDisplay';
 import { TurnRail } from '@/components/chat/TurnRail';
 
 interface AiCollabViewProps {
@@ -216,12 +216,25 @@ function Board({
     () => [...assignments].sort((a, b) => b.createdAt - a.createdAt),
     [assignments],
   );
+  // 房间累计 token：只统计外部回报过用量的任务，没回报的按未知处理（不按 0 计）。
+  const totalTokens = useMemo(
+    () => assignments.reduce((sum, item) => sum + (item.usage?.totalTokens ?? 0), 0),
+    [assignments],
+  );
   return (
     <aside className="hidden w-72 shrink-0 flex-col border-l border-neutral-200/70 bg-neutral-50/60 dark:border-stone-700/60 dark:bg-stone-900/40 lg:flex">
       <div className="flex items-center gap-2 border-b border-neutral-200/70 px-4 py-3 text-xs font-semibold text-neutral-600 dark:border-stone-700/60 dark:text-stone-300">
         <Network size={14} />
         任务看板
         <span className="ml-auto text-[10px] font-normal text-neutral-400">{assignments.length}</span>
+        {totalTokens > 0 && (
+          <span
+            className="text-[10px] font-normal text-neutral-400 dark:text-stone-500"
+            title="本房间已回报用量的任务累计 token"
+          >
+            {formatTokens(totalTokens)} tok
+          </span>
+        )}
       </div>
       <div className="flex-1 space-y-2 overflow-y-auto p-3">
         {ordered.length === 0 && (
@@ -253,6 +266,14 @@ function Board({
               {assignment.result && (
                 <div className="mt-1.5 line-clamp-3 rounded-lg bg-emerald-500/5 px-2 py-1 text-[11px] text-emerald-700 dark:text-emerald-300">
                   {assignment.result}
+                </div>
+              )}
+              {(assignment.durationMs != null || assignment.usage?.totalTokens) && (
+                <div className="mt-1.5 flex items-center gap-2 text-[10px] text-neutral-400 dark:text-stone-500">
+                  {assignment.durationMs != null && <span>耗时 {formatDuration(assignment.durationMs)}</span>}
+                  {assignment.usage?.totalTokens ? (
+                    <span>{formatTokens(assignment.usage.totalTokens)} tokens</span>
+                  ) : null}
                 </div>
               )}
               {canCancel && (

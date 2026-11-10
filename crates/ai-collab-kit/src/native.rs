@@ -16,6 +16,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
+use crate::types::TaskUsage;
+
+/// 宿主返回的一次生成结果：文本 + 可选用量。
+/// 外部 harness 不回报用量时是 None；native 从响应 usage 字段取。
+pub struct NativeOutput {
+    pub text: String,
+    pub usage: Option<TaskUsage>,
+}
+
 /// 一次自有模型调用的输入。
 #[derive(Debug, Clone)]
 pub struct NativeRequest {
@@ -30,7 +39,7 @@ pub struct NativeRequest {
     pub prompt: String,
 }
 
-pub type NativeFuture = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
+pub type NativeFuture = Pin<Box<dyn Future<Output = Result<NativeOutput, String>> + Send>>;
 
 /// 宿主注入的一次性文本生成能力（非流式）。
 pub trait NativeRunner: Send + Sync {
@@ -71,7 +80,10 @@ mod tests {
             let calls = self.calls.clone();
             Box::pin(async move {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Ok(format!("native:{}", request.prompt))
+                Ok(NativeOutput {
+                    text: format!("native:{}", request.prompt),
+                    usage: None,
+                })
             })
         }
     }
@@ -96,7 +108,8 @@ mod tests {
         assert!(!register(Arc::new(FakeRunner { calls: calls.clone() })));
 
         let text = tauri::async_runtime::block_on(run(request()).unwrap()).unwrap();
-        assert_eq!(text, "native:hello");
+        assert_eq!(text.text, "native:hello");
+        assert!(text.usage.is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

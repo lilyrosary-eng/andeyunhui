@@ -5,7 +5,7 @@
 //! 执行走无 UI 的 Agent 工具循环（`agent_collect`）——与 AI 对话共用同一套工具、
 //! 审批底座和上下文压缩，不另写第二套执行器。
 
-use ai_collab_kit::native::{NativeFuture, NativeRequest, NativeRunner};
+use ai_collab_kit::native::{NativeFuture, NativeOutput, NativeRequest, NativeRunner};
 use andeyunhui_lib::services::ai_service;
 use std::sync::Arc;
 use tauri::AppHandle;
@@ -43,7 +43,7 @@ impl NativeRunner for AppAiRunner {
                     ));
                 }
             }
-            ai_service::agent_collect::run_collect(
+            let output = ai_service::agent_collect::run_collect(
                 app,
                 ai_service::agent_collect::CollectRequest {
                     prompt: request.prompt,
@@ -55,7 +55,15 @@ impl NativeRunner for AppAiRunner {
                     plan_scope: request.room_id,
                 },
             )
-            .await
+            .await?;
+            Ok(NativeOutput {
+                text: output.text,
+                usage: output.usage.map(|usage| ai_collab_kit::types::TaskUsage {
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens,
+                    total_tokens: usage.total_tokens,
+                }),
+            })
         })
     }
 }

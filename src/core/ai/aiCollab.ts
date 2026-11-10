@@ -89,6 +89,12 @@ export interface CollabAssignment {
   result?: string | null;
   /** 外部 harness 认领者标识（MCP 的 from） */
   claimedBy?: string | null;
+  /** 开始执行的时刻（首次进入 running）；排队时间不算 */
+  startedAt?: number | null;
+  /** 执行耗时（毫秒） */
+  durationMs?: number | null;
+  /** 模型用量；外部 harness 不回报时为空 */
+  usage?: { promptTokens: number; completionTokens: number; totalTokens: number } | null;
   createdAt: number;
   updatedAt: number;
 }

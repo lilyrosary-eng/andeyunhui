@@ -22,7 +22,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::store;
 use crate::types::{
-    AgentSpec, Assignment, AssignmentStatus, CollabEvent, Room, RoomSnapshot,
+    AgentSpec, Assignment, AssignmentStatus, CollabEvent, Room, RoomSnapshot, TaskUsage,
 };
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -215,6 +215,9 @@ pub fn create_assignment_core(
         status: AssignmentStatus::Queued,
         result: None,
         claimed_by: None,
+        started_at: None,
+        duration_ms: None,
+        usage: None,
         created_at: now,
         updated_at: now,
     };
@@ -354,6 +357,10 @@ pub fn claim_assignment_core(
         // 认领表示重新开工：挂起时写在 result 里的问题不再算结果。
         assignment.result = None;
         assignment.claimed_by = claimed_by.map(|value| value.to_string());
+        // 与 update_assignment 同口径：首次进入 running 记开始时间。
+        if assignment.started_at.is_none() {
+            assignment.started_at = Some(now_ms());
+        }
         assignment.updated_at = now_ms();
         let snapshot = assignment.clone();
         store::write_assignments(base, &map)?;
@@ -489,12 +496,50 @@ fn update_assignment(
             .iter_mut()
             .find(|a| a.id == assignment_id)
             .ok_or_else(|| "任务不存在".to_string())?;
+        let now = now_ms();
+        // 首次进入 running 记开始时间；进入终态时算耗时（排队时间不计入）。
+        if status == AssignmentStatus::Running && assignment.started_at.is_none() {
+            assignment.started_at = Some(now);
+        }
+        if matches!(
+            status,
+            AssignmentStatus::Completed | AssignmentStatus::Failed | AssignmentStatus::Cancelled
+        ) && assignment.duration_ms.is_none()
+        {
+            if let Some(started) = assignment.started_at {
+                assignment.duration_ms = Some((now - started).max(0) as u64);
+            }
+        }
         assignment.status = status;
         assignment.result = result;
-        assignment.updated_at = now_ms();
+        assignment.updated_at = now;
         let updated = assignment.clone();
         store::write_assignments(base, &map)?;
         Ok(updated)
+    })
+}
+
+/// 只写用量，不动状态。由 complete_assignment 在收尾前调用，
+/// 这样随后事件里的任务对象就带上了用量，前端无需再单独拉一次。
+fn set_assignment_usage(
+    base: &Path,
+    room_id: &str,
+    assignment_id: &str,
+    usage: TaskUsage,
+) -> Result<(), String> {
+    let _guard = board_lock().lock().map_err(|_| "任务表锁已损坏".to_string())?;
+    store::with_write_lock(base, || {
+        let mut map = store::read_assignments(base);
+        let list = map
+            .get_mut(room_id)
+            .ok_or_else(|| "房间任务表不存在".to_string())?;
+        let assignment = list
+            .iter_mut()
+            .find(|a| a.id == assignment_id)
+            .ok_or_else(|| "任务不存在".to_string())?;
+        assignment.usage = Some(usage);
+        assignment.updated_at = now_ms();
+        store::write_assignments(base, &map)
     })
 }
 
@@ -671,6 +716,7 @@ async fn run_stream_json_assignment(
                     "exitCode": outcome.exit_code,
                     "stderr": clip_text(&outcome.stderr, 300),
                 })),
+                None,
             );
         }
         Err(error) => fail_assignment(&app, &base, &room, &assignment, &error),
@@ -969,8 +1015,13 @@ fn complete_assignment(
     assignment: &Assignment,
     text: &str,
     data: Option<Value>,
+    usage: Option<TaskUsage>,
 ) {
     let text = clip_text(text.trim(), 8000);
+    // 先写用量再收尾：随后的事件与任务表都带上它，前端不需要二次拉取。
+    if let Some(usage) = usage {
+        let _ = set_assignment_usage(base, &room.id, &assignment.id, usage);
+    }
     match update_assignment(
         base,
         &room.id,
@@ -1254,6 +1305,7 @@ async fn run_dsh_assignment(
                         "created": result.created,
                         "stopReason": result.stop_reason,
                     })),
+                    None,
                 );
                 return;
             }
@@ -1318,6 +1370,7 @@ async fn run_dsh_assignment(
                     "transport": "headless",
                     "exitCode": output.exit_code,
                 })),
+                None,
             );
         }
         Err(error) => fail_assignment(&app, &base, &room, &assignment, &error),
@@ -1415,8 +1468,8 @@ async fn run_native_assignment(
         return;
     }
     match outcome {
-        Ok(text) => {
-            let trimmed = text.trim();
+        Ok(output) => {
+            let trimmed = output.text.trim();
             let text = if trimmed.is_empty() {
                 "（自有模型未返回文本）".to_string()
             } else {
@@ -1429,6 +1482,7 @@ async fn run_native_assignment(
                 &assignment,
                 &text,
                 Some(json!({ "transport": "native", "model": model })),
+                output.usage,
             );
         }
         Err(error) => fail_assignment(&app, &base, &room, &assignment, &error),
@@ -1983,6 +2037,34 @@ mod tests {
 
         let lean = build_prompt(&base, &room, &current, false);
         assert!(!lean.contains("已完成第一步"));
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 记账：首次进入 running 记 startedAt；进入终态算 durationMs（排队时间不计入）。
+    #[test]
+    fn assignment_tracks_start_and_duration() {
+        let base = temp_base("timing");
+        let room = test_room("room_timing");
+        let created = create_assignment_core(&base, &room, None, "worker", "计时")
+            .unwrap()
+            .assignment;
+        assert!(created.started_at.is_none());
+        assert!(created.duration_ms.is_none());
+
+        let running = claim_assignment_core(
+            &base,
+            &room.id,
+            &created.id,
+            Some("test"),
+            "开始".to_string(),
+        )
+        .unwrap();
+        assert!(running.started_at.is_some());
+
+        let done = complete_assignment_core(&base, &room, &running, "完成", None).unwrap();
+        assert_eq!(done.status, AssignmentStatus::Completed);
+        assert!(done.duration_ms.is_some());
 
         let _ = std::fs::remove_dir_all(base);
     }

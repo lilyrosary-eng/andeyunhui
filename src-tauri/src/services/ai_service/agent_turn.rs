@@ -9,6 +9,14 @@ use serde_json::{json, Value};
 use crate::services::ai_service::ai_chat::is_deepseek_provider;
 use crate::services::ai_service::ai_profile::ResolvedTarget;
 
+/// 一次响应里的 token 用量（OpenAI 兼容端点的 `usage` 字段）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AgentUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
 /// 一次非流式响应的 assistant 消息。
 #[derive(Debug)]
 pub(crate) struct AgentTurn {
@@ -16,6 +24,8 @@ pub(crate) struct AgentTurn {
     /// 思考过程（reasoning_content）；关闭思考时应忽略。
     pub reasoning: Option<String>,
     pub tool_calls: Vec<Value>,
+    /// 端点返回的 token 用量；部分兼容端点不返回则为 None。
+    pub usage: Option<AgentUsage>,
 }
 
 /// 构造一次非流式 agent 请求体，返回 (body, thinking)。
@@ -75,10 +85,30 @@ pub(crate) fn parse_agent_message(payload: &Value) -> Result<AgentTurn, String> 
         .and_then(|c| c.as_array())
         .cloned()
         .unwrap_or_default();
+    let usage = payload.get("usage").and_then(|value| {
+        if !value.is_object() {
+            return None;
+        }
+        let prompt_tokens = value.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+        let completion_tokens = value
+            .get("completion_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let total_tokens = value
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(prompt_tokens + completion_tokens);
+        Some(AgentUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        })
+    });
     Ok(AgentTurn {
         content,
         reasoning,
         tool_calls,
+        usage,
     })
 }
 
@@ -120,6 +150,20 @@ mod tests {
         assert_eq!(turn.content, "答案");
         assert_eq!(turn.reasoning.as_deref(), Some("想一想"));
         assert!(turn.tool_calls.is_empty());
+        assert!(turn.usage.is_none());
+    }
+
+    /// usage 解析：端点不返回 total 时用 prompt + completion 兜底。
+    #[test]
+    fn parses_usage_with_total_fallback() {
+        let payload = json!({
+            "usage": { "prompt_tokens": 10, "completion_tokens": 5 },
+            "choices": [{ "message": { "content": "ok" } }]
+        });
+        let usage = parse_agent_message(&payload).unwrap().usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 15);
     }
 
     /// 工具调用响应：保留原生 tool_calls 形状，content 为空也允许。
