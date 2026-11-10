@@ -1,0 +1,42 @@
+[package]
+name = "download-kit"
+version = "0.1.0"
+edition = "2021"
+description = "多引擎下载内核 —— 可替换引擎（原生分块 / aria2c / ffmpeg）+ SQLite 任务与分片持久化"
+authors = ["Rosary"]
+
+[lib]
+name = "download_kit"
+path = "src/lib.rs"
+
+[dependencies]
+# 仅用 AppHandle 取数据目录与推送事件；核心下载逻辑不依赖窗口。
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 队列调度 / 分块并发 / 外部进程（aria2c、ffmpeg）。
+# fs 特性用于分片文件随机定位写入，process 用于外部引擎。
+tokio = { version = "1", features = [
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "time",
+  "fs",
+  "process",
+  "io-util",
+  "macros",
+] }
+# 与主 crate 保持同一版本口径：rustls 无系统 OpenSSL 依赖。
+# 不启用 gzip：Range 下载必须保证字节偏移与服务端文件一一对应，
+# 传输压缩会让 Content-Length / Range 语义错位，统一在请求里带 Accept-Encoding: identity。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = "0.3"
+# 任务 + 分片表（对齐 IDM 的 ChList 模型），bundled 免外部 SQLite。
+rusqlite = { version = "0.32", features = ["bundled"] }
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[features]
+# 仅供 `cargo test`：把 comctl32 v6 清单链进测试二进制。
+# 依赖链里的 tauri/muda 静态导入 comctl32!TaskDialogIndirect，缺清单会 0xc0000139。
+test-manifest = []

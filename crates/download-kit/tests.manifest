@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  download-kit 测试二进制的应用清单。
+
+  为什么需要它：依赖链里的 tauri/muda 静态导入了 comctl32 的 `TaskDialogIndirect`，
+  该导出只存在于 Common-Controls v6（side-by-side 程序集）。测试二进制若没有声明
+  v6 依赖，加载器会拿到 System32 的 v5 → 缺导出 → 0xc0000139，测试无法启动。
+
+  仅通过 build.rs 在 `test-manifest` feature 打开时链入，不参与正常库构建。
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+    type="win32"
+    name="download-kit.tests"
+    version="1.0.0.0"
+    processorArchitecture="*" />
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*" />
+    </dependentAssembly>
+  </dependency>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>
