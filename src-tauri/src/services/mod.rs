@@ -78,6 +78,8 @@ pub mod sandbox_service;
 pub mod crash_guard;
 // 启动守卫：连续启动失败自动回滚插件启用集合（服务只做状态，回滚动作在 commands/plugins.rs）
 pub mod boot_guard;
+// 安装基线变更集：用户可见的「下载版本 vs 当前」只读对照（与 AI 编程的会话审阅互相独立）
+pub mod changeset_service;
 pub mod usage_service;
 // 通用 Hook 引擎（进程内回调注册/触发）：chat.done / agent.step 等生命周期钩点。
 pub mod hook_service;

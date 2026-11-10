@@ -41,6 +41,8 @@ use pro_tools_kit::commands::*;
 use gongfang_kit::commands::*;
 // AI 协作组态后端命令（ai-collab-kit crate，P0：echo harness + 任务 runtime）
 use ai_collab_kit::commands::*;
+// 多引擎下载内核命令（download-kit crate，纯后端：dl_* 前缀）
+use download_kit::commands::*;
 use andeyunhui_lib::screenshot::{self, *};
 use andeyunhui_lib::TrayModeState;
 use andeyunhui_lib::device;
@@ -1905,6 +1907,15 @@ fn main() {
             boot_guard_ok,
             boot_guard_clear_rollback,
             boot_guard_exit_safe_mode,
+            // 安装基线变更集：下载版本 vs 当前的只读对照（services/changeset_service.rs）
+            changeset_summary,
+            changeset_diff,
+            changeset_restore_file,
+            changeset_restore_all,
+            changeset_reset_baseline,
+            changeset_export_patch,
+            changeset_pack_plugin,
+            changeset_reveal_file,
             reload_plugin,
             unload_plugin,
             delete_plugin,
@@ -2060,6 +2071,18 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             // ========== 网络视频下载：直链/多段拼接 + HLS(m3u8→mp4) ==========
             download_video,
             download_hls,
+            // ========== 多引擎下载内核（download-kit crate）：原生分块 / aria2c / ffmpeg ==========
+            dl_enqueue,
+            dl_list,
+            dl_get,
+            dl_pause,
+            dl_resume,
+            dl_retry,
+            dl_cancel,
+            dl_config_get,
+            dl_config_set,
+            dl_engines,
+            dl_probe,
             // ========== 内嵌浏览器（网络视频·面板区当浏览器）：子 webview + 资源嗅探 ==========
             andeyunhui_lib::embedded_browser::browser_open,
             andeyunhui_lib::embedded_browser::browser_set_bounds,
@@ -2335,6 +2358,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             ai_service::translate_text,
             ai_service::ai_ocr_enhance,
             ai_service::ocr_export_pdf,
+            ai_service::translate_document,
             ai_service::ai_get_conversations,
             ai_service::ai_save_conversations,
             // ========== 全局：AI 协作组态（crates/ai-collab-kit，P0 echo harness）==========

@@ -30,6 +30,9 @@ pub use bootstrap::*;
 // 启动守卫：连续启动失败自动回滚插件启用集合（状态在 services/boot_guard.rs）
 mod boot_guard;
 pub use boot_guard::*;
+// 安装基线变更集：下载版本 vs 当前的只读对照（services/changeset_service.rs）
+mod changeset;
+pub use changeset::*;
 mod notes;
 pub use notes::*;
 pub(crate) mod plugins;

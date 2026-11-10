@@ -393,6 +393,18 @@ pub(crate) fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResul
 
         seen_ids.insert(manifest.id.clone());
 
+        // 安装基线：首次见到这个插件就存一份「下载时版本」。
+        // 之后用户看到的 diff 永远跟它比（改多少次、改多久都不推进基线），
+        // 与 AI 编程自带的会话审阅 / 回退互不干扰。已有基线时只做一次存在性检查。
+        if let Some(dir) = manifest_path.parent() {
+            crate::services::changeset_service::ensure_baseline(
+                &app,
+                &manifest.id,
+                dir,
+                &manifest.version,
+            );
+        }
+
         // 可见性解析（唯一事实源，优先级从高到低）：
         //   1) 用户显式覆盖记录 plugin_visibility.json → 以记录为准（关掉后重启仍保持关闭）；
         //   2) 其余 → 默认 true（新机首次运行无记录 ⇒ 全部默认开启，

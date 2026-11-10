@@ -80,6 +80,9 @@ gongfang-kit = { path = "../crates/gongfang-kit", default-features = false }
 # AI 协作组态后端（P0）：harness 适配层 + 任务 runtime + 事件流。
 # 独立 crate 便于整体拆卸；去掉本行依赖 + main.rs 命令注册即可移除该能力。
 ai-collab-kit = { path = "../crates/ai-collab-kit" }
+# 多引擎下载内核：原生分块 / aria2c / ffmpeg 可替换引擎 + SQLite 任务与分片持久化。
+# 纯后端层（无 UI）；同样去掉本行依赖 + main.rs 的 dl_* 命令注册即可整体拆卸。
+download-kit = { path = "../crates/download-kit" }
 # image / base64 跨平台通用，保留在主 crate
 image = "0.25"
 # JPEG 降采样解码：支持 1/2、1/4、1/8 直接解出缩小像素，避免整图解码（内存降 4~64 倍）
@@ -115,6 +118,8 @@ globset = "0.4"
 # 统一日志门面：release 默认 warn 级别，dev 开 debug；替代散落的 eprintln!
 log = "0.4"
 env_logger = "0.11"
+# 变更集审阅：行级 unified diff（Apache-2.0 / MIT 双许可）
+similar = "2"
 # 进程内 ffmpeg 编码器（完整 L0：d3d11va→nvenc 零拷贝）
 # libloading 运行时加载 avcodec-*.dll / avformat-*.dll / avutil-*.dll
 libloading = "0.8"

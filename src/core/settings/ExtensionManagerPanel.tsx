@@ -1,5 +1,5 @@
 import { useState, useMemo, useSyncExternalStore, useCallback, useEffect } from 'react';
-import { FolderOpen, AlertTriangle, RefreshCw, Package, Trash2, Download, Loader2 } from 'lucide-react';
+import { FolderOpen, AlertTriangle, RefreshCw, Package, Trash2, Download, Loader2, FileDiff } from 'lucide-react';
 import { Switch } from "@/components/ui/switch"
 import { pluginDiagnostics, type DiagnosticEntry } from '@/core/pluginDiagnostics';
 import { PluginIcon } from '@/components/PluginIcon';
@@ -18,6 +18,7 @@ import {
   type AccessState,
 } from '@/core/pluginAccess';
 import { useI18n } from '@/lib/i18n';
+import { ChangesetPanel } from '@/core/extensions/ChangesetPanel';
 
 export function ExtensionManagerPanel() {
   const { t } = useI18n();
@@ -49,6 +50,8 @@ export function ExtensionManagerPanel() {
   const [installedPlugins, setInstalledPlugins] = useState<PluginManifest[]>([]);
   // 启动守卫：安全模式 / 上次连续启动失败后被自动禁用的插件
   const [bootGuard, setBootGuard] = useState<BootGuardState | null>(null);
+  // 安装基线变更集：当前正在对照的插件（null = 面板关闭）
+  const [changesetTarget, setChangesetTarget] = useState<PluginManifest | null>(null);
   // 能力授权视图：declared / granted / missing / trustedDev
   const [accessMap, setAccessMap] = useState<Record<string, AccessState>>({});
   const [consentTarget, setConsentTarget] = useState<PluginManifest | null>(null);
@@ -421,6 +424,13 @@ export function ExtensionManagerPanel() {
                     >
                       {acc?.bundled ? '详情' : acc?.needsConsent ? '授权…' : '能力'}
                     </button>
+                    <button
+                      onClick={() => setChangesetTarget(p)}
+                      className="btn-press inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] border border-neutral-200/60 text-neutral-500 hover:bg-black/5 dark:border-stone-600/50 dark:text-stone-400 dark:hover:bg-white/5"
+                      title="查看相对下载版本的改动"
+                    >
+                      <FileDiff size={12} />变更
+                    </button>
                     <Switch
                       checked={isVisible}
                       onCheckedChange={(val: boolean) => handleTogglePlugin(p, val)}
@@ -578,6 +588,19 @@ export function ExtensionManagerPanel() {
             ))}
           </div>
         </section>
+      )}
+
+      {/* 安装基线变更集：与下载版本的只读对照，独立于 AI 编程自带的会话审阅 */}
+      {changesetTarget && (
+        <ChangesetPanel
+          pluginId={changesetTarget.id}
+          pluginName={changesetTarget.name || changesetTarget.id}
+          onClose={() => setChangesetTarget(null)}
+          onRestored={() => {
+            // 恢复后列表里的运行状态/能力视图可能变化，刷新一次
+            setTick((v) => v + 1);
+          }}
+        />
       )}
     </div>
   );

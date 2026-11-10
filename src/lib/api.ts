@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import { ensureOverlayWindow } from '@/core/overlayWindow';
 import { EVENTS } from '@/core/events/schema';
-import type { TranslateSettings, TranslateResult } from './translateLanguages';
+import type { TranslateSettings, TranslateResult, DocTranslateOutcome } from './translateLanguages';
 
 // 定义笔记的数据类型（与 Rust 端保持一致）
 export interface NoteInfo {
@@ -93,6 +93,29 @@ export interface BootGuardState {
   safeMode: boolean;
   /** 回滚无效后的强制安全模式 */
   forceSafeMode: boolean;
+}
+
+// 安装基线变更集（services/changeset_service.rs）
+// 只读对照：永远是「刚下载的版本 → 当前」，与 AI 编程自带的会话审阅互相独立。
+export interface ChangesetFile {
+  path: string;
+  status: 'added' | 'modified' | 'deleted';
+  additions: number;
+  deletions: number;
+  binary: boolean;
+}
+
+export interface ChangesetSummary {
+  pluginId: string;
+  /** 当前 manifest 版本 */
+  version: string;
+  /** 基线建立时间（秒） */
+  baselineAt: number;
+  /** 应用升级后插件版本变了，但用户有本地改动，基线未自动滚动 */
+  baselineStale: boolean;
+  files: ChangesetFile[];
+  additions: number;
+  deletions: number;
 }
 
 // 中转站文件信息
@@ -224,6 +247,24 @@ export const api = {
   // 退出强制安全模式（清除标记与回滚提示），随后 reload 让插件重新加载
   bootGuardExitSafeMode: () => invoke<void>('boot_guard_exit_safe_mode'),
 
+  // ===== 安装基线变更集（额外的一层只读对照，不影响 AI 编程的会话审阅） =====
+  changesetSummary: (pluginId: string) =>
+    invoke<ChangesetSummary>('changeset_summary', { pluginId }),
+  changesetDiff: (pluginId: string, path: string) =>
+    invoke<string>('changeset_diff', { pluginId, path }),
+  changesetRestoreFile: (pluginId: string, path: string) =>
+    invoke<boolean>('changeset_restore_file', { pluginId, path }),
+  changesetRestoreAll: (pluginId: string) =>
+    invoke<{ restored: number; removed: number }>('changeset_restore_all', { pluginId }),
+  changesetResetBaseline: (pluginId: string) =>
+    invoke<void>('changeset_reset_baseline', { pluginId }),
+  changesetExportPatch: (pluginId: string) =>
+    invoke<string>('changeset_export_patch', { pluginId }),
+  changesetPackPlugin: (pluginId: string) =>
+    invoke<string>('changeset_pack_plugin', { pluginId }),
+  changesetRevealFile: (path: string) =>
+    invoke<void>('changeset_reveal_file', { path }),
+
   // 彻底删除插件（连同文件 + .mufurong 包 + 可见性记录）
   deletePlugin: (pluginId: string) =>
     invoke<void>('delete_plugin', { pluginId }),
@@ -257,6 +298,25 @@ export const api = {
   // settings 里带节点/凭证/链顺序/术语表；不传也能用（落默认链，无需任何 key）。
   translateText: (text: string, targetLang?: string, sourceLang?: string, settings?: TranslateSettings) =>
     invoke<TranslateResult>('translate_text', { text, targetLang, sourceLang, settings }),
+
+  // 文档「格式保留」翻译：docx / pptx **原地回填**。
+  // 样式、表格、图片、页眉页脚都不动，只替换文字；**原文件一个字节都不改**，
+  // 默认另存为 `<原名>.<目标语言>.<扩展名>`。返回结构化结果（含所有提示，不截断）。
+  // PDF 暂不支持：它没有 OOXML 的「文本节点 + 样式」结构，硬做只会毁版面。
+  translateDocument: (
+    path: string,
+    targetLang?: string,
+    sourceLang?: string,
+    settings?: TranslateSettings,
+    outPath?: string,
+  ) =>
+    invoke<DocTranslateOutcome>('translate_document', {
+      path,
+      targetLang,
+      sourceLang,
+      settings,
+      outPath,
+    }),
 
   // OCR 文本校对 / 整理：将 OCR 原文交给文本模型纠错整理（用于 DeepSeek 等不支持识图的模型）
   aiOcrEnhance: (text: string, profileId?: string) =>
