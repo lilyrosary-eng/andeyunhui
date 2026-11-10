@@ -297,6 +297,10 @@ async fn run_agent(
     // 计划闸门否决/超时后要在**下一轮**告诉模型「重新规划」。走 system 注入而不是伪造 tool 结果：
     // 伪造 tool 消息会破坏 assistant(tool_calls) / tool(result) 的配对，derive 时会直接崩。
     let mut plan_gate_notice: Option<String> = None;
+    // 重复调用检测：连续相同（工具 + 参数）调用达到阈值就拦截，防止模型原地打转。
+    // 跨轮次累计，只有换成不同调用才重置。
+    let mut last_tool_signature = String::new();
+    let mut repeat_count: u32 = 0;
     for _round in 0..max_rounds {
         // 每轮按「静态排除 + 运行时失败禁用」重建工具列表：
         // 某个后端不可达/未配置时，该工具下一轮不再下发，避免模型反复重试。
@@ -415,17 +419,28 @@ async fn run_agent(
             effort.as_deref(),
         );
 
-        let resp = match client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
+        // 无进展看门狗：单次模型调用 5 分钟没有任何响应就中止。
+        // 正常长任务靠工具轮次推进，每一轮都会重新计时，不会被整体时长误杀。
+        const MODEL_PROGRESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+        let resp = match tokio::time::timeout(
+            MODEL_PROGRESS_TIMEOUT,
+            client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send(),
+        )
+        .await
         {
-            Ok(r) => r,
-            Err(e) => {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
                 let msg = format!("请求失败: {}", e);
+                emit_agent_error(&app, &request_id, &msg);
+                return Err(msg);
+            }
+            Err(_) => {
+                let msg = "模型 5 分钟无响应，已自动中止（可重试或换模型）".to_string();
                 emit_agent_error(&app, &request_id, &msg);
                 return Err(msg);
             }
@@ -450,7 +465,19 @@ async fn run_agent(
             emit_agent_error(&app, &request_id, &msg);
             return Err(msg);
         }
-        let payload: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
+        let payload: serde_json::Value = match tokio::time::timeout(MODEL_PROGRESS_TIMEOUT, resp.json()).await {
+            Ok(Ok(value)) => value,
+            Ok(Err(e)) => {
+                let msg = format!("解析响应失败: {}", e);
+                emit_agent_error(&app, &request_id, &msg);
+                return Err(msg);
+            }
+            Err(_) => {
+                let msg = "模型响应读取超时（5 分钟无进展），已自动中止".to_string();
+                emit_agent_error(&app, &request_id, &msg);
+                return Err(msg);
+            }
+        };
         let turn = match crate::services::ai_service::agent_turn::parse_agent_message(&payload) {
             Ok(turn) => turn,
             Err(msg) => {
@@ -506,6 +533,29 @@ async fn run_agent(
                 let idx = tools.iter().position(|t| t.name() == fname);
                 prepared.push((cid, fname, idx, args));
             }
+            // 连续重复：第 3、4 次不真执行，回填错误让模型自纠；第 5 次直接中止本轮。
+            let mut blocked: Vec<bool> = vec![false; prepared.len()];
+            let mut hard_stop = false;
+            for (index, (_, fname, _, args)) in prepared.iter().enumerate() {
+                let signature = format!("{fname}\u{1}{args}");
+                if signature == last_tool_signature {
+                    repeat_count += 1;
+                } else {
+                    last_tool_signature = signature;
+                    repeat_count = 1;
+                }
+                if repeat_count >= 3 {
+                    blocked[index] = true;
+                }
+                if repeat_count >= 5 {
+                    hard_stop = true;
+                }
+            }
+            if hard_stop {
+                let msg = "检测到重复循环（同一工具与参数连续调用 5 次），已中止本轮";
+                emit_agent_error(&app, &request_id, msg);
+                return Err(msg.to_string());
+            }
             let is_exclusive = |i: usize| match prepared[i].2 {
                 Some(idx) => tools[idx].concurrency() == ToolConcurrency::Exclusive,
                 None => true, // 未知工具按独占处理，避免误并发
@@ -558,7 +608,22 @@ async fn run_agent(
                         let args = prepared[p].3.clone();
                         let tool = prepared[p].2.map(|i| tools[i].as_ref()); // Option<&dyn AiTool>
                         let tc = &tool_ctx;
-                        async move { (p, execute_tool_once(tool, &fname, &args, tc).await) }
+                        let is_blocked = blocked[p];
+                        async move {
+                            if is_blocked {
+                                return (
+                                    p,
+                                    (
+                                        false,
+                                        ToolExecResult::plain(
+                                            "重复调用已拦截：同一工具与参数已连续执行多次，请换一种做法或说明当前阻塞点。"
+                                                .to_string(),
+                                        ),
+                                    ),
+                                );
+                            }
+                            (p, execute_tool_once(tool, &fname, &args, tc).await)
+                        }
                     })
                     .buffer_unordered(PARALLEL_LIMIT);
                 while let Some((p, r)) = buffered.next().await {

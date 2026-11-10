@@ -30,6 +30,9 @@ export interface AiWorkViewProps {
   /** 当前会话排队中的消息（生成中发出的消息自动进队列） */
   queued?: QueuedTurn[];
   queuedBySlot?: boolean;
+  /** 同时执行的任务上限；0 = 不限。 */
+  parallelism?: number;
+  onParallelismChange?: (value: number) => void;
   onEditQueued?: (id: string, text: string) => void;
   onDeleteQueued?: (id: string) => void;
   onJumpQueued?: (id: string) => void;
@@ -62,6 +65,8 @@ export const AiWorkView = memo(function AiWorkView({
   send,
   queued,
   queuedBySlot,
+  parallelism,
+  onParallelismChange,
   onEditQueued,
   onDeleteQueued,
   onJumpQueued,
@@ -104,6 +109,25 @@ export const AiWorkView = memo(function AiWorkView({
           </div>
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-3">
+          {onParallelismChange && (
+            <label
+              className="flex items-center gap-1 text-[11px] text-neutral-400 dark:text-stone-500"
+              title="同时执行的任务数；超出的任务排队，本轮结束后自动接上（只影响工作台）"
+            >
+              并发
+              <select
+                value={parallelism ?? 3}
+                onChange={(event) => onParallelismChange(Number(event.target.value))}
+                className="rounded-md border border-neutral-200 bg-white px-1.5 py-0.5 text-[11px] text-neutral-600 outline-none dark:border-stone-600 dark:bg-stone-800 dark:text-stone-300"
+              >
+                {[1, 2, 3, 5, 0].map((value) => (
+                  <option key={value} value={value}>
+                    {value === 0 ? '不限' : value}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {products.length > 0 && (
             <span className="text-[11px] text-neutral-400 dark:text-stone-500">产物库 {products.length} 份</span>
           )}

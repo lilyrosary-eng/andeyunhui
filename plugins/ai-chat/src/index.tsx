@@ -24,6 +24,7 @@ import {
   createAiWorkTask, workflowFromConv, applyWorkflowToConv, migrateLegacyWorkflows,
 } from '@/core/ai/aiWorkTasks';
 import { AI_AIWORK_CONVERSATIONS_KEY } from '@/core/ai/util';
+import { loadAiWorkParallelism, saveAiWorkParallelism } from '@/core/ai/aiWorkSettings';
 import type { AiWorkTab } from '@/components/ai-chat/AiWorkTabs';
 import { AiWorkProductSettings } from './AiWorkProductSettings';
 
@@ -169,12 +170,14 @@ const Root = memo(function Root() {
 
   // AIWork 统一任务实例：与主「AI 对话」彻底隔离，专属存储 key，侧栏任务区 / 对话工作台 / 蓝图画布共用。
   // allowEmpty = 与 AIWorkflow 一致：没任务不再自动保留保底会话，由 UI 提示「创建任务」。
+  // 工作台并发上限（页内可调）：0 = 不限；默认 3。改完下一次请求即生效。
+  const [workParallelism, setWorkParallelism] = useState(loadAiWorkParallelism);
   const aiWorkChat = useAiChat({
     persistKey: AI_AIWORK_CONVERSATIONS_KEY,
     allowEmpty: true,
-    // 工作台多会话共用一个槽池：默认最多 3 个任务同时跑，其余排队。
+    // 工作台多会话共用一个槽池：并发上限页内可调，其余任务排队。
     queueScope: 'ai-work',
-    queueLimit: 3,
+    queueLimit: workParallelism > 0 ? workParallelism : undefined,
   });
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -520,6 +523,11 @@ const Root = memo(function Root() {
         send={aiWorkChat.send}
         queued={aiWorkChat.queued}
         queuedBySlot={aiWorkChat.queuedBySlot}
+        parallelism={workParallelism}
+        onParallelismChange={(value) => {
+          saveAiWorkParallelism(value);
+          setWorkParallelism(value);
+        }}
         onEditQueued={aiWorkChat.editQueued}
         onDeleteQueued={aiWorkChat.deleteQueued}
         onJumpQueued={aiWorkChat.jumpQueued}
