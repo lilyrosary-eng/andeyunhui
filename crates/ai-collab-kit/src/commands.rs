@@ -218,6 +218,116 @@ pub fn collab_room_create(
     Ok(room)
 }
 
+/// 改房间成员 / 主导 / 名称，保留既有事件与任务历史。
+///
+/// 三条规则，都是为了不让「编辑」把正在跑的房间弄坏：
+/// - 至少 2 个成员、id 唯一、主导必须在成员里；
+/// - 有未结束任务的成员不能删，否则任务失去归属；
+/// - harness 或模型改了就清空 `native_session_id`：旧原生会话绑定的是旧模型，
+///   resume 过去会得到「配置看起来对、实际跑的是旧模型」的假象。
+pub(crate) fn update_room_agents_core(
+    base: &std::path::Path,
+    room_id: &str,
+    name: Option<String>,
+    agents: Vec<AgentSpec>,
+    lead_id: Option<String>,
+) -> Result<Room, String> {
+    let mut rooms = store::read_rooms(base);
+    let index = rooms
+        .iter()
+        .position(|room| room.id == room_id)
+        .ok_or_else(|| format!("房间不存在: {room_id}"))?;
+
+    if agents.len() < 2 {
+        return Err("协作房间至少需要 2 个成员".to_string());
+    }
+    let mut seen = HashSet::new();
+    for agent in &agents {
+        if agent.id.trim().is_empty() || agent.name.trim().is_empty() {
+            return Err("成员 id / 名称不能为空".to_string());
+        }
+        if !seen.insert(agent.id.clone()) {
+            return Err(format!("成员 id 重复: {}", agent.id));
+        }
+    }
+
+    let active: Vec<Assignment> = store::read_assignments(base)
+        .remove(room_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|task| {
+            matches!(
+                task.status,
+                AssignmentStatus::Queued | AssignmentStatus::Running | AssignmentStatus::Waiting
+            )
+        })
+        .collect();
+    for task in &active {
+        if !agents.iter().any(|agent| agent.id == task.assignee_id) {
+            return Err(format!(
+                "成员「{}」还有未结束的任务，请先完成或取消后再移除",
+                task.assignee_id
+            ));
+        }
+    }
+
+    let previous = rooms[index].agents.clone();
+    let merged: Vec<AgentSpec> = agents
+        .into_iter()
+        .map(|mut agent| {
+            let old = previous.iter().find(|item| item.id == agent.id);
+            let reusable = old
+                .map(|old| old.harness_id == agent.harness_id && old.model == agent.model)
+                .unwrap_or(false);
+            agent.native_session_id = if reusable {
+                old.and_then(|old| old.native_session_id.clone())
+            } else {
+                None
+            };
+            agent
+        })
+        .collect();
+
+    let lead_id = lead_id
+        .filter(|id| merged.iter().any(|agent| &agent.id == id))
+        .unwrap_or_else(|| merged[0].id.clone());
+    let mut room = rooms[index].clone();
+    room.name = name
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(room.name);
+    room.agents = merged;
+    room.lead_id = lead_id;
+    room.updated_at = runtime::now_ms();
+    rooms[index] = room.clone();
+    store::write_rooms(base, &rooms)?;
+    Ok(room)
+}
+
+#[tauri::command]
+pub fn collab_room_update(
+    app: AppHandle,
+    room_id: String,
+    name: Option<String>,
+    agents: Vec<AgentSpec>,
+    lead_id: Option<String>,
+) -> Result<Room, String> {
+    let base = store::base_dir(&app)?;
+    let room = update_room_agents_core(&base, &room_id, name, agents, lead_id)?;
+    runtime::emit_event(
+        &app,
+        &base,
+        &room.id,
+        "room.updated",
+        None,
+        None,
+        Some("房间成员已更新".to_string()),
+        None,
+        Some(json!({ "room": &room })),
+    )?;
+    Ok(room)
+}
+
 #[tauri::command]
 pub fn collab_room_delete(app: AppHandle, room_id: String) -> Result<(), String> {
     let base = store::base_dir(&app)?;
@@ -598,4 +708,130 @@ pub fn collab_cancel(
         return Err("任务已结束，无法取消".to_string());
     }
     runtime::cancel_assignment(&app, &base, &room, &assignment)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_base(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ai-collab-commands-{tag}-{}-{}",
+            std::process::id(),
+            runtime::now_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn agent(id: &str, harness_id: &str, model: &str, session: Option<&str>) -> AgentSpec {
+        AgentSpec {
+            id: id.to_string(),
+            name: id.to_string(),
+            harness_id: harness_id.to_string(),
+            persona: String::new(),
+            model: model.to_string(),
+            native_session_id: session.map(|value| value.to_string()),
+        }
+    }
+
+    fn room_with(agents: Vec<AgentSpec>) -> Room {
+        Room {
+            id: "room_update".to_string(),
+            name: "编辑测试".to_string(),
+            lead_id: "lead".to_string(),
+            agents,
+            workspace: None,
+            source: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    /// 编辑成员：模型没变才保留原生会话；改模型/改 harness 都必须清空，避免 resume 到旧模型。
+    #[test]
+    fn room_update_keeps_session_only_when_model_unchanged() {
+        let base = temp_base("room-update");
+        let room = room_with(vec![
+            agent("lead", harness::DSH, "m1", Some("session-1")),
+            agent("worker", harness::DSH, "", None),
+        ]);
+        store::write_rooms(&base, &vec![room.clone()]).unwrap();
+
+        let unchanged = update_room_agents_core(
+            &base,
+            &room.id,
+            None,
+            vec![
+                agent("lead", harness::DSH, "m1", None),
+                agent("worker", harness::NATIVE, "", None),
+            ],
+            Some("worker".to_string()),
+        )
+        .unwrap();
+        assert_eq!(unchanged.lead_id, "worker");
+        assert_eq!(
+            unchanged
+                .agents
+                .iter()
+                .find(|item| item.id == "lead")
+                .unwrap()
+                .native_session_id
+                .as_deref(),
+            Some("session-1")
+        );
+
+        let changed = update_room_agents_core(
+            &base,
+            &room.id,
+            Some("改名".to_string()),
+            vec![
+                agent("lead", harness::DSH, "m2", Some("session-1")),
+                agent("worker", harness::DSH, "", None),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(changed.name, "改名");
+        assert_eq!(changed.agents[0].native_session_id, None);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 有未结束任务的成员不能被移除，否则任务失去归属。
+    #[test]
+    fn room_update_refuses_removing_member_with_active_task() {
+        let base = temp_base("room-update-active");
+        let room = room_with(vec![
+            agent("lead", harness::ECHO, "", None),
+            agent("worker", harness::ECHO, "", None),
+        ]);
+        store::write_rooms(&base, &vec![room.clone()]).unwrap();
+        let created =
+            runtime::create_assignment_core(&base, &room, None, "worker", "还在跑").unwrap();
+        runtime::claim_assignment_core(
+            &base,
+            &room.id,
+            &created.assignment.id,
+            Some("test"),
+            "开始".to_string(),
+        )
+        .unwrap();
+
+        let error = update_room_agents_core(
+            &base,
+            &room.id,
+            None,
+            vec![
+                agent("lead", harness::ECHO, "", None),
+                agent("extra", harness::ECHO, "", None),
+            ],
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("未结束的任务"), "{error}");
+
+        let _ = std::fs::remove_dir_all(base);
+    }
 }

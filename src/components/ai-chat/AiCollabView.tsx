@@ -5,12 +5,12 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  CheckCircle2, Clock, Copy, Download, FolderOpen, Loader2, Network, Play, Plug, Send, Square, Users,
-  X, XCircle, type LucideIcon,
+  CheckCircle2, Clock, Copy, Download, FolderOpen, Loader2, Network, Pencil, Play, Plug, Send, Square,
+  Users, X, XCircle, type LucideIcon,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  CollabAssignment, CollabAssignmentStatus, CollabEvent, CollabHarnessInfo, CollabMcpInfo,
+  CollabAgent, CollabAssignment, CollabAssignmentStatus, CollabEvent, CollabHarnessInfo, CollabMcpInfo,
   CollabMemberInput, CollabPermissionRequest, CollabRoom, DshSessionSummary,
 } from '@/core/ai/aiCollab';
 import { DshSessionImportDialog } from '@/components/ai-chat/DshSessionImportDialog';
@@ -26,6 +26,8 @@ interface AiCollabViewProps {
   harnesses?: CollabHarnessInfo[];
   /** 新建房间：成员各自选 harness 与模型，主导由成员里指定 */
   onCreateRoom?: (members: CollabMemberInput[], name: string) => void;
+  /** 编辑当前房间：改名称 / 成员 / 主导，保留事件与任务历史 */
+  onUpdateRoom?: (roomId: string, members: CollabMemberInput[], name: string) => void;
   /** 新建房间弹窗开关由宿主控制：侧栏「新建房间」与空状态按钮走同一条路径 */
   builderOpen: boolean;
   onOpenBuilder: () => void;
@@ -58,6 +60,28 @@ const STATUS_META: Record<CollabAssignmentStatus, { label: string; cls: string; 
 function agentName(room: CollabRoom | null, agentId: string | null | undefined): string {
   if (!room || !agentId) return '系统';
   return room.agents.find((agent) => agent.id === agentId)?.name ?? agentId;
+}
+
+/** harness 短名：界面上不直接抛 `stream-json` / `native` 这类内部 id。 */
+const HARNESS_LABEL: Record<string, string> = {
+  echo: 'Echo',
+  native: '内置模型',
+  dsh: 'DeepSeek',
+  mcp: 'MCP',
+  acp: 'ACP',
+  'stream-json': 'CLI',
+  mailbox: '信箱',
+};
+
+function harnessLabel(harnessId: string): string {
+  return HARNESS_LABEL[harnessId] ?? harnessId;
+}
+
+/** 成员副标签：harness 名 + 成员模型。
+ *  模型只在应用真的知道它时显示；MCP / 信箱 / CLI 的模型在对方侧，写出来就是假信息。 */
+function agentMeta(agent: CollabAgent): string {
+  const model = agent.model?.trim();
+  return model ? `${harnessLabel(agent.harnessId)} · ${model}` : harnessLabel(agent.harnessId);
 }
 
 function shortPath(path: string | null | undefined): string {
@@ -425,21 +449,34 @@ function McpDialog({ onClose }: { onClose: () => void }) {
 /// 只列可用 harness —— 选了不可用项会在第一次派单时失败，比在建房间时就挡住更晚也更难懂。
 function RoomBuilderDialog({
   harnesses,
+  initialMembers,
+  initialName = '',
+  title = '新建协作房间',
+  submitLabel = '创建房间',
   onClose,
   onCreate,
 }: {
   harnesses: CollabHarnessInfo[];
+  /** 编辑态：成员的现有 id / harness / 模型 / 主导；空则按默认两位成员新建 */
+  initialMembers?: CollabMemberInput[];
+  initialName?: string;
+  title?: string;
+  submitLabel?: string;
   onClose: () => void;
   onCreate: (members: CollabMemberInput[], name: string) => void;
 }) {
   const options = harnesses.filter((harness) => harness.available);
   const ids = options.map((harness) => harness.id);
   const pick = (...wanted: string[]) => wanted.find((id) => ids.includes(id)) ?? ids[0] ?? 'echo';
-  const [name, setName] = useState('');
-  const [members, setMembers] = useState<CollabMemberInput[]>(() => [
-    { name: '主导', harnessId: pick('native', 'dsh'), model: '', lead: true },
-    { name: '执行', harnessId: pick('dsh', 'mcp', 'native'), model: '' },
-  ]);
+  const [name, setName] = useState(initialName);
+  const [members, setMembers] = useState<CollabMemberInput[]>(() =>
+    initialMembers?.length
+      ? initialMembers.map((member) => ({ ...member }))
+      : [
+          { name: '主导', harnessId: pick('native', 'dsh'), model: '', lead: true },
+          { name: '执行', harnessId: pick('dsh', 'mcp', 'native'), model: '' },
+        ],
+  );
 
   const update = (index: number, patch: Partial<CollabMemberInput>) => {
     setMembers((prev) => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)));
@@ -463,7 +500,7 @@ function RoomBuilderDialog({
         <header className="flex items-center gap-2 border-b border-neutral-200 px-5 py-3 dark:border-stone-700">
           <Network size={18} className="text-indigo-600 dark:text-indigo-400" />
           <div>
-            <div className="text-sm font-semibold text-neutral-800 dark:text-stone-100">新建协作房间</div>
+            <div className="text-sm font-semibold text-neutral-800 dark:text-stone-100">{title}</div>
             <div className="mt-0.5 text-[11px] text-neutral-400 dark:text-stone-500">
               成员各自选 harness 与模型；主导只是「默认接单」的那一位。
             </div>
@@ -482,7 +519,7 @@ function RoomBuilderDialog({
             <input
               value={name}
               onChange={(event) => setName(event.target.value)}
-              placeholder="留空则按成员自动命名"
+              placeholder="留空则沿用默认名称"
               className="mt-1 w-full rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-indigo-400 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-100"
             />
           </label>
@@ -587,7 +624,7 @@ function RoomBuilderDialog({
                 onClick={() => onCreate(members, name)}
                 className="btn-press rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
               >
-                创建房间
+                {submitLabel}
               </button>
             </div>
           </div>
@@ -604,6 +641,7 @@ export const AiCollabView = memo(function AiCollabView({
   busy,
   error,
   onCreateRoom,
+  onUpdateRoom,
   builderOpen,
   onOpenBuilder,
   onCloseBuilder,
@@ -623,6 +661,7 @@ export const AiCollabView = memo(function AiCollabView({
   const [draft, setDraft] = useState('');
   const [importOpen, setImportOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
   /** 本条消息派给谁；null = 跟随房间主导。 */
   const [targetId, setTargetId] = useState<string | null>(null);
 
@@ -652,6 +691,28 @@ export const AiCollabView = memo(function AiCollabView({
       onCreate={(members, name) => {
         onCreateRoom?.(members, name);
         onCloseBuilder();
+      }}
+    />
+  ) : null;
+
+  // 编辑态复用同一个弹窗：成员带原 id，后端据此保留任务归属与原生会话（模型没变时）。
+  const editDialog = editOpen && room ? (
+    <RoomBuilderDialog
+      harnesses={harnesses ?? []}
+      initialName={room.name}
+      initialMembers={room.agents.map((agent) => ({
+        id: agent.id,
+        name: agent.name,
+        harnessId: agent.harnessId,
+        model: agent.model ?? '',
+        lead: agent.id === room.leadId,
+      }))}
+      title="编辑房间"
+      submitLabel="保存"
+      onClose={() => setEditOpen(false)}
+      onCreate={(members, name) => {
+        onUpdateRoom?.(room.id, members, name);
+        setEditOpen(false);
       }}
     />
   ) : null;
@@ -729,15 +790,23 @@ export const AiCollabView = memo(function AiCollabView({
               {room.agents.map((agent) => (
                 <span
                   key={agent.id}
-                  title={[agent.harnessId, agent.model, agent.persona].filter(Boolean).join(' · ')}
+                  title={[agentMeta(agent), agent.persona].filter(Boolean).join(' · ')}
                   className="rounded-full border border-neutral-200 bg-white/60 px-2 py-0.5 text-[10px] text-neutral-500 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-400"
                 >
                   {agent.name}
-                  {agent.id === room.leadId ? ' · lead' : ''} · {agent.harnessId}
+                  {agent.id === room.leadId ? ' · 主导' : ''} · {agentMeta(agent)}
                 </span>
               ))}
             </div>
             <div className="ml-auto flex items-center gap-2">
+              <button
+                onClick={() => setEditOpen(true)}
+                title="编辑成员、模型与主导（保留历史）"
+                className="btn-press flex items-center gap-1.5 rounded-lg border border-neutral-300 px-3 py-1.5 text-xs text-neutral-600 hover:bg-neutral-100 dark:border-stone-600 dark:text-stone-300 dark:hover:bg-stone-800"
+              >
+                <Pencil size={14} />
+                编辑
+              </button>
               <button
                 onClick={() => setMcpOpen(true)}
                 title="查看 MCP 配置，让外部 harness 加入这个房间"
@@ -840,7 +909,7 @@ export const AiCollabView = memo(function AiCollabView({
                 <button
                   key={agent.id}
                   onClick={() => setTargetId(agent.id === room.leadId ? null : agent.id)}
-                  title={`${agent.harnessId}${agent.model ? ` · ${agent.model}` : ''}`}
+                  title={agentMeta(agent)}
                   className={`btn-press rounded-full border px-2 py-0.5 text-[10px] transition-colors ${
                     selected
                       ? 'border-indigo-500/60 bg-indigo-500/10 text-indigo-600 dark:text-indigo-300'
@@ -889,6 +958,7 @@ export const AiCollabView = memo(function AiCollabView({
       <Board assignments={assignments} room={room} onCancel={onCancel} />
       {importDialog}
       {builder}
+      {editDialog}
     </div>
   );
 });

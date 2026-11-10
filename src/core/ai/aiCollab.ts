@@ -37,6 +37,8 @@ export interface CollabRoomSource {
 
 /** 新建房间时的成员草稿：一个房间可以同时用不同 harness 与模型。 */
 export interface CollabMemberInput {
+  /** 已有成员的 id（编辑房间时带上，保持任务与会话归属不变） */
+  id?: string;
   name?: string;
   harnessId: string;
   /** 成员级模型（native / dsh 生效）；空串跟随默认 */
@@ -166,6 +168,26 @@ function upsertAssignment(list: CollabAssignment[], next: CollabAssignment): Col
   return copy;
 }
 
+/** 成员草稿 → AgentSpec。新建与编辑共用，避免两条路径对成员字段的解释漂移。 */
+function toAgents(members: CollabMemberInput[]): CollabAgent[] {
+  return members.map((member, index) => ({
+    // 编辑时沿用成员原 id；新建时前两个用 lead / worker，第三个起用 memberN。
+    id: member.id ?? (index === 0 ? 'lead' : index === 1 ? 'worker' : `member${index + 1}`),
+    name: member.name?.trim() || (index === 0 ? '主导' : `成员${index + 1}`),
+    harnessId: member.harnessId,
+    persona:
+      member.persona
+      ?? (index === 0 ? '负责拆解任务、分派成员、汇总结果' : '负责执行被分派的子任务'),
+    model: member.model?.trim() ?? '',
+  }));
+}
+
+/** 主导由成员草稿显式指定（builder 里的单选），都没标就取第一位。 */
+function leadIdOf(members: CollabMemberInput[], agents: CollabAgent[]): string {
+  const leadIndex = Math.max(0, members.findIndex((member) => member.lead));
+  return agents[leadIndex]?.id ?? agents[0].id;
+}
+
 export interface UseAiCollabResult {
   harnesses: CollabHarnessInfo[];
   rooms: CollabRoom[];
@@ -182,6 +204,8 @@ export interface UseAiCollabResult {
   setWorkspace: (workspace: string | null) => Promise<void>;
   /** 新建房间：成员各自指定 harness 与模型（native / dsh / mcp / 信箱可同室） */
   createRoomWithAgents: (members: CollabMemberInput[], name?: string) => Promise<void>;
+  /** 编辑已有房间：改名称 / 成员 / 主导，保留事件与任务历史 */
+  updateRoom: (roomId: string, members: CollabMemberInput[], name?: string) => Promise<void>;
   deleteRoom: (roomId: string) => Promise<void>;
   selectRoom: (roomId: string) => Promise<void>;
   /** assigneeId 省略时发给主导成员 */
@@ -451,20 +475,10 @@ export function useAiCollab(): UseAiCollabResult {
     }
   }, []);
 
-  // 混编房间：每个成员自带 harness 与模型。createRoom 只是它的「同 harness」特例，
-  // 这样成员构造与校验只有一处，避免两条建房间路径慢慢漂移。
+  // 混编房间：每个成员自带 harness 与模型。成员构造只有一处，新建与编辑共用。
   const createRoomWithAgents = useCallback(async (members: CollabMemberInput[], name?: string) => {
     setError(null);
-    const agents: CollabAgent[] = members.map((member, index) => ({
-      // 前两个沿用 lead / worker，第三个起用 memberN：老房间的习惯与看板显示保持一致。
-      id: index === 0 ? 'lead' : index === 1 ? 'worker' : `member${index + 1}`,
-      name: member.name?.trim() || (index === 0 ? '主导' : `成员${index + 1}`),
-      harnessId: member.harnessId,
-      persona:
-        member.persona
-        ?? (index === 0 ? '负责拆解任务、分派成员、汇总结果' : '负责执行被分派的子任务'),
-      model: member.model?.trim() ?? '',
-    }));
+    const agents = toAgents(members);
     if (agents.length < 2) {
       setError('协作房间至少需要 2 个成员');
       return;
@@ -474,12 +488,10 @@ export function useAiCollab(): UseAiCollabResult {
       return;
     }
     try {
-      // 主导由成员草稿显式指定（builder 里的单选），都没标就取第一位。
-      const leadIndex = Math.max(0, members.findIndex((member) => member.lead));
       const room = await invoke<CollabRoom>('collab_room_create', {
         name: name?.trim() || '协作房间',
         agents,
-        leadId: agents[leadIndex]?.id ?? agents[0].id,
+        leadId: leadIdOf(members, agents),
       });
       await refreshRooms();
       await selectRoom(room.id);
@@ -487,6 +499,28 @@ export function useAiCollab(): UseAiCollabResult {
       setError(String(err));
     }
   }, [refreshRooms, selectRoom]);
+
+  const updateRoom = useCallback(async (roomId: string, members: CollabMemberInput[], name?: string) => {
+    setError(null);
+    const agents = toAgents(members);
+    if (agents.length < 2) {
+      setError('协作房间至少需要 2 个成员');
+      return;
+    }
+    try {
+      // 后端会在 harness / 模型变化时作废旧原生会话，这里不重复处理。
+      const room = await invoke<CollabRoom>('collab_room_update', {
+        roomId,
+        name: name?.trim() || null,
+        agents,
+        leadId: leadIdOf(members, agents),
+      });
+      setRooms((prev) => prev.map((item) => (item.id === room.id ? room : item)));
+      if (activeIdRef.current === room.id) setActiveRoom(room);
+    } catch (err) {
+      setError(String(err));
+    }
+  }, []);
 
   const deleteRoom = useCallback(async (roomId: string) => {
     setError(null);
@@ -606,6 +640,7 @@ export function useAiCollab(): UseAiCollabResult {
     importDshSession,
     setWorkspace,
     createRoomWithAgents,
+    updateRoom,
     deleteRoom,
     selectRoom,
     send,
