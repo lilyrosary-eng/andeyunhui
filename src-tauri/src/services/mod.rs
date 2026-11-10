@@ -76,6 +76,8 @@ pub mod shell_service;
 pub mod sandbox_service;
 // AI 用量/成本统计（持久化 + 聚合查询）：ai_chat 结束时落库，usage_stats 供前端用量面板查询。
 pub mod crash_guard;
+// 启动守卫：连续启动失败自动回滚插件启用集合（服务只做状态，回滚动作在 commands/plugins.rs）
+pub mod boot_guard;
 pub mod usage_service;
 // 通用 Hook 引擎（进程内回调注册/触发）：chat.done / agent.step 等生命周期钩点。
 pub mod hook_service;

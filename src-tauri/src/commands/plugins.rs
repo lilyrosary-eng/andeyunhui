@@ -735,6 +735,35 @@ pub fn set_plugin_visibility(app: tauri::AppHandle, plugin_id: String, visible: 
     Ok(())
 }
 
+/// 启动守卫回滚：把「当前启用、但不在上次成功基线里」的插件禁用。
+///
+/// `allowed` 为空（从未成功上报过插件集合）时禁用全部插件 —— 等价于安全模式。
+/// 返回被禁用的 id，供前端提示；没有可禁用的插件说明坏的不在插件里，调用方据此
+/// 置位强制安全模式（见 services/boot_guard.rs）。
+pub(crate) fn auto_rollback_to(app: &tauri::AppHandle, allowed: &[String]) -> Vec<String> {
+    let Ok(scan) = scan_plugins_sync(app.clone()) else {
+        return Vec::new();
+    };
+    let allow: std::collections::HashSet<&str> = allowed.iter().map(|s| s.as_str()).collect();
+    let mut disabled = Vec::new();
+    for m in &scan.valid {
+        // visible=false 的本来就是禁用状态，不算本次回滚的功劳
+        if !m.visible || allow.contains(m.id.as_str()) {
+            continue;
+        }
+        if save_plugin_visibility(app, &m.id, false).is_ok() {
+            disabled.push(m.id.clone());
+        }
+    }
+    if !disabled.is_empty() {
+        // 可见性文件已变，扫描缓存必须失效，否则本轮读到的还是旧 visible
+        if let Ok(mut cache) = PLUGIN_SCAN_CACHE.lock() {
+            *cache = None;
+        }
+    }
+    disabled
+}
+
 /// 强制刷新插件扫描缓存并重新扫描全部目录（响应「检测新插件」按钮）
 #[tauri::command]
 pub async fn refresh_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, String> {

@@ -27,6 +27,9 @@ pub mod vault_commands;
 // 因此 main.rs 的 invoke_handler 与既有 `crate::commands::*` 引用都无需改动。
 mod bootstrap;
 pub use bootstrap::*;
+// 启动守卫：连续启动失败自动回滚插件启用集合（状态在 services/boot_guard.rs）
+mod boot_guard;
+pub use boot_guard::*;
 mod notes;
 pub use notes::*;
 pub(crate) mod plugins;

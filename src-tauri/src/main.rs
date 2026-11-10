@@ -1102,6 +1102,9 @@ fn main() {
             }
             // 数据根（可配置存放位置）：必须在任意 app_data 子路径被使用前维护 junction / 执行 pending 迁移
             andeyunhui_lib::data_location::prepare_data_root(&app.handle().clone());
+            // 启动守卫：计数 +1；连续两次没等到前端确认就自动回滚插件启用集合。
+            // 必须在 prepare_data_root 之后 —— 状态文件跟着数据目录走，提前读会读到旧位置。
+            andeyunhui_lib::commands::boot_guard_startup(&app.handle().clone());
             // 容量兜底表：优先用数据目录下的覆盖文件（可不必改代码就更新），没有则用编译期内嵌默认。
             // 放在 prepare_data_root 之后，确保走的是重定向后的真实数据目录。
             {
@@ -1897,6 +1900,11 @@ fn main() {
             configure_auto_save,
             get_auto_save_config,
             set_plugin_visibility,
+            // 启动守卫：安全模式判断 / 首屏确认 / 回滚提示（services/boot_guard.rs）
+            boot_guard_state,
+            boot_guard_ok,
+            boot_guard_clear_rollback,
+            boot_guard_exit_safe_mode,
             reload_plugin,
             unload_plugin,
             delete_plugin,

@@ -121,6 +121,24 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
     // 先设置 ready，让主界面立即渲染（不依赖插件加载）
     setReady(true);
 
+    // 启动守卫：主界面已渲染 → 立刻确认「能启动」并清零失败计数。
+    // 不等插件加载完成 —— 插件慢/卡死不该拖累这条保命确认。
+    // 用主界面根节点存在作为「真的渲染出来了」的判据：若渲染抛错被整棵树卸载，
+    // 这里就不确认，让失败计数继续累积（下次启动触发自动回滚）。
+    requestAnimationFrame(() => {
+      let tries = 0;
+      const confirmBoot = () => {
+        tries += 1;
+        if (document.querySelector('.main-panel-bg')) {
+          void api.bootGuardOk(null).catch((e) => console.warn('[PluginHost] 启动确认失败:', e));
+          return;
+        }
+        // 并发渲染可能晚一帧提交；最多等 3 帧，超时就不确认（宁可多算一次失败）
+        if (tries < 3) requestAnimationFrame(confirmBoot);
+      };
+      confirmBoot();
+    });
+
     // 进度：主界面骨架已就绪，准备加载插件（40%）
     const boot = window as unknown as {
       __bootProgress?: (pct: number, opts?: { text?: string; phase?: string }) => void;
@@ -192,9 +210,40 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
       load: (manifest: PluginManifest) => loadSinglePlugin(manifest, registry),
     };
 
-    loadPlugins(registry).then(() => {
+    // 安全模式 / 上次自动回滚结果：必须在加载插件前拿到。
+    // 安全模式（--safe-mode，或回滚救不回来的强制模式）只渲染宿主界面，一个插件都不加载。
+    void (async () => {
+      let guard: Awaited<ReturnType<typeof api.getBootGuardState>> | null = null;
+      try {
+        guard = await api.getBootGuardState();
+      } catch (e) {
+        // 读不到就按正常模式走：宁可少一道保护，也不能因为守卫自身故障让插件全灭
+        console.warn('[PluginHost] 读取启动守卫状态失败:', e);
+      }
+      if (guard?.lastRollback?.length) {
+        console.warn('[PluginHost] 上次连续启动失败，已自动禁用插件:', guard.lastRollback);
+      }
+      if (guard?.safeMode) {
+        (window as unknown as { __SAFE_MODE__?: boolean }).__SAFE_MODE__ = true;
+        console.warn(
+          '[PluginHost] 安全模式：跳过全部插件加载',
+          guard.forceSafeMode ? '（回滚无效，强制安全模式）' : '（--safe-mode）'
+        );
+        onPluginsLoaded(registry);
+        return;
+      }
+      try {
+        await loadPlugins(registry);
+      } catch (e) {
+        console.warn('[PluginHost] 插件加载流水线异常:', e);
+      }
       onPluginsLoaded(registry);
-    });
+      // 插件加载完成后再更新一次基线：下次连续启动失败时按这份集合回滚
+      const ids = registry.getAll().map((p) => p.id);
+      if (ids.length) {
+        void api.bootGuardOk(ids).catch((e) => console.warn('[PluginHost] 更新启动基线失败:', e));
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅 mount 时执行一次，通过全局单例保护
   }, []);
 
@@ -422,17 +471,26 @@ async function loadPlugins(registry: PluginRegistry) {
 
   // 阶段 3：自注册校验
   let successCount = 0;
-  for (const settled of results) {
+  for (let i = 0; i < results.length; i++) {
+    const settled = results[i];
+    // allSettled 只给结果不给入参，用下标回查对应 manifest（顺序与 compatible 一致）
+    const failed = compatible[i];
     if (settled.status === 'rejected') {
       const err = settled.reason;
       const reason = err instanceof Error ? err.message : String(err);
       pluginDiagnostics.addEntry({
-        pluginId: '(未知)',
+        pluginId: failed?.id ?? '(未知)',
         stage: 'load',
         reason: `脚本加载失败: ${reason}`,
         timestamp: Date.now(),
       });
       logger.plugins.stage2Failed(reason);
+      // 启动加载失败 → 自动禁用并落盘。否则改坏的插件每次启动都拖垮整轮加载，
+      // 用户只能手动去扩展管理逐个关。重新启用走扩展管理即可。
+      if (failed?.id) {
+        void api.setPluginVisibility(failed.id, false).catch(() => {});
+        logger.plugins.disablePlugin(failed.id);
+      }
       continue;
     }
 

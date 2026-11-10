@@ -3,7 +3,7 @@ import { FolderOpen, AlertTriangle, RefreshCw, Package, Trash2, Download, Loader
 import { Switch } from "@/components/ui/switch"
 import { pluginDiagnostics, type DiagnosticEntry } from '@/core/pluginDiagnostics';
 import { PluginIcon } from '@/components/PluginIcon';
-import { api, type PluginManifest } from '@/lib/api';
+import { api, type PluginManifest, type BootGuardState } from '@/lib/api';
 import { logger } from '@/lib/logger';
 import type { PluginRegistry } from '@/core/pluginRegistry';
 import { createSandboxGlobals, executeInSandbox } from '@/core/pluginSandbox';
@@ -47,6 +47,8 @@ export function ExtensionManagerPanel() {
   // 列表来源：从 getInstalledPlugins 获取所有已安装插件（包括 visible=false 的已禁用插件），
   // 而非仅从 registry.getAll() 获取已加载的。这样已禁用的插件也显示在列表中，用户可重新启用。
   const [installedPlugins, setInstalledPlugins] = useState<PluginManifest[]>([]);
+  // 启动守卫：安全模式 / 上次连续启动失败后被自动禁用的插件
+  const [bootGuard, setBootGuard] = useState<BootGuardState | null>(null);
   // 能力授权视图：declared / granted / missing / trustedDev
   const [accessMap, setAccessMap] = useState<Record<string, AccessState>>({});
   const [consentTarget, setConsentTarget] = useState<PluginManifest | null>(null);
@@ -60,6 +62,10 @@ export function ExtensionManagerPanel() {
     }
   }, []);
   useEffect(() => { void refreshInstalledList(); }, [refreshInstalledList, tick]);
+  // 启动守卫状态：老后端没有这条命令时静默降级（读不到就不显示提示，不影响面板）
+  useEffect(() => {
+    void api.getBootGuardState().then(setBootGuard).catch(() => {});
+  }, [tick]);
 
   const refreshAccess = useCallback(async (list: PluginManifest[]) => {
     try {
@@ -177,6 +183,11 @@ export function ExtensionManagerPanel() {
       if (visible) {
         // 启用：加载插件到内存
         await pluginHot?.load(manifest);
+        // 用户手动恢复了被启动守卫自动禁用的插件 → 从提示名单里移除
+        void api.bootGuardClearRollback(manifest.id).catch(() => {});
+        setBootGuard((prev) =>
+          prev ? { ...prev, lastRollback: prev.lastRollback.filter((id) => id !== manifest.id) } : prev
+        );
       } else {
         // 禁用：从内存卸载
         pluginHot?.unload(manifest.id);
@@ -282,6 +293,43 @@ export function ExtensionManagerPanel() {
           </button>
         </div>
       </div>
+
+      {/* 启动守卫提示：安全模式 / 上次自动回滚禁用的插件。
+          放在列表上方，用户一进扩展管理就知道"为什么少了几个模块"。 */}
+      {bootGuard?.safeMode && (
+        <div className="flex items-start gap-2 rounded-xl border border-amber-200/70 bg-amber-50/80 px-4 py-3 text-xs text-amber-700 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          <span>
+            安全模式：本次未加载任何插件
+            {bootGuard.forceSafeMode ? '（连续启动失败且回滚无效，已强制进入）' : '（--safe-mode 启动）'}
+            。确认插件修好后重启应用即可恢复。
+          </span>
+          {bootGuard.forceSafeMode && (
+            <button
+              onClick={async () => {
+                try {
+                  await api.bootGuardExitSafeMode();
+                  window.location.reload();
+                } catch (err) {
+                  logger.log('[ExtManager] 退出安全模式失败:', err);
+                }
+              }}
+              className="btn-press ml-auto shrink-0 rounded-lg border border-amber-300/70 px-2.5 py-1 text-[11px] text-amber-700 hover:bg-amber-100/70 dark:border-amber-800/60 dark:text-amber-300 dark:hover:bg-amber-900/30"
+            >
+              退出并重新加载
+            </button>
+          )}
+        </div>
+      )}
+      {bootGuard?.lastRollback?.length ? (
+        <div className="flex items-start gap-2 rounded-xl border border-amber-200/70 bg-amber-50/80 px-4 py-3 text-xs text-amber-700 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          <span>
+            上次连续启动失败，已自动禁用 {bootGuard.lastRollback.length} 个插件：
+            {bootGuard.lastRollback.join('、')}。确认修好后可在下方重新启用。
+          </span>
+        </div>
+      ) : null}
 
       {/* 已安装插件（包括已启用和已禁用） */}
       <section>

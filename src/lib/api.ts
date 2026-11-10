@@ -79,6 +79,22 @@ export interface RejectedPlugin {
   reason: string;
 }
 
+// 启动守卫状态（services/boot_guard.rs）
+export interface BootGuardState {
+  /** 连续未确认的启动次数 */
+  attempts: number;
+  /** 上次成功启动时间（秒） */
+  lastOkAt: number;
+  /** 上次成功启动时实际加载的插件 id */
+  lastOkPlugins: string[];
+  /** 上次自动回滚禁用的插件（提示用，用户手动恢复后移除） */
+  lastRollback: string[];
+  /** 是否需要跳过全部插件加载（命令行安全模式或强制安全模式） */
+  safeMode: boolean;
+  /** 回滚无效后的强制安全模式 */
+  forceSafeMode: boolean;
+}
+
 // 中转站文件信息
 export interface TransferStationFile {
   fileId: string;
@@ -196,6 +212,17 @@ export const api = {
   // 设置插件可见性（启用/禁用，重启后生效）
   setPluginVisibility: (pluginId: string, visible: boolean) =>
     invoke<void>('set_plugin_visibility', { pluginId, visible }),
+
+  // 启动守卫状态：安全模式 / 上次连续启动失败后被自动禁用的插件
+  getBootGuardState: () => invoke<BootGuardState>('boot_guard_state'),
+  // 首屏渲染成功后确认「能启动」；传 pluginIds 时更新自动回滚的成功基线
+  bootGuardOk: (pluginIds?: string[] | null) =>
+    invoke<void>('boot_guard_ok', { pluginIds: pluginIds ?? null }),
+  // 用户手动恢复某个被自动禁用的插件后，从提示名单里移除
+  bootGuardClearRollback: (pluginId: string) =>
+    invoke<void>('boot_guard_clear_rollback', { pluginId }),
+  // 退出强制安全模式（清除标记与回滚提示），随后 reload 让插件重新加载
+  bootGuardExitSafeMode: () => invoke<void>('boot_guard_exit_safe_mode'),
 
   // 彻底删除插件（连同文件 + .mufurong 包 + 可见性记录）
   deletePlugin: (pluginId: string) =>
