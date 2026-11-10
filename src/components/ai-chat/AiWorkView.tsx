@@ -6,6 +6,7 @@ import { memo, useCallback, useMemo, useState } from 'react';
 import { BookmarkCheck, Sparkles, Check } from 'lucide-react';
 import { AiChatConversation } from './AiChatConversation';
 import type { Conversation, SendAttachment } from '@/components/capsule/types';
+import type { QueuedTurn } from '@/core/ai/useAiChat';
 import type { AiWorkProduct } from '@/core/ai/aiWorkProducts';
 
 /** 最近一次产出（排除错误/空内容），供「保存到产物库」 */
@@ -26,6 +27,11 @@ export interface AiWorkViewProps {
   activeConv: Conversation | null;
   busy: boolean;
   send: (text: string, images?: string[], attachments?: SendAttachment[]) => void;
+  /** 当前会话排队中的消息（生成中发出的消息自动进队列） */
+  queued?: QueuedTurn[];
+  onEditQueued?: (id: string, text: string) => void;
+  onDeleteQueued?: (id: string) => void;
+  onJumpQueued?: (id: string) => void;
   /** 停止本轮生成（透传给 AiChatConversation；不传则生成中按钮保持 disabled）。 */
   onStop?: () => void;
   /** 思考档位覆盖（透传）。''= 跟随配置。 */
@@ -53,6 +59,10 @@ export const AiWorkView = memo(function AiWorkView({
   activeConv,
   busy,
   send,
+  queued,
+  onEditQueued,
+  onDeleteQueued,
+  onJumpQueued,
   onStop,
   effort,
   onEffortChange,
@@ -113,6 +123,10 @@ export const AiWorkView = memo(function AiWorkView({
           busy={busy}
           profileId={profileId || ''}
           send={send}
+          queued={queued}
+          onEditQueued={onEditQueued}
+          onDeleteQueued={onDeleteQueued}
+          onJumpQueued={onJumpQueued}
           onStop={onStop}
           effort={effort}
           onEffortChange={onEffortChange}

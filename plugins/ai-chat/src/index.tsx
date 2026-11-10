@@ -162,6 +162,7 @@ const Root = memo(function Root() {
   const {
     conversations, activeId, activeConv, busy, profileId,
     selectConv, newConversation, newGroup, deleteConversation, renameConversation, clearAll, send, abort, webSearch, setWebSearch, effort, setEffort,
+    queued, editQueued, deleteQueued, jumpQueued,
     regenerate, switchVersion, rateMessage,
     decidePlan,
   } = useAiChat({ persistKey: DEFAULT_PERSIST_KEY });
@@ -483,6 +484,10 @@ const Root = memo(function Root() {
             busy={busy}
             profileId={profileId}
             send={sendWithCompanion}
+            queued={queued}
+            onEditQueued={editQueued}
+            onDeleteQueued={deleteQueued}
+            onJumpQueued={jumpQueued}
             onStop={abort}
             effort={effort}
             onEffortChange={setEffort}
@@ -507,6 +512,10 @@ const Root = memo(function Root() {
         activeConv={aiWorkChat.activeConv}
         busy={aiWorkChat.busy}
         send={aiWorkChat.send}
+        queued={aiWorkChat.queued}
+        onEditQueued={aiWorkChat.editQueued}
+        onDeleteQueued={aiWorkChat.deleteQueued}
+        onJumpQueued={aiWorkChat.jumpQueued}
         onStop={aiWorkChat.abort}
         effort={aiWorkChat.effort}
         onEffortChange={aiWorkChat.setEffort}

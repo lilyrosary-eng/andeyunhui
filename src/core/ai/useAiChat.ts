@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChatMsg, Conversation, SendAttachment, AttachmentMeta } from '@/components/capsule/types';
 import { useAiStream } from '@/components/capsule/useAiStream';
+import type { AgentStepPayload } from '@/components/capsule/useAiStream';
 import { EVENTS } from '@/core/events/schema';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -162,6 +163,17 @@ export interface UseAiChatResult {
   /** 发送一条消息。images 为可选的多模态图片（data URL），后端 ai_vision_ocr 生成描述后注入 system。
    *  sendOpts 可覆盖本轮的人设/system 注入（见 SendOptions）。 */
   send: (text: string, images?: string[], attachments?: SendAttachment[], sendOpts?: SendOptions) => Promise<void>;
+  /** 当前会话里排队等待发送的消息（生成中发出的消息自动进这里）。 */
+  queued: QueuedTurn[];
+  /** 编辑排队消息的文本。 */
+  editQueued: (id: string, text: string) => void;
+  /** 删除排队消息。 */
+  deleteQueued: (id: string) => void;
+  /**
+   * 插队：把消息移到队首并尝试立刻开始。
+   * 正在写/删文件时不打断（等本轮结束自动发）；读文件 / 跑命令 / 思考中会直接中止本轮。
+   */
+  jumpQueued: (id: string) => void;
   /**
    * 重新生成**最后一条**助手回复：丢弃它，沿用同一份历史重发。
    * 中间轮次不开放（那需要连带丢弃后续轮次，属于「分支」的语义）。
@@ -185,6 +197,20 @@ export interface UseAiChatResult {
   groupSend: (text: string) => Promise<void>;
   /** 群聊内部：让单个发言者说一句（注入其独立人设 system，复用全局流式落盘）。 */
   sendOne: (speakerId: string, history: ChatMsg[]) => Promise<void>;
+}
+
+/**
+ * 一条排队中的用户消息。
+ * 会话正在生成时再次发送不会丢，而是排进这条会话自己的队列；
+ * 支持编辑、删除、插队（插队会按当前工具类型决定是否安全打断）。
+ */
+export interface QueuedTurn {
+  id: string;
+  text: string;
+  images?: string[];
+  attachments?: SendAttachment[];
+  sendOpts?: SendOptions;
+  createdAt: number;
 }
 
 /**
@@ -249,6 +275,53 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   const reqRef = useRef<string | null>(null);
   const asstRef = useRef<string | null>(null);
   const streamConvIdRef = useRef<string>('');
+
+  // ===== 会话内发送队列 =====
+  // 生成中再发消息不丢：排队等本轮结束自动发；支持编辑 / 删除 / 插队。
+  const queuedRef = useRef<Record<string, QueuedTurn[]>>({});
+  const [queued, setQueued] = useState<QueuedTurn[]>([]);
+  // runSend 在下方才定义；用 ref 让队列回调保持稳定引用（useAiStream 的 effect 依赖它们，
+  // 内联函数会让监听器每轮重建，正是当初「delta 重复」的根因）。
+  const runSendRef = useRef<
+    | ((text: string, images?: string[], attachments?: SendAttachment[], sendOpts?: SendOptions) => Promise<void>)
+    | null
+  >(null);
+  // 当前正在执行的工具（tool-start → tool）。插队据此判断「写文件时不打断」。
+  const currentToolRef = useRef<{ name: string; kind: string } | null>(null);
+
+  const syncQueued = useCallback((convId: string) => {
+    setQueued(convId === activeIdRef.current ? [...(queuedRef.current[convId] ?? [])] : []);
+  }, []);
+
+  const drainQueue = useCallback((convId: string) => {
+    const list = queuedRef.current[convId] ?? [];
+    if (list.length === 0) return;
+    const [next, ...rest] = list;
+    queuedRef.current[convId] = rest;
+    if (convId === activeIdRef.current) setQueued([...rest]);
+    void runSendRef.current?.(next.text, next.images, next.attachments, next.sendOpts);
+  }, []);
+
+  // 本轮自然结束（done / error）→ 继续队列。用户主动停止时 reqRef 已置空，
+  // 事件不会匹配到这里，队列自然暂停，等用户下次手动发送。
+  const handleRunFinish = useCallback((_requestId: string) => {
+    currentToolRef.current = null;
+    const convId = streamConvIdRef.current;
+    if (convId) drainQueue(convId);
+  }, [drainQueue]);
+
+  // 工具活动：file 的读/写/删通过 meta.kind 区分（写文件是 diff 卡片）。
+  const handleAgentStep = useCallback((payload: AgentStepPayload) => {
+    if (payload.stage === 'tool-start') {
+      const meta = payload.meta ?? {};
+      const card = typeof meta.card === 'string' ? meta.card : '';
+      const kind = card === 'diff' ? 'edit' : typeof meta.kind === 'string' ? meta.kind : 'other';
+      currentToolRef.current = { name: payload.name ?? '', kind };
+    } else if (payload.stage === 'tool') {
+      currentToolRef.current = null;
+    }
+  }, []);
+
   // setBusy 必须是稳定引用：useAiStream 的 effect 依赖它，内联箭头函数会让 effect
   // 随每次渲染重建——流式期间每个 delta 都触发渲染 → 监听器被反复拆卸重装，
   // 异步注册跟不上重建节奏时产生「孤儿监听器」，同一 delta 被 2~3 个监听器重复
@@ -258,9 +331,22 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     setBusy(v);
   }, []);
   useAiStream(
-    { prefix: EVENTS.chatStream.prefix, deltaMode: 'append', hasReasoning: true, hasAgentStep: true, hasPlanApproval: true },
+    {
+      prefix: EVENTS.chatStream.prefix,
+      deltaMode: 'append',
+      hasReasoning: true,
+      hasAgentStep: true,
+      hasPlanApproval: true,
+      onFinish: handleRunFinish,
+      onAgentStep: handleAgentStep,
+    },
     { reqRef, asstRef, streamConvIdRef, updateMessages, setBusy: setBusyStable },
   );
+
+  // 切会话时把队列切到对应会话（每个会话各自排队，互不串）。
+  useEffect(() => {
+    setQueued([...(queuedRef.current[activeId ?? ''] ?? [])]);
+  }, [activeId]);
 
   /**
    * 停止本轮生成（用户点「停止」）。
@@ -494,7 +580,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     activeIdRef.current = fresh.id;
   }, []);
 
-  const send = async (text: string, images?: string[], attachments?: SendAttachment[], sendOpts?: SendOptions) => {
+  const runSend = async (text: string, images?: string[], attachments?: SendAttachment[], sendOpts?: SendOptions) => {
     const content = text.trim();
     const hasImages = !!images?.length;
     // 本轮生效的人设口径：sendOpts 覆盖 hook 级 options。
@@ -710,8 +796,107 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
         ? `请求失败（${raw.match(/HTTP\s+\d+[^,}]*/)?.[0] || '上游错误'}）`
         : `请求失败：${raw.slice(0, 120)}`;
       updateMessages(cid, (prev) => prev.map((m) => (m.id === asstId ? { ...m, error: true, content: '⚠ ' + short } : m)));
+      // 请求没真正发出去（缺 key / 后端拒绝）：队列继续下一条，不能整条卡死。
+      drainQueue(cid);
     }
   };
+
+  // 队列回调通过 ref 调用最新版本的 runSend（它读大量 ref/state，不适合做成稳定 useCallback）。
+  runSendRef.current = runSend;
+
+  /**
+   * 发送入口：空闲时直接开始；正在生成时排进当前会话队列，等本轮结束自动发。
+   * 这样用户连续发多条不会丢，也不会被静默忽略。
+   */
+  const send = async (text: string, images?: string[], attachments?: SendAttachment[], sendOpts?: SendOptions) => {
+    const cid = activeIdRef.current;
+    if (!cid) return;
+    const content = text.trim();
+    const hasContent = !!content || !!images?.length || (attachments?.length ?? 0) > 0;
+    if (!hasContent) return;
+    // 重新生成自带「复用助手消息」语义，不能排队（排队后上下文已经变了）。
+    if (busyRef.current && sendOpts?.reuseAssistantId) return;
+    if (busyRef.current) {
+      const item: QueuedTurn = {
+        id: uid(),
+        text: content,
+        images,
+        attachments,
+        sendOpts,
+        createdAt: Date.now(),
+      };
+      queuedRef.current[cid] = [...(queuedRef.current[cid] ?? []), item];
+      syncQueued(cid);
+      return;
+    }
+    return runSend(text, images, attachments, sendOpts);
+  };
+
+  const editQueued = useCallback((id: string, text: string) => {
+    const convId = activeIdRef.current;
+    if (!convId) return;
+    queuedRef.current[convId] = (queuedRef.current[convId] ?? []).map((item) =>
+      item.id === id ? { ...item, text } : item,
+    );
+    setQueued([...(queuedRef.current[convId] ?? [])]);
+  }, []);
+
+  const deleteQueued = useCallback((id: string) => {
+    const convId = activeIdRef.current;
+    if (!convId) return;
+    queuedRef.current[convId] = (queuedRef.current[convId] ?? []).filter((item) => item.id !== id);
+    setQueued([...(queuedRef.current[convId] ?? [])]);
+  }, []);
+
+  /**
+   * 插队：移到队首并尽量立刻开始。
+   * - 空闲：直接发；
+   * - 正在写/删文件：不打断，等本轮结束（此时队首就是它）；
+   * - 读文件 / 跑命令 / 思考中：中止本轮，等后端真正停下后再发，避免两个任务同时写文件。
+   */
+  const jumpQueued = useCallback((id: string) => {
+    const convId = activeIdRef.current;
+    if (!convId) return;
+    const list = queuedRef.current[convId] ?? [];
+    const item = list.find((turn) => turn.id === id);
+    if (!item) return;
+    queuedRef.current[convId] = [item, ...list.filter((turn) => turn.id !== id)];
+    setQueued([...(queuedRef.current[convId] ?? [])]);
+
+    if (!busyRef.current) {
+      drainQueue(convId);
+      return;
+    }
+    const tool = currentToolRef.current;
+    if (tool && (tool.kind === 'edit' || tool.kind === 'delete')) return;
+
+    const rid = reqRef.current;
+    if (!rid) return;
+    // 中止本轮，等它真正退出后再发；后端强杀可能不发 done，所以主动轮询状态兜底。
+    void (async () => {
+      try {
+        await invoke(agentRef.current ? 'ai_agent_cancel' : 'ai_chat_cancel', { requestId: rid });
+      } catch {
+        // 已经结束 / 找不到 worker：继续收口
+      }
+      for (let i = 0; i < 20; i++) {
+        try {
+          const raw = await invoke<string>('ai_agent_status', { requestId: rid });
+          const parsed = JSON.parse(raw) as { running?: boolean };
+          if (!parsed.running) break;
+        } catch {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      // done 已经收口过（reqRef 已换或置空）就不要再重复处理。
+      if (reqRef.current !== rid) return;
+      reqRef.current = null;
+      asstRef.current = null;
+      setBusyStable(false);
+      drainQueue(convId);
+    })();
+  }, [drainQueue, setBusyStable]);
 
   // 群聊发言：单个发言者（伴侣）基于给定历史说一句，注入其独立人设 system。
   // intro 为编排者（router）给的本轮台词引导（接梗/补刀/旁观提示），增强「活人感」。
@@ -1087,6 +1272,10 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     setEffort,
     clearAll,
     send,
+    queued,
+    editQueued,
+    deleteQueued,
+    jumpQueued,
     /** 重新生成最后一条助手回复（丢弃它、沿用同一份历史重发）。 */
     regenerate,
     /** 切到上/下一版回复（重新生成留下的多版本）。 */

@@ -24,6 +24,10 @@ function CapsuleChat({ coverUrl }: { coverUrl: string | null }) {
     deleteConversation,
     renameConversation,
     send,
+    queued,
+    editQueued,
+    deleteQueued,
+    jumpQueued,
     abort,
     webSearch,
     setWebSearch,
@@ -43,6 +47,10 @@ function CapsuleChat({ coverUrl }: { coverUrl: string | null }) {
       busy={busy}
       profileId={profileId}
       send={send}
+      queued={queued}
+      onEditQueued={editQueued}
+      onDeleteQueued={deleteQueued}
+      onJumpQueued={jumpQueued}
       onStop={abort}
       webSearch={webSearch}
       onToggleWebSearch={setWebSearch}

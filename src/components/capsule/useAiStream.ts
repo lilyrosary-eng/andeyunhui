@@ -19,6 +19,26 @@ export interface AiStreamConfig {
   hasAgentStep?: boolean;
   /** 是否监听 plan-approval（计划确认闸门：{prefix}-plan-approval） */
   hasPlanApproval?: boolean;
+  /**
+   * 本轮结束（done / error 共用收口）后回调，携带刚结束的 requestId。
+   * 发送队列用它决定是否继续下一条；不传则维持原行为。
+   */
+  onFinish?: (requestId: string) => void;
+  /**
+   * 每条 agent-step 原样回调（在写入消息之前）。
+   * 发送队列用它判断「当前有没有工具在跑、跑的是读还是写」，决定插队是否安全。
+   */
+  onAgentStep?: (payload: AgentStepPayload) => void;
+}
+
+export interface AgentStepPayload {
+  requestId: string;
+  stage: string;
+  name?: string;
+  ok?: boolean;
+  detail?: string;
+  meta?: Record<string, unknown>;
+  plan?: unknown;
 }
 
 export interface AiStreamRefs {
@@ -40,7 +60,7 @@ export interface AiStreamRefs {
  * 忠实复刻原三套内联实现，仅去重，不改行为。
  */
 export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
-  const { prefix, deltaMode, hasReasoning, hasAgentStep, hasPlanApproval } = config;
+  const { prefix, deltaMode, hasReasoning, hasAgentStep, hasPlanApproval, onFinish, onAgentStep } = config;
   const { reqRef, asstRef, streamConvIdRef, updateMessages, setBusy } = refs;
 
   useEffect(() => {
@@ -117,6 +137,7 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
         setBusy(false);
         const aid = asstRef.current;
         const cid = streamConvIdRef.current;
+        const finishedRequestId = reqRef.current;
         reqRef.current = null;
         if (aid) {
           updateMessages(cid, (prev) => prev.map((m) => {
@@ -126,6 +147,8 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
           }));
         }
         asstRef.current = null;
+        // 收口通知放在最后：此时 busy / req 已复位，队列可以直接开始下一条。
+        if (finishedRequestId) onFinish?.(finishedRequestId);
       };
 
       const u2 = await listen<{ requestId: string }>(`${prefix}-done`, (e) => {
@@ -157,12 +180,21 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
 
       // agent 工具步骤（运行中实时累积，供执行轨迹面板在落盘前展示）
       if (hasAgentStep) {
-        const u5 = await listen<{ requestId: string; stage: string; name: string; ok: boolean; detail: string; meta?: Record<string, unknown>; plan?: unknown }>(`${prefix}-agent-step`, (e) => {
+        const u5 = await listen<AgentStepPayload>(`${prefix}-agent-step`, (e) => {
           if (cancelled) return;
-          if (e.payload.requestId !== reqRef.current || !asstRef.current) return;
+          if (e.payload.requestId !== reqRef.current) return;
+          // 先回调（此时还没写消息）：队列用它判断当前工具是否可安全打断。
+          onAgentStep?.(e.payload);
+          if (!asstRef.current) return;
           const id = asstRef.current;
           const cid = streamConvIdRef.current;
-          const step = { stage: e.payload.stage, name: e.payload.name, ok: e.payload.ok, detail: e.payload.detail, meta: e.payload.meta };
+          const step = {
+            stage: e.payload.stage,
+            name: e.payload.name ?? '',
+            ok: e.payload.ok ?? true,
+            detail: e.payload.detail ?? '',
+            meta: e.payload.meta,
+          };
           // plan 工具执行后携带的完整计划快照：覆盖到当前助手消息，供 PlanPanel 只读渲染。
           // 同一份快照也留在 step 上，轨迹面板回看时能看到当时的计划（不必依赖最后一条消息）。
           const plan = parsePlanSnapshot(e.payload.plan);
@@ -175,7 +207,7 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
           // AI 写回备注：生图失败时，把原因沉淀进该 ComfyUI 工作流的技能包备注，
           // 下次规划（L3 注入）与运行（日志披露）都能看到，同一坑不踩第二次。
           if (e.payload.name === 'generate_image' && e.payload.ok === false) {
-            recordGenerateFail(e.payload.detail);
+            recordGenerateFail(e.payload.detail ?? '');
           }
         });
         if (cancelled) { u5(); return; }
@@ -221,5 +253,5 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
       flushDelta();
       un.forEach((f) => f());
     };
-  }, [prefix, deltaMode, hasReasoning, hasAgentStep, hasPlanApproval, updateMessages, setBusy]);
+  }, [prefix, deltaMode, hasReasoning, hasAgentStep, hasPlanApproval, onFinish, onAgentStep, updateMessages, setBusy]);
 }

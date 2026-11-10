@@ -5,8 +5,9 @@ import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
 import { pathToFile } from '@/platform/nativeDropFiles';
 import { invoke } from '@tauri-apps/api/core';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Send, Sparkles, Brain, ChevronDown, ChevronRight, ChevronLeft, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity, Square, Copy, Check, RefreshCw, ThumbsUp, ThumbsDown, Volume2, VolumeX } from 'lucide-react';
+import { Send, Sparkles, Brain, ChevronDown, ChevronRight, ChevronLeft, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity, Square, Copy, Check, RefreshCw, ThumbsUp, ThumbsDown, Volume2, VolumeX, Clock } from 'lucide-react';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
+import type { QueuedTurn } from '@/core/ai/useAiChat';
 import { InlineSelect } from '@/components/ui/inline-select';
 import type { Conversation, SendAttachment, AttachmentKind, ChatMsg } from '@/components/capsule/types';
 import { AgentTracePanel } from './AgentTracePanel';
@@ -268,11 +269,93 @@ function isTextLike(f: { name: string; type: string }): boolean {
   return TEXT_EXTS.has(ext);
 }
 
+/** 一条排队消息：可编辑、插队、删除。生成中发出的消息才会出现在这里。 */
+const QueuedTurnRow = memo(function QueuedTurnRow({
+  item,
+  index,
+  capsuleMode,
+  onEdit,
+  onDelete,
+  onJump,
+}: {
+  item: QueuedTurn;
+  index: number;
+  capsuleMode: boolean;
+  onEdit?: (id: string, text: string) => void;
+  onDelete?: (id: string) => void;
+  onJump?: (id: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(item.text);
+  useEffect(() => {
+    if (!editing) setDraft(item.text);
+  }, [item.text, editing]);
+  const save = () => {
+    onEdit?.(item.id, draft.trim());
+    setEditing(false);
+  };
+  const shell = capsuleMode
+    ? 'border-white/10 text-white/70'
+    : 'border-neutral-200 bg-white/60 text-neutral-500 dark:border-stone-700 dark:bg-stone-800/40 dark:text-stone-400';
+  return (
+    <div className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] ${shell}`}>
+      <span className="shrink-0 tabular-nums opacity-60">{index + 1}</span>
+      {editing ? (
+        <input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              save();
+            }
+            if (e.key === 'Escape') {
+              setEditing(false);
+              setDraft(item.text);
+            }
+          }}
+          className="min-w-0 flex-1 rounded border border-sky-400/50 bg-transparent px-1.5 py-0.5 text-[11px] outline-none"
+        />
+      ) : (
+        <span className="min-w-0 flex-1 truncate" title={item.text}>
+          {item.text || '（附件）'}
+        </span>
+      )}
+      <button
+        onClick={() => (editing ? save() : setEditing(true))}
+        className="shrink-0 rounded px-1 hover:bg-black/5 dark:hover:bg-white/10"
+      >
+        {editing ? '保存' : '编辑'}
+      </button>
+      <button
+        onClick={() => onJump?.(item.id)}
+        className="shrink-0 rounded px-1 text-sky-600 hover:bg-sky-500/10 dark:text-sky-400"
+        title="插队：尽量立刻发送；正在写文件时会等本轮结束"
+      >
+        插队
+      </button>
+      <button
+        onClick={() => onDelete?.(item.id)}
+        className="shrink-0 rounded px-1 text-neutral-400 hover:text-red-500"
+      >
+        删除
+      </button>
+    </div>
+  );
+});
+
 export interface AiChatConversationProps {
   activeConv: Conversation | null;
   busy: boolean;
   profileId: string;
   send: (text: string, images?: string[], attachments?: SendAttachment[]) => void;
+  /** 当前会话排队中的消息（生成中发出的消息自动进这里）。 */
+  queued?: QueuedTurn[];
+  onEditQueued?: (id: string, text: string) => void;
+  onDeleteQueued?: (id: string) => void;
+  /** 插队：移到队首并尽量立刻开始（写文件时会等本轮结束）。 */
+  onJumpQueued?: (id: string) => void;
   /**
    * 停止本轮生成。不传则生成中按钮保持 disabled（旧行为）—— 但主程序三个入口
    * （AI 对话 / AI 工作 / 胶囊对话）都已接入，胶囊 AI 编程见 CapsuleAide 自己的实现。
@@ -326,6 +409,10 @@ export const AiChatConversation = memo(function AiChatConversation({
   busy,
   profileId,
   send,
+  queued = [],
+  onEditQueued,
+  onDeleteQueued,
+  onJumpQueued,
   onClear,
   companionCard,
   showCompanionAvatar,
@@ -493,7 +580,8 @@ export const AiChatConversation = memo(function AiChatConversation({
 
   const submit = () => {
     const text = input.trim();
-    if ((!text && picked.length === 0) || busy) return;
+    // 生成中不再拦截：消息会进入队列，本轮结束后自动发送。
+    if (!text && picked.length === 0) return;
     // 图片单独走 images（发送时 OCR 注入）；非图片走 attachments（文本注入/文件陈列）
     // 丢掉空 dataUrl：曾经会得到一个 `['']`，m.images 长度 >0 但 <img src=""> 什么也不显示
     const images = picked
@@ -1140,6 +1228,24 @@ async function fileToChatDataUrl(f: File): Promise<string> {
       {/* 输入区 */}
       <div className={`border-t ${borderCls} px-6 py-4 flex-shrink-0`}>
         <div className="max-w-3xl mx-auto">
+          {queued.length > 0 && (
+            <div className="mb-2 space-y-1">
+              <div className="flex items-center gap-1.5 text-[11px] text-neutral-400 dark:text-stone-500">
+                <Clock size={12} /> 排队中 {queued.length} 条 · 本轮结束后自动发送
+              </div>
+              {queued.map((item, index) => (
+                <QueuedTurnRow
+                  key={item.id}
+                  item={item}
+                  index={index}
+                  capsuleMode={capsuleMode}
+                  onEdit={onEditQueued}
+                  onDelete={onDeleteQueued}
+                  onJump={onJumpQueued}
+                />
+              ))}
+            </div>
+          )}
           <div className="flex items-end gap-3">
             <div className={`flex-1 rounded-2xl ${inputWrapCls} px-4 py-2.5 focus-within:border-sky-400 transition-colors`}>
               {/* 附件区：已选图片缩略图 + 文本/二进制文件 chip（可单击移除） */}
@@ -1262,17 +1368,27 @@ async function fileToChatDataUrl(f: File): Promise<string> {
                 （长回答可以跑几十秒）。做法与 ComfyUI 生图那个按钮一致：
                 位置固定，点下去要么开始要么停止，不必在忙的时候另找一个按钮。 */}
             {busy && onStop ? (
-              <button
-                onClick={onStop}
-                title="停止生成"
-                className={`btn-press w-11 h-11 flex items-center justify-center rounded-2xl ${stopBtnCls} transition-opacity`}
-              >
-                <Square size={14} fill="currentColor" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={submit}
+                  disabled={!input.trim() && picked.length === 0}
+                  title="加入队列：本轮结束后自动发送"
+                  className={`btn-press w-11 h-11 flex items-center justify-center rounded-2xl ${sendBtnCls} transition-opacity disabled:opacity-40`}
+                >
+                  <Send size={16} />
+                </button>
+                <button
+                  onClick={onStop}
+                  title="停止生成"
+                  className={`btn-press w-11 h-11 flex items-center justify-center rounded-2xl ${stopBtnCls} transition-opacity`}
+                >
+                  <Square size={14} fill="currentColor" />
+                </button>
+              </div>
             ) : (
               <button
                 onClick={submit}
-                disabled={busy || (!input.trim() && picked.length === 0)}
+                disabled={!input.trim() && picked.length === 0}
                 className={`btn-press w-11 h-11 flex items-center justify-center rounded-2xl ${sendBtnCls} transition-opacity`}
               >
                 <Send size={18} />
