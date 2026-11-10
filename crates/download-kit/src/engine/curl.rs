@@ -63,9 +63,12 @@ impl DownloadEngine for CurlEngine {
         }
 
         let meta = HttpMeta::from_task(&task);
-        let probe = probe::probe(&self.client, &task.urls[0], &meta)
-            .await
-            .unwrap_or_default();
+        let probe = match ctx.probe() {
+            Some(probe) => probe,
+            None => probe::probe(&self.client, &task.urls[0], &meta)
+                .await
+                .unwrap_or_default(),
+        };
         let total = probe.total_bytes.max(task.total_bytes);
         if let Some(max) = task.max_bytes {
             if total > max {

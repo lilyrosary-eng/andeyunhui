@@ -23,9 +23,8 @@ use tokio::sync::watch;
 
 use crate::manager::{Control, Inner, TaskProgress};
 use crate::types::{
-    DownloadPart, DownloadTask, EngineConfig, EngineKind, TaskStatus,
+    DownloadPart, DownloadTask, EngineConfig, EngineKind, ProbeResult, TaskStatus,
 };
-use crate::util::is_hls_url;
 
 /// 单个分片的执行结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +49,8 @@ pub struct EngineCtx {
     pub task_id: String,
     /// 入队时已解析好的最终文件路径（避免引擎反复查库，也避免任务缺失时误写工作目录）。
     pub(crate) save_path: PathBuf,
+    /// auto 路由阶段做过的探针结果；引擎直接复用，避免重复 HEAD。
+    pub(crate) probe: Option<ProbeResult>,
     pub(crate) control: watch::Receiver<Control>,
 }
 
@@ -82,6 +83,11 @@ impl EngineCtx {
         self.inner
             .store
             .update_meta(&self.task_id, engine, filename, total)
+    }
+
+    /// 路由阶段已经探测过就复用，没有则返回 None（引擎自行探测）。
+    pub(crate) fn probe(&self) -> Option<ProbeResult> {
+        self.probe.clone()
     }
 
     /// 推进到活动态（probing/downloading/merging）。任务已被暂停/取消时返回 false。
@@ -247,9 +253,4 @@ pub fn build_registry(
         Arc::new(gopeed::GopeedEngine::new(gopeed)),
     );
     registry
-}
-
-/// HLS 清单统一交给 ffmpeg（分段拉流 + 转封装是它的强项）。
-pub(crate) fn is_hls(url: &str) -> bool {
-    is_hls_url(url)
 }

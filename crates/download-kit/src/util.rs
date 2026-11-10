@@ -82,6 +82,46 @@ pub fn is_p2p_url(url: &str) -> bool {
     path.ends_with(".torrent")
 }
 
+/// FTP / FTPS 链接：只能交给支持该协议的外部引擎。
+pub fn is_ftp_url(url: &str) -> bool {
+    let value = url.trim().to_ascii_lowercase();
+    value.starts_with("ftp://") || value.starts_with("ftps://")
+}
+
+/// DASH 清单：ffmpeg 可直接拉流并转封装。
+pub fn is_dash_url(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    path.to_ascii_lowercase().ends_with(".mpd")
+}
+
+/// Metalink 清单：一个文件包含多个源/校验值，交给 aria2 处理最省事。
+pub fn is_metalink_url(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".metalink") || lower.ends_with(".meta4")
+}
+
+/// 是否需要先嗅探 Content-Type 再选引擎。
+///
+/// 只对「没有后缀」或「动态后缀」的 HTTP 地址嗅探；`.mp4` / `.zip` 这类已知后缀
+/// 直接按静态规则走，避免为每个任务多打一次 HEAD。
+pub fn should_sniff_content_type(url: &str) -> bool {
+    let value = url.trim().to_ascii_lowercase();
+    if !(value.starts_with("http://") || value.starts_with("https://")) {
+        return false;
+    }
+    let path = value.split(['?', '#']).next().unwrap_or(&value);
+    let file = path.rsplit('/').next().unwrap_or("");
+    if file.is_empty() || !file.contains('.') {
+        return true;
+    }
+    let extension = file.rsplit('.').next().unwrap_or("");
+    matches!(
+        extension,
+        "php" | "asp" | "aspx" | "jsp" | "cgi" | "do" | "action" | "pl"
+    )
+}
+
 /// 递归统计目录大小（P2P 任务完成后用来回填下载量）。
 pub fn dir_size(path: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(path) else {
@@ -215,6 +255,29 @@ mod tests {
         assert!(is_p2p_url("https://x.test/a.torrent?token=1"));
         assert!(!is_p2p_url("https://x.test/a.mp4"));
         assert!(!is_p2p_url("ftp://x.test/a.bin"));
+    }
+
+    #[test]
+    fn protocol_url_detection() {
+        assert!(is_ftp_url("ftp://x.test/a.bin"));
+        assert!(is_ftp_url("FTPS://x.test/a.bin"));
+        assert!(!is_ftp_url("https://x.test/a.bin"));
+        assert!(is_dash_url("https://x.test/live/manifest.mpd?token=1"));
+        assert!(!is_dash_url("https://x.test/live/index.m3u8"));
+        assert!(is_metalink_url("https://x.test/a.metalink"));
+        assert!(is_metalink_url("https://x.test/a.meta4?x=1"));
+        assert!(!is_metalink_url("https://x.test/a.torrent"));
+    }
+
+    #[test]
+    fn content_type_sniffing_targets_ambiguous_urls() {
+        assert!(should_sniff_content_type("https://x.test/download/12345"));
+        assert!(should_sniff_content_type("https://x.test/get.php?id=1"));
+        assert!(should_sniff_content_type("https://x.test/stream.aspx?file=a"));
+        assert!(!should_sniff_content_type("https://x.test/a.mp4"));
+        assert!(!should_sniff_content_type("https://x.test/a.zip?token=1"));
+        assert!(!should_sniff_content_type("ftp://x.test/a.bin"));
+        assert!(!should_sniff_content_type("magnet:?xt=urn:btih:abcdef"));
     }
 
     #[test]

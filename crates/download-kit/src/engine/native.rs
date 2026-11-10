@@ -104,9 +104,12 @@ impl NativeEngine {
         kind: EngineKind,
     ) -> Result<EngineOutcome, String> {
         let meta = HttpMeta::from_task(&task);
-        let probe = probe::probe(&self.client, &task.urls[0], &meta)
-            .await
-            .unwrap_or_default();
+        let probe = match ctx.probe() {
+            Some(probe) => probe,
+            None => probe::probe(&self.client, &task.urls[0], &meta)
+                .await
+                .unwrap_or_default(),
+        };
         if probe.total_bytes > 0 {
             task.total_bytes = probe.total_bytes;
         }
@@ -141,86 +144,79 @@ impl NativeEngine {
         }
 
         let multipart = parts.len() > 1;
-        let progress = Arc::new(TaskProgress::new(
+        ctx.transition(TaskStatus::Downloading)?;
+        ctx.emit_state();
+
+        let mut final_progress = Arc::new(TaskProgress::new(
             task.total_bytes,
             task.connections,
             parts.len() as u32,
         ));
         for part in &parts {
-            progress.seed(part);
+            final_progress.seed(part);
         }
 
-        ctx.transition(TaskStatus::Downloading)?;
-        ctx.emit_state();
+        let mut attempt = self
+            .download_parts(
+                &ctx,
+                &task,
+                &parts,
+                &final_progress,
+                task.connections as usize,
+                multipart,
+            )
+            .await;
 
-        let mut set: tokio::task::JoinSet<Result<PartResult, String>> =
-            tokio::task::JoinSet::new();
-        for part in parts.iter().cloned() {
-            if part.state == PartState::Completed {
-                continue;
+        // 降级 1：并发被服务器拒绝/超时，保留已完成分片，改为单连接顺序下载。
+        if let Err(error) = &attempt {
+            let kind = error.kind;
+            if kind != PartErrorKind::RangeUnsupported && task.connections > 1 {
+                let reloaded = ctx.parts()?;
+                let retry_progress = Arc::new(TaskProgress::new(
+                    task.total_bytes,
+                    1,
+                    reloaded.len() as u32,
+                ));
+                for part in &reloaded {
+                    retry_progress.seed(part);
+                }
+                attempt = self
+                    .download_parts(&ctx, &task, &reloaded, &retry_progress, 1, multipart)
+                    .await;
+                if attempt.is_ok() {
+                    final_progress = retry_progress;
+                }
             }
-            let ctx2 = ctx.clone();
-            let task2 = task.clone();
-            let client = self.client.clone();
-            let config = self.config.clone();
-            let progress = progress.clone();
-            set.spawn(async move {
-                let mut part = part;
-                download_part(
-                    &client,
-                    &config,
-                    &ctx2,
-                    &task2,
-                    &mut part,
-                    &progress,
-                    multipart,
+        }
+
+        // 降级 2：服务器实际不支持 Range（多分片收到 200）→ 重置为单流从头下载。
+        if matches!(&attempt, Err(error) if error.kind == PartErrorKind::RangeUnsupported) {
+            let single = plan_single_stream(&task, &ctx.temp_dir());
+            ctx.replace_parts(std::slice::from_ref(&single))?;
+            let retry_progress = Arc::new(TaskProgress::new(task.total_bytes, 1, 1));
+            attempt = self
+                .download_parts(
+                    &ctx,
+                    &task,
+                    std::slice::from_ref(&single),
+                    &retry_progress,
+                    1,
+                    false,
                 )
-                .await
-            });
-        }
-
-        let mut pause = false;
-        let mut cancel = false;
-        let mut failure: Option<String> = None;
-        while let Some(joined) = set.join_next().await {
-            match joined {
-                Ok(Ok(PartResult::Done)) => {}
-                Ok(Ok(PartResult::Paused)) => {
-                    pause = true;
-                    set.abort_all();
-                    break;
-                }
-                Ok(Ok(PartResult::Canceled)) => {
-                    cancel = true;
-                    set.abort_all();
-                    break;
-                }
-                Ok(Err(message)) => {
-                    failure = Some(message);
-                    set.abort_all();
-                    break;
-                }
-                Err(join_error) => {
-                    failure = Some(format!("分片任务异常: {join_error}"));
-                    set.abort_all();
-                    break;
-                }
+                .await;
+            if attempt.is_ok() {
+                final_progress = retry_progress;
             }
         }
-        // 等被 abort 的分片把临时文件句柄释放掉。
-        set.shutdown().await;
 
-        if cancel {
-            return Ok(EngineOutcome::Canceled);
-        }
-        if pause {
-            return Ok(EngineOutcome::Paused);
-        }
-        if let Some(message) = failure {
-            return Err(message);
+        match attempt {
+            Ok(PartsOutcome::Done) => {}
+            Ok(PartsOutcome::Paused) => return Ok(EngineOutcome::Paused),
+            Ok(PartsOutcome::Canceled) => return Ok(EngineOutcome::Canceled),
+            Err(error) => return Err(error.message),
         }
 
-        let downloaded = progress.downloaded.load(Ordering::Relaxed);
+        let downloaded = final_progress.downloaded.load(Ordering::Relaxed);
         ctx.set_progress(downloaded, task.total_bytes);
         if task.total_bytes > 0 && downloaded != task.total_bytes {
             return Err(format!(
@@ -235,7 +231,9 @@ impl NativeEngine {
         ctx.transition(TaskStatus::Merging)?;
         ctx.emit_state();
 
-        merge_parts(&parts, &ctx.save_path()).await?;
+        // 以库里的分片状态为准：并发 abort 后内存副本可能落后。
+        let merged_parts = ctx.parts()?;
+        merge_parts(&merged_parts, &ctx.save_path()).await?;
         let _ = tokio::fs::remove_dir_all(&ctx.temp_dir()).await;
         Ok(EngineOutcome::Done)
     }
@@ -312,7 +310,8 @@ impl NativeEngine {
                 &progress,
                 false,
             )
-            .await?;
+            .await
+            .map_err(|error| error.message)?;
             *part = owned;
             match result {
                 PartResult::Done => {}
@@ -401,6 +400,22 @@ fn plan_multi(task: &DownloadTask, dir: &Path, lengths: &[u64]) -> Vec<DownloadP
         .collect()
 }
 
+/// 降级用的单流计划：一个从 0 开始的分片，不再发多段 Range。
+fn plan_single_stream(task: &DownloadTask, dir: &Path) -> DownloadPart {
+    DownloadPart {
+        index: 0,
+        url: task.urls[0].clone(),
+        start: 0,
+        end: task.total_bytes,
+        downloaded: 0,
+        state: PartState::Pending,
+        temp_path: dir
+            .join("part-single.bin")
+            .to_string_lossy()
+            .into_owned(),
+    }
+}
+
 fn temp_file(dir: &Path, prefix: &str, index: usize) -> String {
     dir.join(format!("{prefix}-{index:03}.bin"))
         .to_string_lossy()
@@ -440,6 +455,146 @@ fn enforce_max_bytes(task: &DownloadTask) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartErrorKind {
+    RetryExhausted,
+    RangeUnsupported,
+    Fatal,
+}
+
+struct PartsError {
+    message: String,
+    kind: PartErrorKind,
+}
+
+impl PartsError {
+    fn retry(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: PartErrorKind::RetryExhausted,
+        }
+    }
+
+    fn fatal(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: PartErrorKind::Fatal,
+        }
+    }
+
+    fn range_unsupported(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: PartErrorKind::RangeUnsupported,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartsOutcome {
+    Done,
+    Paused,
+    Canceled,
+}
+
+impl NativeEngine {
+    /// 按指定并发度执行分片。
+    ///
+    /// `connections == 1` 时顺序执行：这是并发降级的执行路径，保留已完成分片，
+    /// 只把「同时开多个连接」降为「一次一个」。
+    async fn download_parts(
+        &self,
+        ctx: &EngineCtx,
+        task: &DownloadTask,
+        parts: &[DownloadPart],
+        progress: &Arc<TaskProgress>,
+        connections: usize,
+        multipart: bool,
+    ) -> Result<PartsOutcome, PartsError> {
+    let pending: Vec<DownloadPart> = parts
+        .iter()
+        .filter(|part| part.state != PartState::Completed)
+        .cloned()
+        .collect();
+    if pending.is_empty() {
+        return Ok(PartsOutcome::Done);
+    }
+
+    if connections <= 1 {
+        for part in pending {
+            let mut part = part;
+            match download_part(
+                &self.client,
+                &self.config,
+                ctx,
+                task,
+                &mut part,
+                progress,
+                multipart,
+            )
+            .await
+            {
+                Ok(PartResult::Done) => {}
+                Ok(PartResult::Paused) => return Ok(PartsOutcome::Paused),
+                Ok(PartResult::Canceled) => return Ok(PartsOutcome::Canceled),
+                Err(error) => return Err(error),
+            }
+        }
+        return Ok(PartsOutcome::Done);
+    }
+
+    let mut set: tokio::task::JoinSet<Result<PartResult, PartsError>> =
+        tokio::task::JoinSet::new();
+    for part in pending {
+        let ctx2 = ctx.clone();
+        let task2 = task.clone();
+        let client = self.client.clone();
+        let config = self.config.clone();
+        let progress = progress.clone();
+        set.spawn(async move {
+            let mut part = part;
+            download_part(
+                &client,
+                &config,
+                &ctx2,
+                &task2,
+                &mut part,
+                &progress,
+                multipart,
+            )
+            .await
+        });
+    }
+
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(Ok(PartResult::Done)) => {}
+            Ok(Ok(PartResult::Paused)) => {
+                set.abort_all();
+                set.shutdown().await;
+                return Ok(PartsOutcome::Paused);
+            }
+            Ok(Ok(PartResult::Canceled)) => {
+                set.abort_all();
+                set.shutdown().await;
+                return Ok(PartsOutcome::Canceled);
+            }
+            Ok(Err(error)) => {
+                set.abort_all();
+                set.shutdown().await;
+                return Err(error);
+            }
+            Err(join_error) => {
+                set.abort_all();
+                set.shutdown().await;
+                return Err(PartsError::fatal(format!("分片任务异常: {join_error}")));
+            }
+        }
+    }
+    Ok(PartsOutcome::Done)
+}
+}
+
 /// 分片执行器：负责重试与退避；真正的单次传输在 `download_once`。
 async fn download_part(
     client: &reqwest::Client,
@@ -449,7 +604,7 @@ async fn download_part(
     part: &mut DownloadPart,
     progress: &Arc<TaskProgress>,
     multipart: bool,
-) -> Result<PartResult, String> {
+) -> Result<PartResult, PartsError> {
     let mut attempt = 0u32;
     loop {
         match ctx.control_state() {
@@ -467,11 +622,19 @@ async fn download_part(
             }
             Err(PartFailure::Paused) => return Ok(PartResult::Paused),
             Err(PartFailure::Canceled) => return Ok(PartResult::Canceled),
-            Err(PartFailure::Fatal(message)) => return Err(message),
+            Err(PartFailure::RangeUnsupported) => {
+                return Err(PartsError::range_unsupported(
+                    "服务器不支持 Range，无法多连接分块下载",
+                ));
+            }
+            Err(PartFailure::Fatal(message)) => return Err(PartsError::fatal(message)),
             Err(PartFailure::Retry(message)) => {
                 attempt += 1;
                 if attempt > config.retries {
-                    return Err(format!("重试 {} 次后仍失败：{message}", config.retries));
+                    return Err(PartsError::retry(format!(
+                        "重试 {} 次后仍失败：{message}",
+                        config.retries
+                    )));
                 }
                 let backoff = config
                     .retry_base_ms
@@ -488,6 +651,7 @@ async fn download_part(
 enum PartFailure {
     Retry(String),
     Fatal(String),
+    RangeUnsupported,
     Paused,
     Canceled,
 }
@@ -545,9 +709,8 @@ async fn download_once(
     if !partial {
         if multipart {
             // 多分片任务若收到整文件 200，继续写会把整文件塞进第一个分片。
-            return Err(PartFailure::Fatal(
-                "服务器不支持 Range，无法多连接分块下载".to_string(),
-            ));
+            // 交给上层降级为单流下载，而不是直接失败。
+            return Err(PartFailure::RangeUnsupported);
         }
         if part.downloaded > 0 || part.start > 0 {
             // 单连接续传被服务器忽略：从头重来（保证字节不重复）。

@@ -21,7 +21,10 @@ use crate::types::{
     DownloadPart, DownloadSpec, DownloadTask, EngineConfig, EngineInfo, EngineKind, EngineStatus,
     PartState, ProbeRequest, ProbeResult, ProgressPayload, TaskDetail, TaskStatus,
 };
-use crate::util::{dir_size, filename_from_url, is_p2p_url, now_ms, sanitize_filename};
+use crate::util::{
+    dir_size, filename_from_url, is_dash_url, is_ftp_url, is_hls_url, is_metalink_url,
+    is_p2p_url, now_ms, sanitize_filename, should_sniff_content_type,
+};
 use crate::{EVENT_PROGRESS, EVENT_STATE};
 
 /// 任务控制信号。
@@ -244,6 +247,7 @@ impl Inner {
         // 只有「单地址 + 内置/CLI 直写引擎」的总长等于最终文件字节数。
         // 多段拼接与 ffmpeg 转封装会重写容器，输出大小允许与探测值不同。
         let strict_size = task.urls.len() == 1
+            && !metadata.is_dir()
             && matches!(
                 task.resolved_engine,
                 Some(EngineKind::Native)
@@ -274,19 +278,44 @@ impl Inner {
         Ok(())
     }
 
-    /// auto 规则的唯一出处：P2P → gopeed；HLS → ffmpeg；多段 → native。
-    fn resolve_engine(&self, task: &DownloadTask) -> (EngineKind, bool) {
+    fn engine_available(&self, kind: EngineKind) -> bool {
+        self.engine(kind)
+            .map(|engine| engine.available().is_ok())
+            .unwrap_or(false)
+    }
+
+    /// auto 规则的唯一出处：
+    /// P2P → gopeed；FTP → 可用的外部 CLI；HLS/DASH → ffmpeg；Metalink → aria2；多段 → native。
+    fn resolve_engine(
+        &self,
+        task: &DownloadTask,
+        sniff: Option<&ProbeResult>,
+    ) -> (EngineKind, bool) {
         if task.engine != EngineKind::Auto {
             return (task.engine, true);
         }
-        if task.urls.len() == 1 && is_p2p_url(&task.urls[0]) {
-            // P2P 没有 HTTP 探针/分片语义，必须交给支持 BT/磁力/ed2k 的引擎。
-            return (EngineKind::Gopeed, true);
-        }
-        if task.urls.len() == 1 && engines::is_hls(&task.urls[0]) {
-            // HLS 形态决定必须用 ffmpeg；这是硬约束，不能在缺 ffmpeg 时退回 native
-            //（否则会只下到一个 m3u8 文本文件）。
-            return (EngineKind::Ffmpeg, true);
+        if task.urls.len() == 1 {
+            let url = &task.urls[0];
+            if is_p2p_url(url) {
+                // P2P 没有 HTTP 探针/分片语义，必须交给支持 BT/磁力/ed2k 的引擎。
+                return (EngineKind::Gopeed, true);
+            }
+            if is_ftp_url(url) {
+                for kind in [EngineKind::Aria2, EngineKind::Curl, EngineKind::Wget] {
+                    if self.engine_available(kind) {
+                        return (kind, true);
+                    }
+                }
+                return (EngineKind::Aria2, true);
+            }
+            if is_hls_url(url) || is_dash_url(url) || sniffed_stream(sniff) {
+                // HLS / DASH 是流清单，必须由 ffmpeg 拉流；不能退回普通 HTTP 下载。
+                return (EngineKind::Ffmpeg, true);
+            }
+            if is_metalink_url(url) || sniffed_metalink(sniff) {
+                // Metalink 内含多源与校验值，aria2 原生支持。
+                return (EngineKind::Aria2, true);
+            }
         }
         if task.urls.len() > 1 {
             return (EngineKind::Native, false);
@@ -301,6 +330,23 @@ impl Inner {
         }
         (EngineKind::Native, false)
     }
+}
+
+fn sniffed_stream(sniff: Option<&ProbeResult>) -> bool {
+    sniff
+        .and_then(|probe| probe.content_type.as_deref())
+        .map(|content_type| {
+            let value = content_type.to_ascii_lowercase();
+            value.contains("mpegurl") || value.contains("dash+xml")
+        })
+        .unwrap_or(false)
+}
+
+fn sniffed_metalink(sniff: Option<&ProbeResult>) -> bool {
+    sniff
+        .and_then(|probe| probe.content_type.as_deref())
+        .map(|content_type| content_type.to_ascii_lowercase().contains("metalink"))
+        .unwrap_or(false)
 }
 
 /// 对外管理器。内部 `Arc` 可安全克隆给命令层/定时任务。
@@ -366,26 +412,27 @@ impl DownloadManager {
             return Err("缺少保存路径".to_string());
         }
         let p2p = spec.engine == EngineKind::Gopeed || is_p2p_url(&urls[0]);
+        let directory_output = p2p || is_metalink_url(&urls[0]);
         let mut save_path = PathBuf::from(raw_save);
         let filename;
-        if p2p {
-            // P2P 的落盘单位是目录（种子内可能多文件）。
+        if directory_output {
+            // P2P / Metalink 的落盘单位是目录（可能包含多个文件）。
             // 目标目录已存在且非空时追加任务专属子目录，避免取消任务时误删用户已有内容。
             let non_empty = save_path.is_dir()
                 && std::fs::read_dir(&save_path)
                     .map(|mut entries| entries.next().is_some())
                     .unwrap_or(false);
             let dir = if non_empty {
-                save_path.join(format!("torrent-{}", &id[..8]))
+                save_path.join(format!("task-{}", &id[..8]))
             } else {
                 save_path
             };
             std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("创建 P2P 下载目录失败 {}: {e}", dir.display()))?;
+                .map_err(|e| format!("创建任务下载目录失败 {}: {e}", dir.display()))?;
             filename = dir
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "torrent".to_string());
+                .unwrap_or_else(|| "download".to_string());
             save_path = dir;
         } else {
             let directory_target = raw_save.ends_with('/')
@@ -732,7 +779,21 @@ async fn run_engine(
         return Ok(());
     }
 
-    let (requested, explicit) = inner.resolve_engine(&task);
+    // auto 且地址形态不明确时，先嗅探一次 Content-Type，用真实响应而不是猜后缀路由。
+    // 结果会放进 EngineCtx，引擎不再重复 HEAD。
+    let mut sniffed = None;
+    if task.engine == EngineKind::Auto
+        && task.urls.len() == 1
+        && should_sniff_content_type(&task.urls[0])
+    {
+        let config = inner.config();
+        if let Ok(client) = probe::build_client(&config) {
+            let meta = probe::HttpMeta::from_task(&task);
+            sniffed = probe::probe(&client, &task.urls[0], &meta).await.ok();
+        }
+    }
+
+    let (requested, explicit) = inner.resolve_engine(&task, sniffed.as_ref());
     let mut kind = requested;
     let mut engine = inner.engine(kind);
     let available = engine.as_ref().map(|engine| engine.available());
@@ -760,6 +821,7 @@ async fn run_engine(
         inner: inner.clone(),
         task_id: id.to_string(),
         save_path: PathBuf::from(&task.save_path),
+        probe: sniffed,
         control,
     };
 
@@ -847,6 +909,15 @@ mod tests {
     }
 
     async fn spawn_range_server(payload: Vec<u8>) -> String {
+        spawn_server(payload, false).await
+    }
+
+    /// 谎报支持 Range 的服务器：HEAD 说 Accept-Ranges，GET 却总是 200 整文件。
+    async fn spawn_lying_server(payload: Vec<u8>) -> String {
+        spawn_server(payload, true).await
+    }
+
+    async fn spawn_server(payload: Vec<u8>, lying: bool) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let payload = Arc::new(payload);
@@ -857,14 +928,14 @@ mod tests {
                 };
                 let payload = payload.clone();
                 tokio::spawn(async move {
-                    serve(stream, payload).await;
+                    serve(stream, payload, lying).await;
                 });
             }
         });
         format!("http://{address}/file.bin")
     }
 
-    async fn serve(mut stream: TcpStream, payload: Arc<Vec<u8>>) {
+    async fn serve(mut stream: TcpStream, payload: Arc<Vec<u8>>, lying: bool) {
         let mut request = Vec::new();
         let mut buffer = [0u8; 1024];
         loop {
@@ -905,7 +976,7 @@ mod tests {
                 "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n"
             )
             .into_bytes(),
-            ("GET", Some((start, end))) if start <= end && end < total => {
+            ("GET", Some((start, end))) if !lying && start <= end && end < total => {
                 let body = &payload[start..=end];
                 let header = format!(
                     "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{total}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
@@ -956,6 +1027,7 @@ mod tests {
             inner: inner.clone(),
             task_id: task.id.clone(),
             save_path: save_path.clone(),
+            probe: None,
             control: receiver,
         };
         let engine = crate::engine::native::NativeEngine::new(config, None);
@@ -1037,6 +1109,7 @@ mod tests {
             inner: inner.clone(),
             task_id: task.id.clone(),
             save_path: save_path.clone(),
+            probe: None,
             control: receiver,
         };
         let engine = crate::engine::native::NativeEngine::new(config, None);
@@ -1045,6 +1118,52 @@ mod tests {
         inner.complete(&task.id).unwrap();
 
         assert_eq!(std::fs::read(&save_path).unwrap(), payload);
+        let stored = inner.store.task(&task.id).unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Completed);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 服务器谎报 Range：多分片收到 200 时，必须自动降级为单流并成功。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn native_degrades_to_single_stream_on_lying_range() {
+        let payload: Vec<u8> = (0..1_200_000usize).map(|i| (i % 211) as u8).collect();
+        let url = spawn_lying_server(payload.clone()).await;
+
+        let base = temp_base("lying");
+        let store = Store::open(&base).unwrap();
+        let config = EngineConfig {
+            connections: 4,
+            read_timeout_secs: 30,
+            ..Default::default()
+        };
+        let inner = test_inner(base.clone(), store, config.clone());
+        let save_path = base.join("lying.bin");
+        let task = sample_task(&url, &save_path, 4, 0);
+        inner.store.insert_task(&task).unwrap();
+
+        let (sender, receiver) = watch::channel(Control::Run);
+        inner
+            .controls
+            .lock()
+            .unwrap()
+            .insert(task.id.clone(), sender);
+        let ctx = EngineCtx {
+            inner: inner.clone(),
+            task_id: task.id.clone(),
+            save_path: save_path.clone(),
+            probe: None,
+            control: receiver,
+        };
+        let engine = crate::engine::native::NativeEngine::new(config, None);
+        let outcome = engine.run(ctx).await.unwrap();
+        assert_eq!(outcome, EngineOutcome::Done);
+        inner.complete(&task.id).unwrap();
+
+        assert_eq!(std::fs::read(&save_path).unwrap(), payload);
+        // 降级后应只剩一个单流分片。
+        let parts = inner.store.parts(&task.id).unwrap();
+        assert_eq!(parts.len(), 1);
         let stored = inner.store.task(&task.id).unwrap().unwrap();
         assert_eq!(stored.status, TaskStatus::Completed);
 
@@ -1079,6 +1198,7 @@ mod tests {
             inner: inner.clone(),
             task_id: task.id.clone(),
             save_path: save_path.clone(),
+            probe: None,
             control: receiver,
         };
         let engine = crate::engine::simple::SimpleEngine::new(config, None);
@@ -1091,6 +1211,21 @@ mod tests {
         assert_eq!(parts.len(), 1);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn content_type_routes_stream_and_metalink() {
+        let mut probe = ProbeResult::default();
+        probe.content_type = Some("application/vnd.apple.mpegurl".to_string());
+        assert!(sniffed_stream(Some(&probe)));
+        probe.content_type = Some("application/dash+xml".to_string());
+        assert!(sniffed_stream(Some(&probe)));
+        probe.content_type = Some("application/metalink4+xml".to_string());
+        assert!(sniffed_metalink(Some(&probe)));
+        assert!(!sniffed_stream(Some(&probe)));
+        probe.content_type = Some("video/mp4".to_string());
+        assert!(!sniffed_stream(Some(&probe)));
+        assert!(!sniffed_metalink(Some(&probe)));
     }
 
     #[test]

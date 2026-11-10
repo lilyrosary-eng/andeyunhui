@@ -66,23 +66,50 @@ impl DownloadEngine for Aria2Engine {
         if task.urls.len() != 1 {
             return Err("aria2 引擎只支持单地址任务；多段任务请使用 auto / native".to_string());
         }
-        if let Some(parent) = std::path::Path::new(&task.save_path).parent() {
+
+        let meta = HttpMeta::from_task(&task);
+        let by_suffix = crate::util::is_metalink_url(&task.urls[0]);
+        let probe = match ctx.probe() {
+            Some(probe) => probe,
+            None if by_suffix => crate::types::ProbeResult::default(),
+            None => probe::probe(&self.client, &task.urls[0], &meta)
+                .await
+                .unwrap_or_default(),
+        };
+        let metalink = by_suffix
+            || probe
+                .content_type
+                .as_deref()
+                .map(|value| value.to_ascii_lowercase().contains("metalink"))
+                .unwrap_or(false);
+        let total = if metalink {
+            // Metalink 的清单大小不是最终媒体大小，按未知总量处理。
+            0
+        } else if probe.total_bytes > 0 {
+            probe.total_bytes
+        } else {
+            task.total_bytes
+        };
+
+        let save_path = PathBuf::from(&task.save_path);
+        if metalink {
+            if save_path.exists() && !save_path.is_dir() {
+                return Err(format!(
+                    "Metalink 任务需要目录作为保存路径：{}",
+                    save_path.display()
+                ));
+            }
+            tokio::fs::create_dir_all(&save_path)
+                .await
+                .map_err(|e| format!("创建 Metalink 下载目录失败: {e}"))?;
+        } else if let Some(parent) = save_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| format!("创建下载目录失败: {e}"))?;
         }
 
-        let meta = HttpMeta::from_task(&task);
-        let probe = probe::probe(&self.client, &task.urls[0], &meta)
-            .await
-            .unwrap_or_default();
-        let total = if probe.total_bytes > 0 {
-            probe.total_bytes
-        } else {
-            task.total_bytes
-        };
         if let Some(max) = task.max_bytes {
-            if total > max {
+            if !metalink && total > max {
                 return Err(format!(
                     "文件过大（{} MB），已超过下载上限",
                     total / 1024 / 1024
@@ -97,15 +124,21 @@ impl DownloadEngine for Aria2Engine {
         ctx.transition(TaskStatus::Downloading)?;
         ctx.emit_state();
 
-        let save_path = PathBuf::from(&task.save_path);
-        let dir = save_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let filename = save_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| task.filename.clone());
+        // 普通文件：--dir 父目录 + --out 文件名；Metalink/目录输出：--dir 目标目录，不指定 --out。
+        let directory_mode = metalink || save_path.is_dir();
+        let (dir, output_name) = if directory_mode {
+            (save_path.clone(), None)
+        } else {
+            let dir = save_path
+                .parent()
+                .map(|path| path.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let name = save_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| task.filename.clone());
+            (dir, Some(name))
+        };
         let split = task.connections.clamp(1, 16);
         let user_agent = task
             .user_agent
@@ -114,12 +147,11 @@ impl DownloadEngine for Aria2Engine {
             .unwrap_or(self.config.user_agent.as_str());
 
         let mut command = Command::new(aria2);
+        command.arg("--no-conf").arg("--dir").arg(&dir);
+        if let Some(name) = output_name.as_deref() {
+            command.arg("--out").arg(name);
+        }
         command
-            .arg("--no-conf")
-            .arg("--dir")
-            .arg(&dir)
-            .arg("--out")
-            .arg(&filename)
             .arg("--continue=true")
             .arg("--allow-overwrite=true")
             .arg("--auto-file-renaming=false")
@@ -238,11 +270,13 @@ impl DownloadEngine for Aria2Engine {
             });
         }
 
-        let size = tokio::fs::metadata(&task.save_path)
-            .await
-            .map(|meta| meta.len())
-            .unwrap_or(last_downloaded);
-        if last_total > 0 && size != last_total {
+        let final_path = PathBuf::from(&task.save_path);
+        let size = match tokio::fs::metadata(&final_path).await {
+            Ok(meta) if meta.is_dir() => crate::util::dir_size(&final_path),
+            Ok(meta) => meta.len(),
+            Err(_) => last_downloaded,
+        };
+        if !metalink && last_total > 0 && size != last_total {
             return Err(format!(
                 "aria2c 完成后大小不符：期望 {} 字节，实际 {} 字节",
                 last_total, size
@@ -275,7 +309,12 @@ fn drain_progress_lines(
 }
 
 async fn cleanup_partial(save_path: &str) {
-    let _ = tokio::fs::remove_file(save_path).await;
+    let path = std::path::Path::new(save_path);
+    if path.is_dir() {
+        let _ = tokio::fs::remove_dir_all(path).await;
+    } else {
+        let _ = tokio::fs::remove_file(path).await;
+    }
     let control = format!("{save_path}.aria2");
     let _ = tokio::fs::remove_file(control).await;
 }
