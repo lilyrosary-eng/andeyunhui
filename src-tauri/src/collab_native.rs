@@ -2,7 +2,8 @@
 //!
 //! ai-collab-kit 只定义 `NativeRunner` 接口（它不能反向依赖宿主），
 //! 本文件在桌面入口里把接口接到宿主 AI 配置：成员模型就是设置页里的模型 id，
-//! 调用走非流式一次性入口 `ai_quick_ask`，不拉起任何外部进程。
+//! 执行走无 UI 的 Agent 工具循环（`agent_collect`）——与 AI 对话共用同一套工具、
+//! 审批底座和上下文压缩，不另写第二套执行器。
 
 use ai_collab_kit::native::{NativeFuture, NativeRequest, NativeRunner};
 use andeyunhui_lib::services::ai_service;
@@ -42,12 +43,19 @@ impl NativeRunner for AppAiRunner {
                     ));
                 }
             }
-            let profile = if model_id.is_empty() {
-                None
-            } else {
-                Some(model_id)
-            };
-            ai_service::ai_quick_ask(app, request.prompt, None, profile).await
+            ai_service::agent_collect::run_collect(
+                app,
+                ai_service::agent_collect::CollectRequest {
+                    prompt: request.prompt,
+                    system: None,
+                    profile_id: if model_id.is_empty() { None } else { Some(model_id) },
+                    workspace: request.workspace,
+                    request_id: request.assignment_id,
+                    // 计划按房间分槽：同一房间的多次任务共享一份计划，不污染其它房间。
+                    plan_scope: request.room_id,
+                },
+            )
+            .await
         })
     }
 }

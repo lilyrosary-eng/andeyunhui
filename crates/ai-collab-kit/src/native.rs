@@ -24,6 +24,8 @@ pub struct NativeRequest {
     pub agent_id: String,
     /// 成员级模型：`provider/model` 或纯模型 id；空串表示宿主当前选中的默认模型。
     pub model: String,
+    /// 房间绑定的工作目录。宿主有工具能力时用它作为项目根（工作区内读写放行）。
+    pub workspace: Option<String>,
     /// 已带成员人设与共享会话上下文的完整提示词。
     pub prompt: String,
 }
@@ -80,6 +82,7 @@ mod tests {
             assignment_id: "task_native".to_string(),
             agent_id: "worker".to_string(),
             model: String::new(),
+            workspace: None,
             prompt: "hello".to_string(),
         }
     }

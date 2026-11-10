@@ -36,6 +36,15 @@ pub(crate) fn resolve_root(explicit: Option<&str>, ctx: &ToolContext, tool: &str
     }
 }
 
+/// 审批策略：决定「需要用户确认」的工具操作怎么处理。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalMode {
+    /// 交互入口（AI 对话 / 浮岛）：发事件并等待用户决定。
+    Interactive,
+    /// 无人可应答的入口（协作任务）：立即拒绝，而不是挂 120s 等一个不会来的确认。
+    AutoDeny,
+}
+
 /// 工具执行时的上下文（前端/本轮请求相关），随每一次调用传入 execute。
 #[derive(Clone)]
 pub(crate) struct ToolContext {
@@ -57,6 +66,8 @@ pub(crate) struct ToolContext {
     /// 计划作用域（前端会话 id）。`plan` 工具按它分槽：多个对话 / 浮岛 / 工作台
     /// 并行时不会互相覆盖同一份计划。空串 = 默认槽（兼容不传的老入口）。
     pub(crate) plan_scope: String,
+    /// 审批策略：协作任务没有审批条可点，必须 AutoDeny。
+    pub(crate) approval_mode: ApprovalMode,
 }
 
 /// 媒体配置集合：能力 → 已选定的后端配置。缺某能力键 = 该能力未配置后端。

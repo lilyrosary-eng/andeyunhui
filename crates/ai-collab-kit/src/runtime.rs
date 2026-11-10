@@ -1388,6 +1388,7 @@ async fn run_native_assignment(
         assignment_id: assignment.id.clone(),
         agent_id: assignment.assignee_id.clone(),
         model: model.clone(),
+        workspace: room.workspace.clone(),
         prompt: build_prompt(&base, &room, &assignment, true),
     };
     let future = match crate::native::run(request) {

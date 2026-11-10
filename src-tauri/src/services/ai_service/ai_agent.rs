@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 use futures_util::StreamExt;
 use crate::services::ai_service::ai_profile::{load_config, resolve_target, resolve_target_live, compose_persona_system, compose_effective_system, ensure_api_key};
-use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
-use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, tool_schemas_for_api, tool_schemas_for_api_without, mcp_tools_guide, skills_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, register_approval, take_subagent_settles};
+use crate::services::ai_service::ai_chat::{ChatMessage, truncate_messages_for_safety};
+use crate::services::ai_service::ai_tools::{ApprovalMode, ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, tool_schemas_for_api, tool_schemas_for_api_without, mcp_tools_guide, skills_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, register_approval, take_subagent_settles};
 use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session_in, persist_agent_session_in, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text, hydrate_images_in, persist_images_in};
 
 /// 计划闸门等待用户确认的最长时长（默认值，可由请求参数覆盖）。
@@ -213,6 +213,7 @@ async fn run_agent(
         media,
         images,
         plan_scope: plan_scope.clone(),
+        approval_mode: ApprovalMode::Interactive,
     };
     let mut final_text = String::new();
     let mut tool_calls_occurred = false;
@@ -406,27 +407,13 @@ async fn run_agent(
                 return Err(msg);
             }
         }
-        let mut body = serde_json::json!({
-            "model": cfg.model,
-            "messages": derived,
-            "stream": false,
-            "tools": tools,
-            "tool_choice": "auto",
-        });
-        // 与 ai_chat 同口径：档位 = 请求级覆盖 ?? 配置（显式 effort 优先，回落旧 thinking）。
-        let effective_effort = cfg.effort_with_override(effort.as_deref());
-        let thinking = effective_effort != "off";
-        if thinking {
-            body["reasoning_effort"] = serde_json::json!(effective_effort);
-            if is_deepseek_provider(&cfg) {
-                body["thinking"] = serde_json::json!({ "type": "enabled" });
-            }
-        } else {
-            body["temperature"] = serde_json::json!(cfg.temperature);
-            if let Some(mt) = cfg.max_tokens {
-                body["max_tokens"] = serde_json::json!(mt);
-            }
-        }
+        // 协议层与协作 native 共用：请求体构造只在 agent_turn 一处维护。
+        let (body, thinking) = crate::services::ai_service::agent_turn::build_agent_body(
+            &cfg,
+            derived,
+            tools,
+            effort.as_deref(),
+        );
 
         let resp = match client
             .post(&url)
@@ -464,52 +451,42 @@ async fn run_agent(
             return Err(msg);
         }
         let payload: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
-        if let Some(err) = payload.get("error") {
-            let msg = format!("上游报错: {}", err);
-            emit_agent_error(&app, &request_id, &msg);
-            return Err(msg);
-        }
-        let msg_obj = payload["choices"][0]["message"].clone();
+        let turn = match crate::services::ai_service::agent_turn::parse_agent_message(&payload) {
+            Ok(turn) => turn,
+            Err(msg) => {
+                emit_agent_error(&app, &request_id, &msg);
+                return Err(msg);
+            }
+        };
         // 思考过程（reasoning_content）：非流式响应里与 content 同级。
         // 严格跟随 thinking 开关：关思考时即使端点返回也不显示。
         if thinking {
-            if let Some(rc) = msg_obj.get("reasoning_content").and_then(|v| v.as_str()) {
-                if !rc.is_empty() {
-                    let delta = if reasoning_acc.is_empty() {
-                        rc.to_string()
-                    } else {
-                        format!("
+            if let Some(rc) = turn.reasoning.as_deref() {
+                let delta = if reasoning_acc.is_empty() {
+                    rc.to_string()
+                } else {
+                    format!("
 
 {}", rc)
-                    };
-                    reasoning_acc.push_str(&delta);
-                    let _ = app.emit(
-                        "ai-reasoning-delta",
-                        serde_json::json!({ "requestId": request_id, "delta": delta }),
-                    );
-                }
+                };
+                reasoning_acc.push_str(&delta);
+                let _ = app.emit(
+                    "ai-reasoning-delta",
+                    serde_json::json!({ "requestId": request_id, "delta": delta }),
+                );
             }
         }
-        let content = msg_obj
-            .get("content")
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string();
+        let content = turn.content;
+        let calls = turn.tool_calls;
 
         // 含工具调用 → 执行并回填，进入下一轮。
-        if let Some(calls) = msg_obj.get("tool_calls").and_then(|c| c.as_array()) {
-            if calls.is_empty() {
-                if !content.is_empty() {
-                    final_text.push_str(&content);
-                }
-                break;
-            }
+        if !calls.is_empty() {
             tool_calls_occurred = true;
             // 模型回合：记录 assistant 事件（含原生 tool_calls 形状）。
             session.push(SessionEvent::Assistant {
                 seq: 0, // push() 会覆写
                 content: content.clone(),
-                tool_calls: msg_obj["tool_calls"].as_array().cloned().unwrap_or_default(),
+                tool_calls: calls.clone(),
             });
 
             // ---- 工具并发调度（对齐 dsh executeToolCalls）----
@@ -519,7 +496,7 @@ async fn run_agent(
             let tools = registered_tools();
             // 整批调用解析为可调度单元（保留模型顺序）：(cid, fname, 工具下标或None, args)
             let mut prepared: Vec<(String, String, Option<usize>, serde_json::Value)> = Vec::with_capacity(calls.len());
-            for call in calls {
+            for call in &calls {
                 let cid = call.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let fname = call["function"]["name"].as_str().unwrap_or("").to_string();
                 let arguments = call["function"]["arguments"].as_str().unwrap_or("");

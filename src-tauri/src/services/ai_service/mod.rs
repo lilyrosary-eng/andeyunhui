@@ -28,6 +28,10 @@ pub mod gongfang_tools;
 pub(crate) mod codemode;
 pub mod ai_session;
 pub mod ai_agent;
+// Agent 单轮协议层（请求体 + 响应解析）：主对话 Agent 与协作 native 成员共用。
+pub mod agent_turn;
+// 无 UI 的 Agent 工具循环：协作 native 成员复用同一套工具与审批底座。
+pub mod agent_collect;
 pub mod ai_ocr;
 pub mod doc_translate;
 pub mod pdf_translate;

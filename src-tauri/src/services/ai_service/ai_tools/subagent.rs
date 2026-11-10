@@ -220,6 +220,8 @@ pub(crate) async fn run_subagent_once(
         images: Vec::new(),
         // 子代理工具白名单只有 file/grep/glob，不会调用 plan；用默认槽即可
         plan_scope: String::new(),
+        // 子代理属于交互会话的一部分：审批事件由同一个聊天入口渲染。
+        approval_mode: ApprovalMode::Interactive,
     };
     for _ in 0..6usize {
         match subagent_model_round(&client, &url, cfg, &mut messages, &tools, &sub_ctx).await? {
@@ -287,6 +289,8 @@ pub(crate) async fn run_subagent_worker(
         images: Vec::new(),
         // 子代理工具白名单只有 file/grep/glob，不会调用 plan；用默认槽即可
         plan_scope: String::new(),
+        // 后台子代理仍服务于交互会话：审批由聊天入口渲染。
+        approval_mode: ApprovalMode::Interactive,
     };
     let mut total_rounds = 0usize;
     const MAX_ROUNDS: usize = 20;

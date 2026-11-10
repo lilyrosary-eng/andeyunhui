@@ -29,7 +29,15 @@ pub(crate) fn approval_store() -> &'static Mutex<std::collections::HashMap<Strin
 }
 
 /// 发起一次审批：注册挂起操作 → 发射 ai-agent-approval → 等待用户决定（默认 120s 超时拒绝）。
+///
+/// 协作任务（AutoDeny）没有审批条可点：直接拒绝并说明原因，
+/// 避免任务为了一个不会到来的确认白白挂 120 秒。
 pub(crate) async fn request_approval(ctx: &ToolContext, tool: &str, operation: &str) -> Result<bool, String> {
+    if ctx.approval_mode == ApprovalMode::AutoDeny {
+        return Err(format!(
+            "该操作需要用户确认，但当前入口无人应答，已拒绝：{operation}"
+        ));
+    }
     let approval_id = format!("ap_{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis()).unwrap_or(0), rand_short());
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
     approval_store()
@@ -139,6 +147,16 @@ pub(crate) fn is_under_path(target: &std::path::Path, root: &std::path::Path) ->
 pub(crate) static TRUSTED_PROJECTS: OnceLock<Mutex<std::collections::HashSet<std::path::PathBuf>>> = OnceLock::new();
 pub(crate) fn trusted_projects() -> &'static Mutex<std::collections::HashSet<std::path::PathBuf>> {
     TRUSTED_PROJECTS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 预信任一个目录（协作房间工作区）。
+/// 房间没有审批 UI，先把工作区标记为可信，让「项目内写文件」直接放行；
+/// 工作区之外仍需逐次审批 → AutoDeny 会立即拒绝，而不是挂起等待。
+pub(crate) fn trust_project(root: &std::path::Path) {
+    let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if let Ok(mut set) = trusted_projects().lock() {
+        set.insert(canon);
+    }
 }
 
 /// 首次访问未信任项目 → 弹「信任此项目」确认；通过后记录本会话信任。已信任则直接返回。
