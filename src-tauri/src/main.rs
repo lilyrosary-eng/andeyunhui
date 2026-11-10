@@ -1665,6 +1665,12 @@ fn main() {
                 }
             }
 
+            // ============ 中转站目录监听 ============
+            // 用户在资源管理器里直接增删中转站目录时，面板要能立刻反映
+            // （否则「外部改动也要能显示」就只在手动刷新时成立）。
+            // 内部已过滤 `.` 开头的索引文件，避免"写索引 → 触发事件 → 刷新 → 再写索引"的循环。
+            andeyunhui_lib::services::station::spawn_watcher(app.handle().clone());
+
             // 不再自动打开 DevTools — 之前自动打开导致 Chrome DevTools
             // 响应式模式在窗口缩放时于右上角显示视口尺寸覆盖层（橙色小字），
             // 用户误以为是应用内调试组件。如需调试手动 F12 打开即可。
@@ -1949,6 +1955,8 @@ fn main() {
             clear_dropzone,
             // ========== 核心：中转站索引（只收 id，不收路径）==========
             station_list,
+            station_ingest_paths,
+            station_storage_info,
             station_remove_record,
             station_delete_file,
             station_relocate,

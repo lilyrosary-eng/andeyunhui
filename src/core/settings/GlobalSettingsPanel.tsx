@@ -11,11 +11,13 @@ import { DevConsole } from '@/core/settings/DevConsole'
 import { UserAvatarSettings } from '@/components/bricks/UserAvatarSettings'
 import { setDisplayName, useDisplayName } from '@/core/profile/userProfile'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
-import { openUrl } from '@tauri-apps/plugin-opener';
+import { openUrl, openPath } from '@tauri-apps/plugin-opener';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 import { logger } from '@/lib/logger';
-import { api, type ArchiveEntry, type ArchiveUsage, type PluginManifest } from '@/lib/api';
+import { api, type ArchiveEntry, type ArchiveUsage, type PluginManifest, type StationStorageInfo } from '@/lib/api';
+import { loadCopyThreshold, saveCopyThreshold } from '@/lib/stationSettings';
+import { fmtSize } from '@/lib/formatSize';
 import { useTheme } from '@/lib/ThemeProvider';
 import { useSystemFonts } from '@/lib/useSystemFonts';
 import { previewBootScreen } from '@/lib/bootPreview';
@@ -118,17 +120,7 @@ function formatArchiveTime(modified: string): string {
   return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
 }
 
-/** 字节数 → 人类可读（回收站配额要显示得能一眼判断大小）。 */
-function formatBytes(n: number): string {
-  const units = ['B', 'KiB', 'MiB', 'GiB'];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i += 1;
-  }
-  return i === 0 ? `${n} ${units[0]}` : `${v.toFixed(1)} ${units[i]}`;
-}
+/** 字节数 → 人类可读。统一用 `fmtSize`（lib/formatSize.ts），不再各处重写一份。 */
 
 // 本地账号：显示名 + 头像（复用 userAvatar 积木）。只存本机，不接任何云服务。
 function LocalAccountCard() {
@@ -372,6 +364,12 @@ export function GlobalSettingsPanel() {
   const [archives, setArchives] = useState<ArchiveEntry[]>([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
   const [archiveUsage, setArchiveUsage] = useState<ArchiveUsage | null>(null);
+  /** 存储位置与分项占用（设置页「中转站」tab 顶部展示） */
+  const [storageInfo, setStorageInfo] = useState<StationStorageInfo | null>(null);
+  /** 拖入文件的「复制 / 只登记」分界线（MB），本地设置 */
+  const [copyThresholdMb, setCopyThresholdMb] = useState<number>(
+    Math.round(loadCopyThreshold() / (1024 * 1024)),
+  );
 
   const loadArchives = useCallback(() => {
     setArchiveLoading(true);
@@ -379,10 +377,16 @@ export function GlobalSettingsPanel() {
       api.listArchives(),
       // 用量单独取：配额是后端常量，前端不该硬编码一份"看起来像真的"的上限
       api.archivesUsage().catch(() => null),
+      // 存储概况（根目录 + 各分项占用）。取不到不影响存档列表能用
+      api.stationStorageInfo().catch((e) => {
+        console.warn('[中转站] 读取存储概况失败:', e);
+        return null;
+      }),
     ])
-      .then(([items, usage]) => {
+      .then(([items, usage, storage]) => {
         setArchives(items);
         setArchiveUsage(usage);
+        setStorageInfo(storage);
       })
       .catch((err) => logger.transferStation.listFailed(err))
       .finally(() => setArchiveLoading(false));
@@ -1094,6 +1098,88 @@ export function GlobalSettingsPanel() {
 
           {activeTab === 'transfer' && (
             <div className="space-y-6">
+              {/* 存储位置与占用 —— 用户最常问的是"我的东西在哪、能不能自己管" */}
+              <section>
+                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3 flex items-center gap-1.5">
+                  <FolderOpen size={14} />
+                  {t('settings.transfer.storageTitle')}
+                </h2>
+                <p className="text-xs text-neutral-400 dark:text-stone-500 mb-3">
+                  {t('settings.transfer.storageDesc')}
+                </p>
+                <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 overflow-hidden">
+                  <div className="p-4 flex items-center gap-3">
+                    <code className="flex-1 text-xs text-neutral-600 dark:text-stone-300 break-all select-all">
+                      {storageInfo?.root ?? t('common.loading')}
+                    </code>
+                    <button
+                      onClick={() => {
+                        if (!storageInfo?.root) return;
+                        void openPath(storageInfo.root).catch((err) =>
+                          alert(`${t('settings.transfer.openFolderFailed')}: ${String(err)}`),
+                        );
+                      }}
+                      disabled={!storageInfo?.root}
+                      className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-neutral-600 dark:text-stone-300 bg-neutral-100 dark:bg-stone-700/60 hover:bg-neutral-200 dark:hover:bg-stone-700 transition-colors disabled:opacity-40 flex-shrink-0"
+                    >
+                      <FolderOpen size={13} />
+                      {t('settings.transfer.openFolder')}
+                    </button>
+                  </div>
+                  {storageInfo && (
+                    <div className="px-4 pb-4 grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs text-neutral-500 dark:text-stone-400">
+                      <span>
+                        {t('settings.transfer.storageDropzone', {
+                          count: storageInfo.dropzoneCount,
+                          size: fmtSize(storageInfo.dropzoneBytes),
+                        })}
+                      </span>
+                      <span>
+                        {t('settings.transfer.storageArchives', {
+                          count: storageInfo.archiveCount,
+                          size: fmtSize(storageInfo.archiveBytes),
+                        })}
+                      </span>
+                      <span>
+                        {t('settings.transfer.storageMedia', {
+                          count: storageInfo.mediaCount,
+                          size: fmtSize(storageInfo.mediaBytes),
+                        })}
+                      </span>
+                      <span>
+                        {t('settings.transfer.storageBackups', {
+                          count: storageInfo.backupCount,
+                          size: fmtSize(storageInfo.backupBytes),
+                        })}
+                      </span>
+                      <span className="col-span-2 text-neutral-600 dark:text-stone-300 pt-1 border-t border-neutral-200/60 dark:border-stone-700/60">
+                        {t('settings.transfer.storageTotal', { size: fmtSize(storageInfo.totalBytes) })}
+                      </span>
+                    </div>
+                  )}
+                  {/* 拖入语义：小文件复制（自包含）、大文件只登记（省磁盘） */}
+                  <div className="px-4 py-3 border-t border-neutral-200/60 dark:border-stone-700/60 flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-neutral-500 dark:text-stone-400">
+                      {t('settings.transfer.copyThresholdLabel')}
+                    </span>
+                    <input
+                      type="number"
+                      min={0}
+                      step={10}
+                      value={copyThresholdMb}
+                      onChange={(e) => {
+                        const mb = Number(e.target.value);
+                        setCopyThresholdMb(Number.isFinite(mb) ? mb : 0);
+                        saveCopyThreshold(Math.max(0, mb) * 1024 * 1024);
+                      }}
+                      className="w-20 px-2 py-1 rounded-md text-xs bg-neutral-100 dark:bg-stone-700/60 border border-neutral-200 dark:border-stone-600 text-neutral-700 dark:text-stone-200"
+                    />
+                    <span className="text-xs text-neutral-500 dark:text-stone-400">
+                      {t('settings.transfer.copyThresholdSuffix')}
+                    </span>
+                  </div>
+                </div>
+              </section>
               <section>
                 <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3 flex items-center gap-1.5">
                   <Archive size={14} />
@@ -1105,8 +1191,8 @@ export function GlobalSettingsPanel() {
                 {archiveUsage && (
                   <p className="text-xs text-neutral-500 dark:text-stone-400 mb-3">
                     {t('settings.transfer.archiveUsage', {
-                      used: formatBytes(archiveUsage.totalBytes),
-                      limit: formatBytes(archiveUsage.limitBytes),
+                      used: fmtSize(archiveUsage.totalBytes),
+                      limit: fmtSize(archiveUsage.limitBytes),
                       count: archiveUsage.count,
                     })}
                   </p>
@@ -1151,7 +1237,7 @@ export function GlobalSettingsPanel() {
                                 </div>
                                 <div className="text-xs text-neutral-400 dark:text-stone-500 flex items-center gap-2">
                                   <span>{formatArchiveTime(a.modified)}</span>
-                                  <span>{formatBytes(a.size)}</span>
+                                  <span>{fmtSize(a.size)}</span>
                                 </div>
                                 {a.originPath && (
                                   <div

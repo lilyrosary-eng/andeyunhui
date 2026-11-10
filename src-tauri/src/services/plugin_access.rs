@@ -67,6 +67,7 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("cancel_open_book", "fs.read"),
     // 中转站列表 / 回收站用量：只读（路径来自索引，不接受前端给路径）
     ("station_list", "fs.read"),
+    ("station_storage_info", "fs.read"),
     ("archives_usage", "fs.read"),
     // ---- 文件写入 ----
     ("write_file_bytes", "fs.write"),
@@ -82,6 +83,8 @@ const EXACT_RULES: &[(&str, &str)] = &[
     // 这三个都会真的改动磁盘：remove_record 对托管条目会删 dropzone 副本，
     // delete_file / relocate 更是直接对用户文件下手，所以按 fs.write 收紧。
     ("station_remove_record", "fs.write"),
+    // 拖入/导入：会往 dropzone 复制文件（超过阈值的只登记），所以是写
+    ("station_ingest_paths", "fs.write"),
     ("station_delete_file", "fs.write"),
     ("station_relocate", "fs.write"),
     // 取消移动本身不碰文件，但它是 relocate 的一部分（中止后会删掉目标位的半成品），

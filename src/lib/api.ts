@@ -231,6 +231,31 @@ export interface StationMoveProgress {
   total: number;
 }
 
+/** 拖入/导入一批路径的结果。 */
+export interface StationIngestResult {
+  entries: StationEntry[];
+  /** 没有被收下的原因（不存在 / 已在站内 / 复制失败 / 非绝对路径）。必须显示。 */
+  notices: string[];
+}
+
+/** 中转站存储概况（设置页展示 + 「打开文件夹」落点）。 */
+export interface StationStorageInfo {
+  root: string;
+  dropzonePath: string;
+  archivesPath: string;
+  dropzoneBytes: number;
+  dropzoneCount: number;
+  archiveBytes: number;
+  archiveCount: number;
+  /** 文档解析抽取的图片（不属于"中转站文件"，单列是为了不误判） */
+  mediaBytes: number;
+  mediaCount: number;
+  /** 笔记首次备份 */
+  backupBytes: number;
+  backupCount: number;
+  totalBytes: number;
+}
+
 // 封装 API 调用
 export const api = {
   // 获取所有笔记
@@ -467,6 +492,18 @@ export const api = {
   // ===== 中转站索引（只收 id，不收路径）=====
   /** 列出中转站全部条目：托管文件 + 已完成的下载。 */
   stationList: () => invoke<StationList>('station_list'),
+  /**
+   * 把一批**真实路径**收进中转站（拖入 / 导入的统一入口）。
+   *
+   * 直接传路径，**不经过 base64**：旧链路要前端先把整个文件读成 data URL 再传回，
+   * 1 GB 的文件必然失败（字符串体积 1.37×，V8 单字符串有上限），中间还白落两次盘。
+   *
+   * `copyThreshold`：≤ 它则复制进中转站（自包含），> 它则只登记位置。缺省 100 MiB。
+   */
+  stationIngestPaths: (paths: string[], copyThreshold?: number) =>
+    invoke<StationIngestResult>('station_ingest_paths', { paths, copyThreshold }),
+  /** 中转站存储概况：根目录与各分项占用。 */
+  stationStorageInfo: () => invoke<StationStorageInfo>('station_storage_info'),
   /**
    * 移除一条记录。**默认动作，不删用户的文件。**
    * 托管条目会先进回收站；引用条目只忘掉记录，磁盘文件一动不动。

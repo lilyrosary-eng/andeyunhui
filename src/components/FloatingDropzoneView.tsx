@@ -10,7 +10,8 @@ import { TransferStationPanel, emitDropzoneChange } from '@/components/TransferS
 import { api, type ImportedFile } from '@/lib/api';
 import { TranslateModelPicker } from '@/components/TranslateModelPicker';
 import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
-import { basename, extOf, pathToDataUrl } from '@/platform/nativeDropFiles';
+import { extOf, pathToDataUrl } from '@/platform/nativeDropFiles';
+import { loadCopyThreshold } from '@/lib/stationSettings';
 import {
   SOURCE_LANGS,
   TARGET_LANGS,
@@ -133,13 +134,14 @@ export function FloatingDropzoneView() {
     // 用 hover 标记而不是 mode：drop 前必有 over，标记此时仍是 true；
     // 而两个 hook 都会收到 drop，整窗这个注册更早、先执行，所以读得到。
     if ((window as unknown as Record<string, unknown>).__andengOcrHover) return;
-    for (const srcPath of paths) {
-      try {
-        const dataUrl = await pathToDataUrl(srcPath);
-        await api.addBytesToDropzone(dataUrl, basename(srcPath));
-      } catch (err) {
-        console.error('[浮窗] 导入失败:', err);
-      }
+    try {
+      // 直接传路径：旧写法要先 pathToDataUrl（整个文件 base64 过 IPC），
+      // 大文件会直接崩在字符串上限上。
+      const res = await api.stationIngestPaths(paths, loadCopyThreshold());
+      res.notices.forEach((n) => console.warn('[浮窗] 拖入提示:', n));
+      emitDropzoneChange();
+    } catch (err) {
+      console.error('[浮窗] 导入失败:', err);
     }
   }, []);
   useNativeFileDrop(null, handleDroppedPaths, true);

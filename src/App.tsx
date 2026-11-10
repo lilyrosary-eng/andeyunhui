@@ -24,6 +24,7 @@ import { attachDeepLinkClickHandler } from '@/core/navigation/deepLink';
 import TransferReceiveModal from '@/components/TransferReceiveModal';
 import { logger } from '@/lib/logger';
 import { api } from '@/lib/api';
+import { loadCopyThreshold } from '@/lib/stationSettings';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -39,7 +40,7 @@ import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useNativeFileDrop } from '@/platform/useNativeFileDrop';
-import { basename, pathToDataUrl } from '@/platform/nativeDropFiles';
+import { basename } from '@/platform/nativeDropFiles';
 import { EVENTS } from '@/core/events/schema';
 
 function App() {
@@ -598,6 +599,12 @@ function App() {
   // 文件拖入的统一入口：主窗口是 dragDropEnabled: true，wry 接管文件拖拽
   // （handler 返回 true ⇒ WebKit 不导航；真实路径经 onDragDropEvent 给出）。
   // 应用内拖拽（x-andeng-internal）不带 file URI，wry 返回 false 放行，仍走各组件自己的 DOM drop。
+  //
+  // ★ 这里**直接传路径**给后端，不再把文件读成 data URL 再过 IPC。
+  //   旧链路：pathToDataUrl（整个文件进 Rust 内存 → base64，体积 1.37×）→ 过 IPC
+  //   → 前端 JS 字符串 → 传回后端 → 解码 → 写临时文件 → 再复制进 dropzone。
+  //   1 GB 的文件必然失败（V8 单字符串有上限），而且中间白落两次盘。
+  //   现在由后端按「复制阈值」决定：小的复制进中转站（自包含），大的只登记位置。
   const handleNativePaths = useCallback(async (paths: string[]) => {
     // 传输页自己会消费这些路径（它挂载时置位），不要重复送进中转站
     if ((window as unknown as Record<string, unknown>).__andengTransferActive) return;
@@ -606,30 +613,43 @@ function App() {
     const activeMod = activeModuleRef.current;
     const isMediaActive = MEDIA_MODULES.includes(activeMod);
     const openWithItems: { path: string; name: string }[] = [];
-    for (const srcPath of paths) {
-      const name = basename(srcPath);
-      try {
-        const dataUrl = await pathToDataUrl(srcPath);
-        logger.dropzone.importStart(name);
-        const imported = await api.addBytesToDropzone(dataUrl, name);
-        logger.dropzone.importSuccess(imported.originalName, imported.isReadable);
-        emitDropzoneChange();
-        if (imported.isReadable) {
-          try {
-            logger.dropzone.readStart(imported.storedPath);
-            const fileContent: string = await invoke('read_dropzone_file', { storedPath: imported.storedPath });
-            logger.dropzone.readSuccess(imported.originalName, fileContent.length);
-            openExternalContentRef.current(imported.originalName.replace(/\.\w+$/, ''), fileContent);
-          } catch (readErr) {
-            logger.dropzone.readFailed(imported.storedPath, readErr);
-          }
+    for (const srcPath of paths) logger.dropzone.importStart(basename(srcPath));
+
+    let res;
+    try {
+      res = await api.stationIngestPaths(paths, loadCopyThreshold());
+    } catch (err) {
+      console.error('[中转站] 拖入失败:', err);
+      for (const srcPath of paths) logger.dropzone.importFailed(basename(srcPath), err);
+      return;
+    }
+
+    if (res.notices.length) {
+      // 拖了 5 个只进来 3 个时，必须说清剩下那些为什么没进来
+      res.notices.forEach((n) => console.warn('[中转站] 拖入提示:', n));
+      logger.dropzone.importFailed(res.notices.join('；'), new Error('部分文件未导入'));
+    }
+    emitDropzoneChange();
+
+    for (const e of res.entries) {
+      logger.dropzone.importSuccess(e.name, e.isReadable);
+      if (e.isReadable) {
+        try {
+          logger.dropzone.readStart(e.name);
+          // 托管条目从 dropzone 读；引用条目（只登记的大文件）直接读它自己的路径
+          const content: string =
+            e.ownership === 'managed'
+              ? await invoke<string>('read_dropzone_file', { storedPath: basename(e.path) })
+              : await invoke<string>('read_text_file', { path: e.path });
+          logger.dropzone.readSuccess(e.name, content.length);
+          openExternalContentRef.current(e.name.replace(/\.\w+$/, ''), content);
+        } catch (readErr) {
+          logger.dropzone.readFailed(e.name, readErr);
         }
-        // 媒体模块 + 类型匹配：记录为「以安得云荟打开」项
-        if (isMediaActive && detectModule(name) === activeMod && imported.absolutePath) {
-          openWithItems.push({ path: imported.absolutePath, name });
-        }
-      } catch (err) {
-        logger.dropzone.importFailed(name, err);
+      }
+      // 媒体模块 + 类型匹配：记录为「以安得云荟打开」项
+      if (isMediaActive && detectModule(e.name) === activeMod) {
+        openWithItems.push({ path: e.path, name: e.name });
       }
     }
     if (openWithItems.length) dispatchOpenWith(activeMod, openWithItems);
@@ -641,7 +661,9 @@ function App() {
   useEffect(() => {
     const w = getCurrentWindow();
     let unlistenResize: (() => void) | undefined;
-    let unlistenFs: (() => void) | undefined;
+    // 这里原来还有一个 `unlistenFs`，声明后从未赋值、只在清理里 `?.()` 一下（永远 no-op）。
+    // 全屏变化本来就走 onResized + isFullscreen() 一起判，留着它只会让 lint 报
+    // 「always undefined」，容易让人以为漏订阅了事件。
     const sync = async () => {
       try {
         const [max, fs] = await Promise.all([w.isMaximized(), w.isFullscreen()]);
@@ -652,7 +674,6 @@ function App() {
     void w.onResized(() => void sync()).then((f) => { unlistenResize = f; }).catch(() => {});
     return () => {
       unlistenResize?.();
-      unlistenFs?.();
     };
   }, []);
 

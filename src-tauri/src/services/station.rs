@@ -42,6 +42,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::services::transfer_station;
 
+// 监听/事件要用到这些 trait（`path()` 来自 Manager、`emit()` 来自 Emitter、
+// `watch()` 来自 Watcher）。少了它们编译器只会报"没有这个方法"，很容易找错方向。
+use notify::Watcher;
+use tauri::{Emitter, Manager};
+
 /// 索引文件名。以 `.` 开头，扫目录时必须跳过，否则它会以「一个文件」的身份出现在列表里。
 pub const INDEX_FILE: &str = ".station.json";
 
@@ -58,6 +63,28 @@ const READABLE_EXTENSIONS: &[&str] = &[
     "r", "m", "mm", "pl", "lua", "dart", "groovy", "gradle", "svelte", "vue", "astro", "tex",
     "bib", "rst", "asciidoc", "adoc",
 ];
+
+/// 拖入时「复制进中转站」与「只登记位置」的分界线，默认 100 MiB。
+///
+/// 为什么需要这条线而不是一刀切：
+/// - 一律复制：拖一个 40 GB 的视频进来就是 80 GB 磁盘。用户往往只是"过一下"。
+/// - 一律只登记：一张 200 KB 的截图只记位置，用户在资源管理器里删掉它，
+///   中转站里的预览就没了 —— 小文件本来就该是自包含的。
+///
+/// 于是：**小的复制（自包含），大的只登记（省磁盘）**。阈值由调用方传入，
+/// 前端在设置里可调；这里只提供默认值。
+pub const DEFAULT_COPY_THRESHOLD: u64 = 100 * 1024 * 1024;
+
+/// 拖入/导入一批文件的结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestResult {
+    /// 成功收下的条目（已写入索引）。
+    pub entries: Vec<StationEntry>,
+    /// 没被收下的原因（不存在 / 已在站内 / 复制失败）。**必须显示**，
+    /// 否则用户拖了 5 个文件只进来 3 个，剩下的去哪了完全无从得知。
+    pub notices: Vec<String>,
+}
 
 // ================= 对外结构 =================
 
@@ -136,6 +163,16 @@ struct IndexEntry {
     added_at: String,
     /// `managed`（dropzone 内的副本，中转站拥有）| `referenced`（只是记得）
     ownership: String,
+    /// 这份内容**最初是从哪来的**（拖入时的原始路径）。
+    ///
+    /// 为什么需要它：托管条目复制进 dropzone 后，索引里记的是副本路径，
+    /// 于是同一个文件再拖一次时按路径比对**对不上**，会再复制一份 ——
+    /// 用户看到的就是「同一个 md 在列表里出现两次」。有了 origin 才能按"
+    /// 这份内容是不是已经在站里"去重。
+    ///
+    /// 旧数据没有这个字段，`default` 兼容（缺它就退回只按 path 比对）。
+    #[serde(default)]
+    origin_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +244,9 @@ fn read_index(app_data: &Path) -> StationIndex {
                         source: meta.source,
                         added_at: meta.added_at,
                         ownership: OWNERSHIP_MANAGED.to_string(),
+                        // v1 没记来源路径，只能留空；之后拖入同一文件会被当成新条目，
+                        // 但不会影响已有条目可用。
+                        origin_path: None,
                     },
                 );
             }
@@ -251,6 +291,7 @@ fn migrate_legacy_origin(app_data: &Path) -> StationIndex {
                 },
                 added_at: mtime_string(&p),
                 ownership: OWNERSHIP_MANAGED.to_string(),
+                origin_path: None,
             },
         );
     }
@@ -353,6 +394,8 @@ pub fn list(app_data: &Path, downloads: &[DownloadRef], notices: Vec<String>) ->
                 source: "local".to_string(),
                 added_at: mtime_string(path),
                 ownership: OWNERSHIP_MANAGED.to_string(),
+                // 手动丢进 dropzone 的文件没有"来源路径"可言
+                origin_path: None,
             },
         );
         dirty = true;
@@ -485,6 +528,325 @@ fn canon_key(p: &Path) -> String {
 }
 
 // ================= 按 id 定位 =================
+
+// ================= 拖入 / 导入 =================
+
+fn file_name_of(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| p.to_string_lossy().to_string())
+}
+
+fn ext_of(p: &Path) -> String {
+    p.extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
+}
+
+/// dropzone 里给一个不冲突的目标路径：`<毫秒时间戳>_<原名>`，重名时补 `_2`/`_3`。
+///
+/// 时间戳前缀是老约定（`strip_timestamp_prefix` 会把它剥掉），保留是为了让
+/// 老的兜底代码（按文件名解析原名）继续兼容。
+fn unique_dest(dir: &Path, src: &Path) -> PathBuf {
+    let name = file_name_of(src);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let mut candidate = dir.join(format!("{ts}_{name}"));
+    let mut n = 2u32;
+    while candidate.exists() {
+        candidate = dir.join(format!("{ts}_{n}_{name}"));
+        n += 1;
+        if n > 9999 {
+            // 极端情况（同一毫秒内几千个同名文件）：退回 uuid，不再无限循环
+            return dir.join(format!("{}_{}", uuid::Uuid::new_v4().simple(), name));
+        }
+    }
+    candidate
+}
+
+/// 把一批**真实路径**收进中转站。返回已收下的条目与未收下的原因。
+///
+/// ★ 全程不把文件读进内存：复制走 `fs::copy`，只登记就只写一条索引路径。
+///
+///   旧链路是「Rust 读整个文件 → base64（体积 1.37×）→ 过 IPC → 前端 JS 字符串 →
+///   传回后端 → 解码 → 写临时文件 → 再复制进 dropzone」。1 GB 的文件必然失败
+///   （V8 单字符串有上限），而且中间白落两次盘。这就是本次要替换掉的东西。
+///
+/// `copy_threshold`：≤ 它则复制进 dropzone（自包含），> 它则只登记位置。
+pub fn ingest_paths(app_data: &Path, paths: &[PathBuf], copy_threshold: u64) -> IngestResult {
+    let dir = dropzone_dir(app_data);
+    let mut notices: Vec<String> = Vec::new();
+    let mut entries: Vec<StationEntry> = Vec::new();
+    let mut idx = read_index(app_data);
+    let mut dirty = false;
+
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return IngestResult {
+            entries,
+            notices: vec![format!("创建中转站目录失败: {e}")],
+        };
+    }
+
+    for src in paths {
+        let display = src.to_string_lossy().to_string();
+        if !src.is_file() {
+            notices.push(format!("跳过（不存在或不是文件）：{display}"));
+            continue;
+        }
+        // 同一个文件重复拖入不该在中转站里出现两次。
+        // ★ 必须连 `origin_path` 一起比：托管条目在索引里记的是 dropzone 里的
+        //   副本路径，只比 path 的话同一个原文件每次拖入都会被当成新文件，
+        //   于是列表里出现两个内容相同的条目（这个现象用户已经踩到了）。
+        let src_key = canon_key(src);
+        let already = idx.entries.values().any(|m| {
+            canon_key(Path::new(&m.path)) == src_key
+                || m.origin_path
+                    .as_deref()
+                    .map(|o| canon_key(Path::new(o)) == src_key)
+                    .unwrap_or(false)
+        });
+        if already {
+            notices.push(format!("「{}」已经在中转站里了", file_name_of(src)));
+            continue;
+        }
+
+        let size = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+        let ext = ext_of(src);
+        let (final_path, ownership) = if size <= copy_threshold {
+            let dest = unique_dest(&dir, src);
+            match std::fs::copy(src, &dest) {
+                Ok(_) => (dest, OWNERSHIP_MANAGED),
+                Err(e) => {
+                    notices.push(format!("复制「{}」失败：{e}", file_name_of(src)));
+                    continue;
+                }
+            }
+        } else {
+            eprintln!(
+                "[中转站] 「{}」{} 超过复制阈值 {}，只登记位置不复制",
+                file_name_of(src),
+                transfer_station::human_bytes(size),
+                transfer_station::human_bytes(copy_threshold)
+            );
+            (src.clone(), OWNERSHIP_REFERENCED)
+        };
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let added_at = mtime_string(&final_path);
+        let path_str = final_path.to_string_lossy().to_string();
+        idx.entries.insert(
+            id.clone(),
+            IndexEntry {
+                path: path_str.clone(),
+                source: "local".to_string(),
+                added_at: added_at.clone(),
+                ownership: ownership.to_string(),
+                // 记下来源路径：托管条目靠它去重（副本路径和原路径不是一个）
+                origin_path: Some(src.to_string_lossy().to_string()),
+            },
+        );
+        dirty = true;
+        entries.push(StationEntry {
+            id,
+            name: file_name_of(src),
+            path: path_str,
+            size,
+            extension: ext.clone(),
+            modified_at: mtime_string(&final_path),
+            added_at,
+            ownership: ownership.to_string(),
+            source: "local".to_string(),
+            status: STATUS_OK.to_string(),
+            is_readable: is_readable_ext(&ext),
+            download_id: None,
+        });
+    }
+
+    if dirty {
+        if let Err(e) = write_index(app_data, &idx) {
+            notices.push(format!("索引写入失败（{e}），重启后这些条目可能消失"));
+        }
+    }
+    IngestResult { entries, notices }
+}
+
+// ================= 存储概况 =================
+
+/// 中转站的存储概况。设置页展示 + 「打开文件夹」的落点。
+///
+/// 为什么要分项而不是给一个总数：用户问"我的东西都在哪"时，
+/// 真正想知道的是「哪些是我不清理就会一直涨的」。`backups`（笔记备份）和
+/// `media`（文档抽取的图片）不属于"中转站文件"，混在一起看会误判。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageInfo {
+    /// 中转站根目录（设置页显示这个，并据此打开资源管理器）
+    pub root: String,
+    pub dropzone_path: String,
+    pub archives_path: String,
+    pub dropzone_bytes: u64,
+    pub dropzone_count: usize,
+    /// 回收站条数/大小（与 `archives_usage` 同源，这里带上是为了一个面板看全）
+    pub archive_bytes: u64,
+    pub archive_count: usize,
+    pub media_bytes: u64,
+    pub media_count: usize,
+    pub backup_bytes: u64,
+    pub backup_count: usize,
+    /// 各分项之和
+    pub total_bytes: u64,
+}
+
+/// 递归统计目录的（字节数, 文件数）。目录不存在返回 (0, 0)。
+///
+/// 用递归而不是 `read_dir` 一层：`media/` 下面按文档分文件夹存抽取出来的图片，
+/// 只数第一层会得到 0 个文件、0 字节 —— 那种"显示了但显示错"比不显示更糟。
+fn dir_stats(dir: &Path) -> (u64, usize) {
+    let mut bytes = 0u64;
+    let mut count = 0usize;
+    let Ok(items) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    for item in items.flatten() {
+        let p = item.path();
+        if p.is_dir() {
+            let (b, c) = dir_stats(&p);
+            bytes += b;
+            count += c;
+        } else if let Ok(m) = item.metadata() {
+            bytes += m.len();
+            count += 1;
+        }
+    }
+    (bytes, count)
+}
+
+pub fn storage_info(app_data: &Path) -> StorageInfo {
+    let root = app_data.join("transfer_station");
+    let dropzone = dropzone_dir(app_data);
+    // 托管目录的大小要**排除**索引等 sidecar（`.station.json` 不是用户文件）
+    let (mut dropzone_bytes, mut dropzone_count) = (0u64, 0usize);
+    if let Ok(items) = std::fs::read_dir(&dropzone) {
+        for item in items.flatten() {
+            let name = item.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            if let Ok(m) = item.metadata() {
+                if m.is_file() {
+                    dropzone_bytes += m.len();
+                    dropzone_count += 1;
+                }
+            }
+        }
+    }
+    let archives = root.join("archives");
+    // 回收站的数字直接取 manifest（与设置页那个列表同源）。
+    // 用目录扫描去数会多算 `manifest.json`，两边显示不一致比数字不准更糟。
+    let archive_bytes = transfer_station::archive_total_bytes(app_data);
+    let archive_count = transfer_station::list_archives(app_data).len();
+    let (media_bytes, media_count) = dir_stats(&root.join("media"));
+    let (backup_bytes, backup_count) = dir_stats(&root.join("backups"));
+
+    StorageInfo {
+        root: root.to_string_lossy().to_string(),
+        dropzone_path: dropzone.to_string_lossy().to_string(),
+        archives_path: archives.to_string_lossy().to_string(),
+        dropzone_bytes,
+        dropzone_count,
+        archive_bytes,
+        archive_count,
+        media_bytes,
+        media_count,
+        backup_bytes,
+        backup_count,
+        total_bytes: dropzone_bytes + archive_bytes + media_bytes + backup_bytes,
+    }
+}
+
+// ================= 目录监听 =================
+
+/// 启动中转站目录监听：在资源管理器里增删文件，面板要能立刻反映。
+///
+/// ★ **必须过滤 `.` 开头的文件**。`.station.json` 是索引本身：
+///   它触发事件 → 前端刷新 → `list` 补登记 → 又写索引 → 又触发，
+///   就是一个自己喂自己的死循环。这类循环最难查，因为现象是"界面一直在刷"。
+///
+/// 防抖策略：复制一个大文件会触发成百上千次事件，逐个 emit 会把前端刷爆。
+/// 这里用「静默 250ms 后投递一次」+「持续高频时最多 1.2s 强制投递一次」，
+/// 后者是为了避免事件连绵不断时永远等不到静默、界面一直不刷新。
+pub fn spawn_watcher(app: tauri::AppHandle) {
+    let Ok(app_data) = app.path().app_data_dir() else {
+        eprintln!("[中转站] 取不到 app_data，跳过目录监听");
+        return;
+    };
+    let dir = dropzone_dir(&app_data);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("[中转站] 创建目录失败，跳过监听: {e}");
+        return;
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+    let mut watcher = match notify::recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    }) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("[中转站] 无法创建目录监听: {e}");
+            return;
+        }
+    };
+    if let Err(e) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
+        eprintln!("[中转站] 监听目录失败 {}: {e}", dir.display());
+        return;
+    }
+    eprintln!("[中转站] 已监听目录变化: {}", dir.display());
+
+    std::thread::spawn(move || {
+        use std::sync::mpsc::RecvTimeoutError;
+        let _keep = watcher; // watcher 必须活到线程结束
+        let mut pending = false;
+        let mut last_flush = std::time::Instant::now();
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(Ok(event)) => {
+                    let relevant = matches!(
+                        event.kind,
+                        notify::EventKind::Create(_)
+                            | notify::EventKind::Remove(_)
+                            | notify::EventKind::Modify(_)
+                    );
+                    if relevant
+                        && event.paths.iter().any(|p| {
+                            p.file_name()
+                                .map(|n| !n.to_string_lossy().starts_with('.'))
+                                .unwrap_or(false)
+                        })
+                    {
+                        pending = true;
+                    }
+                    if pending && last_flush.elapsed() > std::time::Duration::from_millis(1200) {
+                        pending = false;
+                        last_flush = std::time::Instant::now();
+                        let _ = app.emit("dropzone-changed", ());
+                    }
+                }
+                Ok(Err(e)) => eprintln!("[中转站] 目录监听事件出错: {e}"),
+                Err(RecvTimeoutError::Timeout) => {
+                    if pending {
+                        pending = false;
+                        last_flush = std::time::Instant::now();
+                        let _ = app.emit("dropzone-changed", ());
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        eprintln!("[中转站] 目录监听已结束");
+    });
+}
 
 /// 解析一个 id 到条目。
 ///
@@ -1087,6 +1449,98 @@ mod tests {
         // 迁移结果要落盘成 v2
         let raw = fs::read_to_string(dropzone_dir(&app).join(INDEX_FILE)).unwrap();
         assert!(raw.contains("\"version\": 2") || raw.contains("\"version\":2"), "应写回 v2: {raw}");
+    }
+
+    /// 拖入：小的复制进 dropzone（自包含），大的只登记位置（省磁盘）。
+    #[test]
+    fn ingest_copies_small_and_only_registers_large() {
+        let app = tmp("ingest_split");
+        let outside = app.join("user");
+        fs::create_dir_all(&outside).unwrap();
+        let small = outside.join("small.txt");
+        let big = outside.join("big.bin");
+        fs::write(&small, b"12345").unwrap();
+        fs::write(&big, vec![0u8; 100]).unwrap();
+
+        let res = ingest_paths(&app, &[small.clone(), big.clone()], 10);
+        assert_eq!(res.entries.len(), 2, "两个都应收下: {:?}", res.notices);
+        assert!(res.notices.is_empty(), "不该有告警: {:?}", res.notices);
+
+        let s = res.entries.iter().find(|e| e.name == "small.txt").unwrap();
+        assert_eq!(s.ownership, OWNERSHIP_MANAGED);
+        assert!(
+            parent_is(Path::new(&s.path), &dropzone_dir(&app)),
+            "小文件应复制进 dropzone，实际: {}",
+            s.path
+        );
+        assert!(small.is_file(), "复制不是移动，原文件必须还在");
+
+        let b = res.entries.iter().find(|e| e.name == "big.bin").unwrap();
+        assert_eq!(b.ownership, OWNERSHIP_REFERENCED, "超过阈值只登记");
+        assert_eq!(Path::new(&b.path), big, "路径应指向原位置");
+
+        // 再列一次：两条都在，而且各只有一条（没有因补登记而重复）
+        let l = list(&app, &[], vec![]);
+        assert_eq!(l.entries.len(), 2);
+    }
+
+    /// 同一个文件重复拖入只能有一条 —— 这是用户真实踩到的现象
+    /// （dropzone 里躺了两份同名的 `rag-acceptance-doc.md`）。
+    ///
+    /// 关键是托管条目在索引里记的是**副本路径**，只比 path 会认为"没见过"，
+    /// 于是每次都多复制一份。所以必须连 `origin_path` 一起比。
+    #[test]
+    fn ingest_deduplicates_by_origin_path() {
+        let app = tmp("ingest_dup");
+        let outside = app.join("user");
+        fs::create_dir_all(&outside).unwrap();
+        let f = outside.join("doc.md");
+        fs::write(&f, b"hello").unwrap();
+
+        let first = ingest_paths(&app, &[f.clone()], 1024);
+        assert_eq!(first.entries.len(), 1);
+
+        let second = ingest_paths(&app, &[f.clone()], 1024);
+        assert!(second.entries.is_empty(), "第二次不该再收一遍");
+        assert!(
+            second.notices.iter().any(|n| n.contains("已经在中转站里")),
+            "要给出去重原因，实际: {:?}",
+            second.notices
+        );
+
+        // dropzone 里只应有一个副本文件
+        let copied = fs::read_dir(dropzone_dir(&app))
+            .unwrap()
+            .flatten()
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .count();
+        assert_eq!(copied, 1, "不该产生第二份副本");
+    }
+
+    /// 不存在的路径要明确跳过并说明，不能静默少一条。
+    #[test]
+    fn ingest_reports_missing_paths() {
+        let app = tmp("ingest_missing");
+        let ghost = app.join("nope.txt");
+        let res = ingest_paths(&app, &[ghost], 1024);
+        assert!(res.entries.is_empty());
+        assert_eq!(res.notices.len(), 1);
+        assert!(res.notices[0].contains("不存在"), "实际: {:?}", res.notices);
+    }
+
+    /// 存储概况要把分项算对，尤其是 archive 的条数不能把 manifest.json 算进去。
+    #[test]
+    fn storage_info_counts_sections() {
+        let app = tmp("storage_info");
+        touch(&app, "1700000000000_a.txt", b"abc");
+        transfer_station::archive_snapshot_at(&app, "file", "sid", "a.txt", b"xyz", "txt", None);
+        let info = storage_info(&app);
+        assert_eq!(info.dropzone_count, 1);
+        assert_eq!(info.dropzone_bytes, 3);
+        assert_eq!(info.archive_count, 1, "manifest.json 不算一条快照");
+        assert_eq!(info.archive_bytes, 3);
+        assert!(info.total_bytes >= 6, "合计应包含 dropzone + 回收站");
+        assert!(info.root.ends_with("transfer_station"));
     }
 
     #[test]

@@ -67,6 +67,64 @@ pub async fn station_list(app: tauri::AppHandle) -> Result<StationList, String> 
     .map_err(|e| format!("station_list 任务失败: {e}"))?
 }
 
+/// 中转站存储概况：根目录、各分项占用。设置页显示 + 「打开文件夹」的落点。
+#[tauri::command]
+pub async fn station_storage_info(app: tauri::AppHandle) -> Result<station::StorageInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        let app_data = app_data_of(&app)?;
+        Ok(station::storage_info(&app_data))
+    })
+    .await
+    .map_err(|e| format!("station_storage_info 任务失败: {e}"))?
+}
+
+/// 把一批**真实路径**收进中转站（拖入 / 导入的统一入口）。
+///
+/// ★ 为什么要有这条命令而不是复用 `add_bytes_to_dropzone`：
+///   旧链路要求前端先把整个文件读成 base64 再传回后端（1 GB 文件 → 1.37 GB 字符串
+///   过 IPC，V8 单字符串有上限，必然失败；中间还白落两次盘）。
+///   这里直接收路径，复制走 `fs::copy`，**文件内容不进内存**。
+///
+/// `copyThreshold`：≤ 它则复制进 dropzone（自包含），> 它则只登记位置。
+/// 缺省用 `DEFAULT_COPY_THRESHOLD`（100 MiB）。
+#[tauri::command]
+pub async fn station_ingest_paths(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+    copy_threshold: Option<u64>,
+) -> Result<station::IngestResult, String> {
+    let threshold = copy_threshold.unwrap_or(station::DEFAULT_COPY_THRESHOLD);
+    let app_bg = app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let app_data = app_data_of(&app_bg)?;
+        // 只接受绝对路径：相对路径的基准是进程 cwd，对用户完全不可预期，
+        // 与其猜一个基准，不如明确告诉他这条没收。
+        let mut accepted: Vec<PathBuf> = Vec::with_capacity(paths.len());
+        let mut rejected: Vec<String> = Vec::new();
+        for raw in paths {
+            let p = PathBuf::from(&raw);
+            if p.is_absolute() {
+                accepted.push(p);
+            } else {
+                rejected.push(format!("跳过（不是绝对路径）：{raw}"));
+            }
+        }
+        let mut out = station::ingest_paths(&app_data, &accepted, threshold);
+        if !rejected.is_empty() {
+            eprintln!("[中转站] 拒绝 {} 条非绝对路径", rejected.len());
+            out.notices.extend(rejected);
+        }
+        Ok::<_, String>(out)
+    })
+    .await
+    .map_err(|e| format!("station_ingest_paths 任务失败: {e}"))??;
+
+    if !result.entries.is_empty() {
+        let _ = app.emit("dropzone-changed", ());
+    }
+    Ok(result)
+}
+
 /// 移除一条记录。**默认动作，不删用户的文件。**
 ///
 /// - 托管（managed）：先把副本归档进回收站，再删 dropzone 里的那份。
