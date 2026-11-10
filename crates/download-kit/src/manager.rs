@@ -18,8 +18,8 @@ use crate::engine::{self as engines, DownloadEngine, EngineCtx, EngineOutcome};
 use crate::probe;
 use crate::store::Store;
 use crate::types::{
-    DownloadPart, DownloadSpec, DownloadTask, EngineConfig, EngineKind, EngineStatus,
-    PartState, ProbeRequest, ProbeResult, ProgressPayload, TaskDetail, TaskStatus, ToolStatus,
+    DownloadPart, DownloadSpec, DownloadTask, EngineConfig, EngineInfo, EngineKind, EngineStatus,
+    PartState, ProbeRequest, ProbeResult, ProgressPayload, TaskDetail, TaskStatus,
 };
 use crate::util::{filename_from_url, now_ms, sanitize_filename};
 use crate::{EVENT_PROGRESS, EVENT_STATE};
@@ -236,12 +236,16 @@ impl Inner {
         let size = std::fs::metadata(&task.save_path)
             .map_err(|e| format!("下载文件不存在或不可读: {e}"))?
             .len();
-        // 只有「单地址 + 原生/aria2」的总长等于最终文件字节数。
+        // 只有「单地址 + 内置/CLI 直写引擎」的总长等于最终文件字节数。
         // 多段拼接与 ffmpeg 转封装会重写容器，输出大小允许与探测值不同。
         let strict_size = task.urls.len() == 1
             && matches!(
                 task.resolved_engine,
-                Some(EngineKind::Native) | Some(EngineKind::Aria2)
+                Some(EngineKind::Native)
+                    | Some(EngineKind::Simple)
+                    | Some(EngineKind::Aria2)
+                    | Some(EngineKind::Curl)
+                    | Some(EngineKind::Wget)
             );
         if strict_size && task.total_bytes > 0 && size != task.total_bytes {
             return Err(format!(
@@ -554,23 +558,28 @@ impl DownloadManager {
 
     pub fn engines(&self) -> EngineStatus {
         let config = self.inner.config();
-        let read = |kind: EngineKind| -> ToolStatus {
-            match self.inner.engine(kind) {
-                Some(engine) => ToolStatus {
-                    available: engine.available().is_ok(),
-                    path: engine.tool_path(),
-                },
-                None => ToolStatus::default(),
-            }
-        };
+        let list = engines::DESCRIPTORS
+            .iter()
+            .map(|descriptor| {
+                let (available, path) = match self.inner.engine(descriptor.kind) {
+                    Some(engine) => (engine.available().is_ok(), engine.tool_path()),
+                    None => (false, None),
+                };
+                EngineInfo {
+                    kind: descriptor.kind,
+                    name: descriptor.name.to_string(),
+                    description: descriptor.description.to_string(),
+                    builtin: descriptor.builtin,
+                    platform: descriptor.platform.to_string(),
+                    available,
+                    path,
+                    default: config.default_engine == descriptor.kind,
+                }
+            })
+            .collect();
         EngineStatus {
             default_engine: config.default_engine,
-            native: ToolStatus {
-                available: true,
-                path: None,
-            },
-            aria2: read(EngineKind::Aria2),
-            ffmpeg: read(EngineKind::Ffmpeg),
+            engines: list,
         }
     }
 
@@ -975,6 +984,61 @@ mod tests {
         assert_eq!(stored.status, TaskStatus::Completed);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 引擎2：即使请求了多连接，也必须只产生一个分片（单连接兼容模式）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn simple_engine_uses_single_connection() {
+        let payload: Vec<u8> = (0..900_000usize).map(|i| (i % 197) as u8).collect();
+        let url = spawn_range_server(payload.clone()).await;
+
+        let base = temp_base("simple");
+        let store = Store::open(&base).unwrap();
+        let config = EngineConfig {
+            connections: 8,
+            read_timeout_secs: 30,
+            ..Default::default()
+        };
+        let inner = test_inner(base.clone(), store, config.clone());
+        let save_path = base.join("simple.bin");
+        let task = sample_task(&url, &save_path, 8, 0);
+        inner.store.insert_task(&task).unwrap();
+
+        let (sender, receiver) = watch::channel(Control::Run);
+        inner
+            .controls
+            .lock()
+            .unwrap()
+            .insert(task.id.clone(), sender);
+        let ctx = EngineCtx {
+            inner: inner.clone(),
+            task_id: task.id.clone(),
+            save_path: save_path.clone(),
+            control: receiver,
+        };
+        let engine = crate::engine::simple::SimpleEngine::new(config, None);
+        let outcome = engine.run(ctx).await.unwrap();
+        assert_eq!(outcome, EngineOutcome::Done);
+        inner.complete(&task.id).unwrap();
+
+        assert_eq!(std::fs::read(&save_path).unwrap(), payload);
+        let parts = inner.store.parts(&task.id).unwrap();
+        assert_eq!(parts.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn engine_descriptors_cover_all_choices() {
+        let names: Vec<&str> = crate::engine::DESCRIPTORS
+            .iter()
+            .map(|descriptor| descriptor.name)
+            .collect();
+        assert_eq!(names.len(), 6);
+        assert!(names.contains(&"综合下载引擎1"));
+        assert!(names.contains(&"综合下载引擎2"));
+        assert!(names.contains(&"cURL 外部引擎"));
+        assert!(names.contains(&"Wget 外部引擎"));
     }
 }
 

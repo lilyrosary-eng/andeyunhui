@@ -1,12 +1,12 @@
-//! 内置原生分块引擎。
+//! 综合下载引擎1：内置分块多连接引擎。
 //!
-//! 对齐 IDM 蓝图的核心算法：
-//! - 探针拿 `Content-Length` / `Accept-Ranges`，按连接数切分片；
+//! 只使用公开的 HTTP 语义：
+//! - 探测拿 `Content-Length` / `Accept-Ranges`，按连接数切分片；
 //! - 每片独立临时文件（避免并发 seek 竞争），用 `Range: bytes=start+downloaded-end-1` 续传；
 //! - 分片状态实时落 SQLite，进程重启后按 `downloaded` 继续；
 //! - 全部完成后按序合并；多地址任务交给 ffmpeg concat。
 //!
-//! 与 IDM 的差异：不读写注册表、不做站点抓取、不做驱动拦截，只保留传输内核。
+//! 不涉及浏览器集成 / 系统驱动 / 站点抓取，只负责传输内核。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -60,7 +60,23 @@ impl DownloadEngine for NativeEngine {
     }
 
     async fn run(&self, ctx: EngineCtx) -> Result<EngineOutcome, String> {
-        let task = ctx.task()?;
+        self.run_with_mode(ctx, EngineKind::Native, false).await
+    }
+}
+
+impl NativeEngine {
+    /// 引擎1 与引擎2 共用同一套传输实现；
+    /// `single_connection = true` 时强制单连接（不做多分片），用于兼容拒绝并发的站点。
+    pub(crate) async fn run_with_mode(
+        &self,
+        ctx: EngineCtx,
+        kind: EngineKind,
+        single_connection: bool,
+    ) -> Result<EngineOutcome, String> {
+        let mut task = ctx.task()?;
+        if single_connection {
+            task.connections = 1;
+        }
         if task.urls.is_empty() {
             return Err("缺少下载地址".to_string());
         }
@@ -71,9 +87,9 @@ impl DownloadEngine for NativeEngine {
         }
         let parts = ctx.parts()?;
         if task.urls.len() > 1 {
-            self.run_multi(ctx, task, parts).await
+            self.run_multi(ctx, task, parts, kind).await
         } else {
-            self.run_single(ctx, task, parts).await
+            self.run_single(ctx, task, parts, kind).await
         }
     }
 }
@@ -85,6 +101,7 @@ impl NativeEngine {
         ctx: EngineCtx,
         mut task: DownloadTask,
         mut parts: Vec<DownloadPart>,
+        kind: EngineKind,
     ) -> Result<EngineOutcome, String> {
         let meta = HttpMeta::from_task(&task);
         let probe = probe::probe(&self.client, &task.urls[0], &meta)
@@ -99,7 +116,7 @@ impl NativeEngine {
             }
         }
         enforce_max_bytes(&task)?;
-        ctx.update_meta(EngineKind::Native, &task.filename, task.total_bytes)?;
+        ctx.update_meta(kind, &task.filename, task.total_bytes)?;
 
         if let Some(outcome) = check_control(&ctx) {
             return Ok(outcome);
@@ -230,6 +247,7 @@ impl NativeEngine {
         ctx: EngineCtx,
         mut task: DownloadTask,
         mut parts: Vec<DownloadPart>,
+        kind: EngineKind,
     ) -> Result<EngineOutcome, String> {
         let meta = HttpMeta::from_task(&task);
         let mut lengths = Vec::with_capacity(task.urls.len());
@@ -246,7 +264,7 @@ impl NativeEngine {
             task.total_bytes = total;
         }
         enforce_max_bytes(&task)?;
-        ctx.update_meta(EngineKind::Native, &task.filename, task.total_bytes)?;
+        ctx.update_meta(kind, &task.filename, task.total_bytes)?;
 
         if let Some(outcome) = check_control(&ctx) {
             return Ok(outcome);

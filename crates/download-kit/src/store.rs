@@ -1,6 +1,6 @@
 //! SQLite 事实源：任务表 + 分片表。
 //!
-//! 分片表就是 IDM `ChList` 的等价物：每一片记录 `start/end/downloaded/state/temp_path`，
+//! 分片表就是分片清单：每一片记录 `start/end/downloaded/state/temp_path`，
 //! 进程重启后按 `downloaded` 继续，不需要重新规划。
 
 use std::path::Path;

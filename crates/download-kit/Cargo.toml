@@ -31,7 +31,7 @@ tokio = { version = "1", features = [
 # 传输压缩会让 Content-Length / Range 语义错位，统一在请求里带 Accept-Encoding: identity。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 futures-util = "0.3"
-# 任务 + 分片表（对齐 IDM 的 ChList 模型），bundled 免外部 SQLite。
+# 任务 + 分片表（分片清单模型），bundled 免外部 SQLite。
 rusqlite = { version = "0.32", features = ["bundled"] }
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }

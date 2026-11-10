@@ -4,9 +4,13 @@
 //! 管理器按 `EngineKind` 取实现，因此「换引擎」对上层透明。
 
 pub mod aria2;
+pub mod curl;
+pub(crate) mod external;
 pub mod ffmpeg;
 pub mod native;
+pub mod simple;
 pub(crate) mod tool;
+pub mod wget;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -136,17 +140,82 @@ pub trait DownloadEngine: Send + Sync {
     async fn run(&self, ctx: EngineCtx) -> Result<EngineOutcome, String>;
 }
 
+/// 引擎元数据（静态表）：展示名/说明集中在这里，新增引擎只需改这一处 + 注册实现。
+pub struct EngineDescriptor {
+    pub kind: EngineKind,
+    pub name: &'static str,
+    pub description: &'static str,
+    /// true = 随应用编译；false = 调用外部可执行文件。
+    pub builtin: bool,
+    pub platform: &'static str,
+}
+
+pub const DESCRIPTORS: &[EngineDescriptor] = &[
+    EngineDescriptor {
+        kind: EngineKind::Native,
+        name: "综合下载引擎1",
+        description: "内置分块多连接：Range 分片、断点续传、失败重试，适合大多数直链",
+        builtin: true,
+        platform: "跨平台",
+    },
+    EngineDescriptor {
+        kind: EngineKind::Simple,
+        name: "综合下载引擎2",
+        description: "内置单连接兼容：不主动分段，适配拒绝 Range / 多连接的反盗链站点",
+        builtin: true,
+        platform: "跨平台",
+    },
+    EngineDescriptor {
+        kind: EngineKind::Aria2,
+        name: "aria2c 外部引擎",
+        description: "调用外部 aria2c：多连接、续传、限速，需用户自备可执行文件",
+        builtin: false,
+        platform: "跨平台",
+    },
+    EngineDescriptor {
+        kind: EngineKind::Ffmpeg,
+        name: "ffmpeg 流媒体引擎",
+        description: "HLS(m3u8) 拉流转封装与本地分段拼接",
+        builtin: false,
+        platform: "跨平台",
+    },
+    EngineDescriptor {
+        kind: EngineKind::Curl,
+        name: "cURL 外部引擎",
+        description: "调用系统 curl：单连接 + 断点续传，兼容性优先",
+        builtin: false,
+        platform: "跨平台",
+    },
+    EngineDescriptor {
+        kind: EngineKind::Wget,
+        name: "Wget 外部引擎",
+        description: "调用系统 wget：单连接 + 断点续传，Unix 环境常见",
+        builtin: false,
+        platform: "跨平台",
+    },
+];
+
+pub fn descriptor(kind: EngineKind) -> Option<&'static EngineDescriptor> {
+    DESCRIPTORS.iter().find(|item| item.kind == kind)
+}
+
 pub fn build_registry(
     app: &AppHandle,
     config: &EngineConfig,
 ) -> HashMap<EngineKind, Arc<dyn DownloadEngine>> {
     let ffmpeg = tool::resolve(app, config.ffmpeg_path.as_deref(), &["ffmpeg.exe", "ffmpeg"]);
     let aria2 = tool::resolve(app, config.aria2_path.as_deref(), &["aria2c.exe", "aria2c"]);
+    let curl = tool::resolve(app, config.curl_path.as_deref(), &["curl.exe", "curl"]);
+    let wget = tool::resolve(app, config.wget_path.as_deref(), &["wget.exe", "wget"]);
 
     let mut registry: HashMap<EngineKind, Arc<dyn DownloadEngine>> = HashMap::new();
     registry.insert(
         EngineKind::Native,
         Arc::new(native::NativeEngine::new(config.clone(), ffmpeg.clone())),
+    );
+    registry.insert(
+        EngineKind::Simple,
+        Arc::new(simple::SimpleEngine::new(config.clone(), ffmpeg.clone())),
     );
     registry.insert(
         EngineKind::Aria2,
@@ -155,6 +224,14 @@ pub fn build_registry(
     registry.insert(
         EngineKind::Ffmpeg,
         Arc::new(ffmpeg::FfmpegEngine::new(config.clone(), ffmpeg)),
+    );
+    registry.insert(
+        EngineKind::Curl,
+        Arc::new(curl::CurlEngine::new(config.clone(), curl)),
+    );
+    registry.insert(
+        EngineKind::Wget,
+        Arc::new(wget::WgetEngine::new(config.clone(), wget)),
     );
     registry
 }

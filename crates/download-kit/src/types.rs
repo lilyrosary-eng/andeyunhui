@@ -9,15 +9,23 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// 下载引擎。`Auto` 由内核按任务形态选择（HLS → ffmpeg，多段 → native）。
+/// 下载引擎。
+///
+/// - `Auto`：由内核按任务形态选择（HLS → ffmpeg，多段 → native）；
+/// - `Native`：综合下载引擎1，内置分块多连接；
+/// - `Simple`：综合下载引擎2，内置单连接兼容；
+/// - 其余为外部引擎（aria2c / ffmpeg / curl / wget）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum EngineKind {
     #[default]
     Auto,
     Native,
+    Simple,
     Aria2,
     Ffmpeg,
+    Curl,
+    Wget,
 }
 
 impl EngineKind {
@@ -25,8 +33,11 @@ impl EngineKind {
         match self {
             Self::Auto => "auto",
             Self::Native => "native",
+            Self::Simple => "simple",
             Self::Aria2 => "aria2",
             Self::Ffmpeg => "ffmpeg",
+            Self::Curl => "curl",
+            Self::Wget => "wget",
         }
     }
 
@@ -34,8 +45,11 @@ impl EngineKind {
         match value {
             "auto" => Some(Self::Auto),
             "native" => Some(Self::Native),
+            "simple" => Some(Self::Simple),
             "aria2" => Some(Self::Aria2),
             "ffmpeg" => Some(Self::Ffmpeg),
+            "curl" => Some(Self::Curl),
+            "wget" => Some(Self::Wget),
             _ => None,
         }
     }
@@ -201,7 +215,7 @@ pub struct DownloadPart {
     pub end: u64,
     pub downloaded: u64,
     pub state: PartState,
-    /// 分片临时文件（每片独立，避免并发 seek 竞争；对齐 IDM 的 part 模型）。
+    /// 分片临时文件（每片独立，避免并发 seek 竞争）。
     pub temp_path: String,
 }
 
@@ -218,7 +232,7 @@ impl DownloadPart {
 pub struct EngineConfig {
     /// 默认引擎；`auto` 表示按任务形态自动选。
     pub default_engine: EngineKind,
-    /// 单任务默认连接数（IDM 默认 8、上限 32）。
+    /// 单任务默认连接数（默认 8、上限 32）。
     pub connections: u32,
     /// 同时运行的下载任务数。
     pub max_concurrent_tasks: u32,
@@ -238,6 +252,12 @@ pub struct EngineConfig {
     /// ffmpeg 可执行文件路径；留空则自动在 external-deps / PATH 查找。
     #[serde(default)]
     pub ffmpeg_path: Option<String>,
+    /// curl 可执行文件路径；留空则自动在 external-deps / PATH 查找。
+    #[serde(default)]
+    pub curl_path: Option<String>,
+    /// wget 可执行文件路径；留空则自动在 external-deps / PATH 查找。
+    #[serde(default)]
+    pub wget_path: Option<String>,
     /// 启动时是否自动续传上一进程遗留的活动任务；false 则置为暂停。
     pub resume_on_start: bool,
 }
@@ -256,6 +276,8 @@ impl Default for EngineConfig {
             user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36".to_string(),
             aria2_path: None,
             ffmpeg_path: None,
+            curl_path: None,
+            wget_path: None,
             resume_on_start: true,
         }
     }
@@ -277,6 +299,8 @@ impl EngineConfig {
         }
         self.aria2_path = normalize_path(self.aria2_path);
         self.ffmpeg_path = normalize_path(self.ffmpeg_path);
+        self.curl_path = normalize_path(self.curl_path);
+        self.wget_path = normalize_path(self.wget_path);
         self
     }
 }
@@ -316,13 +340,21 @@ pub struct ProbeResult {
     pub filename: Option<String>,
 }
 
-/// 外部工具可用性。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// 引擎描述：设置页/命令行只需消费这个列表，不必知道具体实现。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ToolStatus {
+pub struct EngineInfo {
+    pub kind: EngineKind,
+    /// 展示名，例如「综合下载引擎1」。
+    pub name: String,
+    pub description: String,
+    /// 内置（随应用编译）或外部可执行文件。
+    pub builtin: bool,
+    pub platform: String,
     pub available: bool,
     #[serde(default)]
     pub path: Option<String>,
+    pub default: bool,
 }
 
 /// 引擎总览。
@@ -330,9 +362,7 @@ pub struct ToolStatus {
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatus {
     pub default_engine: EngineKind,
-    pub native: ToolStatus,
-    pub aria2: ToolStatus,
-    pub ffmpeg: ToolStatus,
+    pub engines: Vec<EngineInfo>,
 }
 
 /// 进度事件载荷。
