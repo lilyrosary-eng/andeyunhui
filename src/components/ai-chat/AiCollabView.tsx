@@ -466,7 +466,10 @@ function RoomBuilderDialog({
   onClose: () => void;
   onCreate: (members: CollabMemberInput[], name: string) => void;
 }) {
-  const options = harnesses.filter((harness) => harness.available);
+  // 编辑时把现有 harness 也保留在选项里（即便当前不可用），否则下拉显示会错位到第一项。
+  const options = harnesses.filter(
+    (harness) => harness.available || initialMembers?.some((member) => member.harnessId === harness.id),
+  );
   const ids = options.map((harness) => harness.id);
   const pick = (...wanted: string[]) => wanted.find((id) => ids.includes(id)) ?? ids[0] ?? 'echo';
   const [name, setName] = useState(initialName);
@@ -553,6 +556,7 @@ function RoomBuilderDialog({
                   {options.map((harness) => (
                     <option key={harness.id} value={harness.id}>
                       {harness.name}
+                      {harness.available ? '' : ' · 不可用'}
                     </option>
                   ))}
                 </select>
@@ -706,6 +710,8 @@ export const AiCollabView = memo(function AiCollabView({
         name: agent.name,
         harnessId: agent.harnessId,
         model: agent.model ?? '',
+        // 人设必须回填：不带回去保存时会被默认人设覆盖。
+        persona: agent.persona ?? '',
         lead: agent.id === room.leadId,
       }))}
       title="编辑房间"
