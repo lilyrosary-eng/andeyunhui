@@ -181,6 +181,19 @@ pub fn create_assignment_core(
     let existing = store::read_assignments(base)
         .remove(&room.id)
         .unwrap_or_default();
+    // 预算保护：只拦新任务，不打断已在跑的；外部 harness 不回报用量的部分无法计入。
+    if let Some(budget) = room.token_budget.filter(|value| *value > 0) {
+        let used: u64 = existing
+            .iter()
+            .filter_map(|task| task.usage.as_ref())
+            .map(|usage| usage.total_tokens)
+            .sum();
+        if used >= budget {
+            return Err(format!(
+                "房间 token 预算已用尽（已用 {used} / 上限 {budget}），请调整预算后再派单"
+            ));
+        }
+    }
     let active = existing
         .iter()
         .filter(|task| {
@@ -1767,6 +1780,7 @@ mod tests {
             ],
             workspace: None,
             source: None,
+            token_budget: None,
             created_at: 0,
             updated_at: 0,
         }
@@ -2065,6 +2079,39 @@ mod tests {
         let done = complete_assignment_core(&base, &room, &running, "完成", None).unwrap();
         assert_eq!(done.status, AssignmentStatus::Completed);
         assert!(done.duration_ms.is_some());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 预算：已用用量达到上限后拒绝新任务；未设上限则不受影响。
+    #[test]
+    fn token_budget_blocks_new_assignments() {
+        let base = temp_base("budget");
+        let mut room = test_room("room_budget");
+        room.token_budget = Some(100);
+        let first = create_assignment_core(&base, &room, None, "worker", "第一单")
+            .unwrap()
+            .assignment;
+        set_assignment_usage(
+            &base,
+            &room.id,
+            &first.id,
+            TaskUsage {
+                prompt_tokens: 60,
+                completion_tokens: 40,
+                total_tokens: 100,
+            },
+        )
+        .unwrap();
+
+        let error = create_assignment_core(&base, &room, None, "worker", "第二单")
+            .err()
+            .expect("预算用尽时应拒绝新任务");
+        assert!(error.contains("预算"), "{error}");
+
+        // 清掉上限后恢复可派单。
+        room.token_budget = None;
+        assert!(create_assignment_core(&base, &room, None, "worker", "第三单").is_ok());
 
         let _ = std::fs::remove_dir_all(base);
     }

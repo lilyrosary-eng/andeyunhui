@@ -168,6 +168,7 @@ pub fn collab_room_create(
     name: String,
     agents: Option<Vec<AgentSpec>>,
     lead_id: Option<String>,
+    token_budget: Option<u64>,
 ) -> Result<Room, String> {
     let base = store::base_dir(&app)?;
     let name = if name.trim().is_empty() {
@@ -200,6 +201,8 @@ pub fn collab_room_create(
         agents,
         workspace: None,
         source: None,
+        // 0 与 None 同义：不限。
+        token_budget: token_budget.filter(|value| *value > 0),
         created_at: now,
         updated_at: now,
     };
@@ -231,6 +234,7 @@ pub(crate) fn update_room_agents_core(
     name: Option<String>,
     agents: Vec<AgentSpec>,
     lead_id: Option<String>,
+    token_budget: Option<u64>,
 ) -> Result<Room, String> {
     let mut rooms = store::read_rooms(base);
     let index = rooms
@@ -298,6 +302,10 @@ pub(crate) fn update_room_agents_core(
         .unwrap_or(room.name);
     room.agents = merged;
     room.lead_id = lead_id;
+    // None = 不改；Some(0) = 清除上限。
+    if let Some(budget) = token_budget {
+        room.token_budget = if budget == 0 { None } else { Some(budget) };
+    }
     room.updated_at = runtime::now_ms();
     rooms[index] = room.clone();
     store::write_rooms(base, &rooms)?;
@@ -311,9 +319,10 @@ pub fn collab_room_update(
     name: Option<String>,
     agents: Vec<AgentSpec>,
     lead_id: Option<String>,
+    token_budget: Option<u64>,
 ) -> Result<Room, String> {
     let base = store::base_dir(&app)?;
-    let room = update_room_agents_core(&base, &room_id, name, agents, lead_id)?;
+    let room = update_room_agents_core(&base, &room_id, name, agents, lead_id, token_budget)?;
     runtime::emit_event(
         &app,
         &base,
@@ -470,6 +479,7 @@ pub fn collab_import_dsh_session(
             kind: "dsh-import".to_string(),
             session_id: Some(summary.id.clone()),
         }),
+        token_budget: None,
         created_at: now,
         updated_at: now,
     };
@@ -744,6 +754,7 @@ mod tests {
             agents,
             workspace: None,
             source: None,
+            token_budget: None,
             created_at: 1,
             updated_at: 1,
         }
@@ -768,6 +779,7 @@ mod tests {
                 agent("worker", harness::NATIVE, "", None),
             ],
             Some("worker".to_string()),
+            None,
         )
         .unwrap();
         assert_eq!(unchanged.lead_id, "worker");
@@ -791,10 +803,12 @@ mod tests {
                 agent("worker", harness::DSH, "", None),
             ],
             None,
+            Some(50_000),
         )
         .unwrap();
         assert_eq!(changed.name, "改名");
         assert_eq!(changed.agents[0].native_session_id, None);
+        assert_eq!(changed.token_budget, Some(50_000));
 
         let _ = std::fs::remove_dir_all(base);
     }
@@ -827,6 +841,7 @@ mod tests {
                 agent("lead", harness::ECHO, "", None),
                 agent("extra", harness::ECHO, "", None),
             ],
+            None,
             None,
         )
         .unwrap_err();

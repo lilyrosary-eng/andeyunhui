@@ -57,6 +57,8 @@ export interface CollabRoom {
   workspace?: string | null;
   /** 导入来源；native 新建房间为 null */
   source?: CollabRoomSource | null;
+  /** token 预算上限；null/缺省 = 不限。超额只拒绝新任务，不打断在跑的 */
+  tokenBudget?: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -209,9 +211,9 @@ export interface UseAiCollabResult {
   /** 绑定 / 解绑当前房间的工作目录（绑定后事件流镜像到项目 .adyh/collab） */
   setWorkspace: (workspace: string | null) => Promise<void>;
   /** 新建房间：成员各自指定 harness 与模型（native / dsh / mcp / 信箱可同室） */
-  createRoomWithAgents: (members: CollabMemberInput[], name?: string) => Promise<void>;
-  /** 编辑已有房间：改名称 / 成员 / 主导，保留事件与任务历史 */
-  updateRoom: (roomId: string, members: CollabMemberInput[], name?: string) => Promise<void>;
+  createRoomWithAgents: (members: CollabMemberInput[], name?: string, tokenBudget?: number | null) => Promise<void>;
+  /** 编辑已有房间：改名称 / 成员 / 主导 / 预算，保留事件与任务历史 */
+  updateRoom: (roomId: string, members: CollabMemberInput[], name?: string, tokenBudget?: number | null) => Promise<void>;
   deleteRoom: (roomId: string) => Promise<void>;
   selectRoom: (roomId: string) => Promise<void>;
   /** assigneeId 省略时发给主导成员 */
@@ -482,7 +484,11 @@ export function useAiCollab(): UseAiCollabResult {
   }, []);
 
   // 混编房间：每个成员自带 harness 与模型。成员构造只有一处，新建与编辑共用。
-  const createRoomWithAgents = useCallback(async (members: CollabMemberInput[], name?: string) => {
+  const createRoomWithAgents = useCallback(async (
+    members: CollabMemberInput[],
+    name?: string,
+    tokenBudget?: number | null,
+  ) => {
     setError(null);
     const agents = toAgents(members);
     if (agents.length < 2) {
@@ -498,6 +504,7 @@ export function useAiCollab(): UseAiCollabResult {
         name: name?.trim() || '协作房间',
         agents,
         leadId: leadIdOf(members, agents),
+        tokenBudget: tokenBudget && tokenBudget > 0 ? tokenBudget : null,
       });
       await refreshRooms();
       await selectRoom(room.id);
@@ -506,7 +513,12 @@ export function useAiCollab(): UseAiCollabResult {
     }
   }, [refreshRooms, selectRoom]);
 
-  const updateRoom = useCallback(async (roomId: string, members: CollabMemberInput[], name?: string) => {
+  const updateRoom = useCallback(async (
+    roomId: string,
+    members: CollabMemberInput[],
+    name?: string,
+    tokenBudget?: number | null,
+  ) => {
     setError(null);
     const agents = toAgents(members);
     if (agents.length < 2) {
@@ -520,6 +532,7 @@ export function useAiCollab(): UseAiCollabResult {
         name: name?.trim() || null,
         agents,
         leadId: leadIdOf(members, agents),
+        tokenBudget: tokenBudget && tokenBudget > 0 ? tokenBudget : null,
       });
       setRooms((prev) => prev.map((item) => (item.id === room.id ? room : item)));
       if (activeIdRef.current === room.id) setActiveRoom(room);

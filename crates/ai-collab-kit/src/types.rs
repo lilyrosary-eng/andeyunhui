@@ -61,6 +61,10 @@ pub struct Room {
     /// 导入/原生来源；None 表示本模块原生新建。
     #[serde(default)]
     pub source: Option<RoomSource>,
+    /// 房间 token 预算上限；None = 不限。
+    /// v1 只做「超额拒绝新任务」，不打断已在执行的任务。
+    #[serde(default)]
+    pub token_budget: Option<u64>,
     pub created_at: i64,
     pub updated_at: i64,
 }

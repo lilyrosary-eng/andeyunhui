@@ -535,8 +535,8 @@ const Root = memo(function Root() {
         assignments={collab.assignments}
         busy={collab.busy}
         error={collab.error}
-        onCreateRoom={(members, name) => void collab.createRoomWithAgents(members, name)}
-        onUpdateRoom={(roomId, members, name) => void collab.updateRoom(roomId, members, name)}
+        onCreateRoom={(members, name, tokenBudget) => void collab.createRoomWithAgents(members, name, tokenBudget)}
+        onUpdateRoom={(roomId, members, name, tokenBudget) => void collab.updateRoom(roomId, members, name, tokenBudget)}
         builderOpen={roomBuilderOpen}
         onOpenBuilder={() => setRoomBuilderOpen(true)}
         onCloseBuilder={() => setRoomBuilderOpen(false)}

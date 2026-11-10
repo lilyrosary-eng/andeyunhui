@@ -675,6 +675,7 @@ mod tests {
             agents: vec![],
             workspace: None,
             source: None,
+            token_budget: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -717,6 +718,7 @@ mod tests {
             agents: vec![],
             workspace: Some(workspace.to_string_lossy().to_string()),
             source: None,
+            token_budget: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -768,6 +770,7 @@ mod tests {
             agents: vec![],
             workspace: Some(workspace.to_string_lossy().to_string()),
             source: None,
+            token_budget: None,
             created_at: 0,
             updated_at: 0,
         };
