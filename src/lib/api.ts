@@ -118,6 +118,22 @@ export interface ChangesetSummary {
   deletions: number;
 }
 
+// 高危文件草稿（services/draft_service.rs）
+// AI 改插件清单 / 插件入口 / 宿主核心文件时先落草稿，用户确认后才写回磁盘。
+export interface DraftMeta {
+  id: string;
+  /** 目标绝对路径 */
+  path: string;
+  /** 所属插件；宿主核心文件为 null */
+  pluginId: string | null;
+  kind: 'manifest' | 'entry' | 'host-core';
+  source: 'ai' | 'user';
+  sessionId: string;
+  createdAt: number;
+  size: number;
+  targetExists: boolean;
+}
+
 // 中转站文件信息
 export interface TransferStationFile {
   fileId: string;
@@ -264,6 +280,14 @@ export const api = {
     invoke<string>('changeset_pack_plugin', { pluginId }),
   changesetRevealFile: (path: string) =>
     invoke<void>('changeset_reveal_file', { path }),
+
+  // ===== 高危文件草稿区（AI 写入先暂存，用户确认才生效） =====
+  draftList: (pluginId?: string | null) =>
+    invoke<DraftMeta[]>('draft_list', { pluginId: pluginId ?? null }),
+  draftRead: (id: string) => invoke<string>('draft_read', { id }),
+  draftDiff: (id: string) => invoke<string>('draft_diff', { id }),
+  draftApply: (id: string) => invoke<DraftMeta>('draft_apply', { id }),
+  draftDiscard: (id: string) => invoke<void>('draft_discard', { id }),
 
   // 彻底删除插件（连同文件 + .mufurong 包 + 可见性记录）
   deletePlugin: (pluginId: string) =>

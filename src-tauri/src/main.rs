@@ -1916,6 +1916,12 @@ fn main() {
             changeset_export_patch,
             changeset_pack_plugin,
             changeset_reveal_file,
+            // 高危文件草稿区（services/draft_service.rs）
+            draft_list,
+            draft_read,
+            draft_diff,
+            draft_apply,
+            draft_discard,
             reload_plugin,
             unload_plugin,
             delete_plugin,

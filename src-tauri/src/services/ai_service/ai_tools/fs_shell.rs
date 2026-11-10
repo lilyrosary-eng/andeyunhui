@@ -391,9 +391,16 @@ impl AiTool for FileTool {
                 let offset: usize = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let limit: usize = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(60_000) as usize;
                 let overlay_req = ctx.request_id.clone();
+                // 高危文件的草稿优先：AI 刚暂存的内容必须能读回来，否则连续编辑会基于旧内容。
+                let draft_text = crate::services::draft_service::read_overlay(&ctx.app, &p);
+                let draft_used = draft_text.is_some();
                 let (content, view) = spawn_blocking(move || -> Result<(String, serde_json::Value), String> {
-                    let data = std::fs::read(&p).map_err(|e| format!("读取失败 {}: {}", p.display(), e))?;
-                    let full = String::from_utf8_lossy(&data).to_string();
+                    let full = if let Some(d) = draft_text {
+                        d
+                    } else {
+                        let data = std::fs::read(&p).map_err(|e| format!("读取失败 {}: {}", p.display(), e))?;
+                        String::from_utf8_lossy(&data).to_string()
+                    };
                     // 叠加该请求先前的未确认改动，生成「改后视图」（未删除时）
                     let (overlaid, deleted) = apply_pending_overlay(&overlay_req, &p, full).map_err(|e| format!("叠加视图失败: {}", e))?;
                     if deleted {
@@ -412,6 +419,11 @@ impl AiTool for FileTool {
                         format!("（文件较大，显示前 {} 字符,共 {} 字符；可用 offset 继续读取）\n", limit, total)
                     } else {
                         String::new()
+                    };
+                    let head = if draft_used {
+                        format!("（这是草稿，尚未写入磁盘）\n{head}")
+                    } else {
+                        head
                     };
                     // 行号化视图（对齐 dsh ReadResultView）：行号保留文件真实行号，lang 由扩展名推导
                     let full_lines: Vec<&str> = overlaid.split('\n').collect();
@@ -464,6 +476,18 @@ impl AiTool for FileTool {
                     request_approval(ctx, "file", &format!("写入外部路径: {}", p.display())).await?;
                 }
                 let edit_id = format!("e_{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis()).unwrap_or(0), rand_short());
+                // 高危文件（插件 manifest / 插件入口 / 宿主核心）：不落盘，转草稿区等用户确认。
+                // 用户手动保存走 write_text_file，不受这里影响。
+                if let Some(kind) = crate::services::draft_service::classify(&p) {
+                    crate::services::draft_service::stage(
+                        &ctx.app, &p, &content, "ai", &ctx.request_id, kind,
+                    )?;
+                    return Ok(ToolExecResult::plain(format!(
+                        "已暂存为草稿（{}），未写入磁盘。需用户在「扩展管理 → 待审阅草稿」确认后才会生效：{}",
+                        kind.label(),
+                        p.display()
+                    )));
+                }
                 record_edit(&ctx.request_id, PendingEdit {
                     id: edit_id,
                     action: "write".to_string(),
@@ -503,6 +527,24 @@ impl AiTool for FileTool {
                     ensure_project_trusted(ctx).await?;
                 } else {
                     request_approval(ctx, "file", &format!("编辑外部路径: {}", p.display())).await?;
+                }
+                // 高危文件：编辑基于草稿（没有草稿才读磁盘），结果仍留在草稿区。
+                // 这样连续 edit 同一文件不会因为"上一次没落盘"而定位失败。
+                if let Some(kind) = crate::services::draft_service::classify(&p) {
+                    let base = crate::services::draft_service::read_overlay(&ctx.app, &p)
+                        .or_else(|| std::fs::read_to_string(&p).ok())
+                        .unwrap_or_default();
+                    let next = apply_edit_text(&base, &old_string, &new_string).ok_or_else(|| {
+                        format!("old_string 在草稿/当前文件中不存在，无法定位：{old_string}")
+                    })?;
+                    crate::services::draft_service::stage(
+                        &ctx.app, &p, &next, "ai", &ctx.request_id, kind,
+                    )?;
+                    return Ok(ToolExecResult::plain(format!(
+                        "已暂存为草稿（{}），未写入磁盘。需用户在「扩展管理 → 待审阅草稿」确认后才会生效：{}",
+                        kind.label(),
+                        p.display()
+                    )));
                 }
                 // 暂存前先本地校验 old_string 在「当前叠加视图」中可定位（避免审阅时才发现替换失败）
                 let overlay_req = ctx.request_id.clone();
@@ -552,6 +594,15 @@ impl AiTool for FileTool {
                 )))
             }
             "delete" => {
+                // 高危文件不允许 AI 直接删：manifest 一删插件就消失，入口一删插件就加载失败。
+                // 真要移除插件请用户走扩展管理的删除（那里有二次确认与可见性清理）。
+                if let Some(kind) = crate::services::draft_service::classify(&p) {
+                    return Err(format!(
+                        "拒绝删除高危文件（{}）：{}。请在扩展管理中手动处理。",
+                        kind.label(),
+                        p.display()
+                    ));
+                }
                 let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
                 if sandbox_service::is_protected_path(&p) {
                     return Err(format!("拒绝删除受保护路径（密钥/凭据/VCS/依赖目录）: {}", p.display()));

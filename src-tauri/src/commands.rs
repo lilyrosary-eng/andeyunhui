@@ -33,6 +33,9 @@ pub use boot_guard::*;
 // 安装基线变更集：下载版本 vs 当前的只读对照（services/changeset_service.rs）
 mod changeset;
 pub use changeset::*;
+// 高危文件草稿区：AI 改高危文件先暂存，用户确认才生效（services/draft_service.rs）
+mod draft;
+pub use draft::*;
 mod notes;
 pub use notes::*;
 pub(crate) mod plugins;

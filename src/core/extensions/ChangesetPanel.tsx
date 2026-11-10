@@ -287,7 +287,7 @@ function FileRow({ file, active, onClick }: { file: ChangesetFile; active: boole
   );
 }
 
-function DiffView({ text }: { text: string }) {
+export function DiffView({ text }: { text: string }) {
   if (!text.trim()) {
     return <div className="px-4 py-10 text-center text-xs text-neutral-400 dark:text-stone-500">没有可显示的文本差异</div>;
   }

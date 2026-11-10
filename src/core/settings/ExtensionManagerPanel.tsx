@@ -1,5 +1,5 @@
 import { useState, useMemo, useSyncExternalStore, useCallback, useEffect } from 'react';
-import { FolderOpen, AlertTriangle, RefreshCw, Package, Trash2, Download, Loader2, FileDiff } from 'lucide-react';
+import { FolderOpen, AlertTriangle, RefreshCw, Package, Trash2, Download, Loader2, FileDiff, ShieldAlert } from 'lucide-react';
 import { Switch } from "@/components/ui/switch"
 import { pluginDiagnostics, type DiagnosticEntry } from '@/core/pluginDiagnostics';
 import { PluginIcon } from '@/components/PluginIcon';
@@ -19,6 +19,7 @@ import {
 } from '@/core/pluginAccess';
 import { useI18n } from '@/lib/i18n';
 import { ChangesetPanel } from '@/core/extensions/ChangesetPanel';
+import { DraftPanel } from '@/core/extensions/DraftPanel';
 
 export function ExtensionManagerPanel() {
   const { t } = useI18n();
@@ -52,6 +53,9 @@ export function ExtensionManagerPanel() {
   const [bootGuard, setBootGuard] = useState<BootGuardState | null>(null);
   // 安装基线变更集：当前正在对照的插件（null = 面板关闭）
   const [changesetTarget, setChangesetTarget] = useState<PluginManifest | null>(null);
+  // 高危文件草稿：待审阅数量 + 面板开关
+  const [draftCount, setDraftCount] = useState(0);
+  const [draftOpen, setDraftOpen] = useState(false);
   // 能力授权视图：declared / granted / missing / trustedDev
   const [accessMap, setAccessMap] = useState<Record<string, AccessState>>({});
   const [consentTarget, setConsentTarget] = useState<PluginManifest | null>(null);
@@ -68,6 +72,10 @@ export function ExtensionManagerPanel() {
   // 启动守卫状态：老后端没有这条命令时静默降级（读不到就不显示提示，不影响面板）
   useEffect(() => {
     void api.getBootGuardState().then(setBootGuard).catch(() => {});
+  }, [tick]);
+  // 待审阅草稿数：有高危文件被 AI 改动时在标题行提醒
+  useEffect(() => {
+    void api.draftList().then((l) => setDraftCount(l.length)).catch(() => {});
   }, [tick]);
 
   const refreshAccess = useCallback(async (list: PluginManifest[]) => {
@@ -283,6 +291,15 @@ export function ExtensionManagerPanel() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight text-neutral-800 dark:text-stone-100">{t('ext.title')}</h1>
         <div className="flex items-center gap-2">
+          {draftCount > 0 && (
+            <button
+              onClick={() => setDraftOpen(true)}
+              className="btn-press inline-flex items-center gap-1.5 rounded-xl border border-amber-200/70 bg-amber-50/70 px-3 py-1.5 text-sm text-amber-700 transition-colors hover:bg-amber-100/70 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300 dark:hover:bg-amber-900/30"
+              title="AI 改动了高危文件，确认后才会写入磁盘"
+            >
+              <ShieldAlert size={14} />待审阅 {draftCount}
+            </button>
+          )}
           {refreshMsg && (
             <span className="text-xs text-neutral-400 dark:text-stone-500">{refreshMsg}</span>
           )}
@@ -600,6 +617,14 @@ export function ExtensionManagerPanel() {
             // 恢复后列表里的运行状态/能力视图可能变化，刷新一次
             setTick((v) => v + 1);
           }}
+        />
+      )}
+
+      {/* 高危文件草稿区：AI 改 manifest / 入口 / 宿主核心文件时先暂存在这里 */}
+      {draftOpen && (
+        <DraftPanel
+          onClose={() => setDraftOpen(false)}
+          onApplied={() => setTick((v) => v + 1)}
         />
       )}
     </div>

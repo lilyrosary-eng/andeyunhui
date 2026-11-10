@@ -80,6 +80,8 @@ pub mod crash_guard;
 pub mod boot_guard;
 // 安装基线变更集：用户可见的「下载版本 vs 当前」只读对照（与 AI 编程的会话审阅互相独立）
 pub mod changeset_service;
+// 高危文件草稿区：AI 改 manifest / 插件入口 / 宿主核心文件先暂存，用户确认才生效
+pub mod draft_service;
 pub mod usage_service;
 // 通用 Hook 引擎（进程内回调注册/触发）：chat.done / agent.step 等生命周期钩点。
 pub mod hook_service;
