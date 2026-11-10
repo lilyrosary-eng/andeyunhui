@@ -176,7 +176,7 @@ export function InlineSelect({
       {/* 触发区必须是「容器 + 两个并列 button」：HTML 不允许 button 嵌套 button，
           所以 × 不能塞进开合按钮里面。 */}
       <span
-        className={`inline-flex items-center rounded-md text-[11px] border transition-colors ${
+        className={`inline-flex items-center rounded-md text-[11px] border transition-colors max-w-[240px] ${
           current
             ? 'border-neutral-300 dark:border-stone-600 text-neutral-700 dark:text-stone-200 bg-white dark:bg-stone-900'
             : 'border-dashed border-neutral-300 dark:border-stone-600 text-neutral-400 dark:text-stone-500'
@@ -187,7 +187,10 @@ export function InlineSelect({
           type="button"
           onClick={() => (open ? close() : openPanel())}
           title={title}
-          className={`inline-flex items-center gap-1 max-w-[240px] pl-2 ${
+          /* 宽度上限放在外层 span（默认 240px，调用方可用 max-w-none 解除）。
+             以前上限写在这个 button 上：外层 span 吃 w-full 时白底是全宽、
+             可点区域却只有左边 240px，浮层宽度也按按钮算 —— 整行表单里右大半截点不动。 */
+          className={`inline-flex items-center gap-1 min-w-0 flex-1 max-w-full pl-2 ${
             onClear && value ? 'pr-1' : 'pr-2'
           } py-0.5 ${
             current ? '' : 'hover:text-neutral-600 dark:hover:text-stone-300'

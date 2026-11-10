@@ -137,6 +137,10 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
   const toggleImmersive = useAppStore((s) => s.toggleImmersive);
   const immersive = useAppStore((s) => s.immersive);
   const pluginRegistry = useAppStore((s) => s.pluginRegistry);
+  // 子插件（茑萝/薄荷的子项）是**父模块被打开时才注册**的；registry 是同一个对象引用，
+  // 只订阅 pluginRegistry 不会触发重算。visibilityTick 在 plugin-registered/unregistered
+  // 时 bump，订阅它才能让"后来注册的子模块"进入搜索（2026-11-10 用户报：子项搜不到）。
+  const visibilityTick = useAppStore((s) => s.visibilityTick);
 
   const notes = useNotesStore((s) => s.notes);
   const loadNoteContent = useNotesStore((s) => s.loadNoteContent);
@@ -229,6 +233,8 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
 
   // 静态 provider：模块 / 动作 / 笔记
   const staticItems = useMemo<CommandItem[]>(() => {
+    // 仅作刷新触发：子插件注册发生在父模块打开之后，靠这个 tick 让 memo 重算
+    void visibilityTick;
     const items: CommandItem[] = [];
     const seen = new Set<string>();
     const groupLabel = (key: string) => staticGroups.find((g) => g.key === key)?.label ?? key;
@@ -331,7 +337,7 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
     items.push(...noteItems);
 
     return items;
-  }, [pluginRegistry, notes, immersive, setActiveModule, toggleImmersive, createNote, loadNoteContent, onScreenshot, staticGroups]);
+  }, [pluginRegistry, visibilityTick, notes, immersive, setActiveModule, toggleImmersive, createNote, loadNoteContent, onScreenshot, staticGroups]);
 
   const scoped = useMemo(
     () => parseScope(query.trim(), providers, staticGroups),
