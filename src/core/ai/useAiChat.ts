@@ -88,6 +88,13 @@ export interface UseAiChatOptions {
   /** 注入的 system 指令（可选，留空则用后端默认）。位于 personaPrompt 之后、检索记忆之前。 */
   systemPrompt?: string;
   /**
+   * 跨会话并发域：留空 = 不排队（对话，保持首字延迟）；
+   * 传模块名（如 `ai-work`）时按该域的上限排队，多个会话共用一个槽池。
+   */
+  queueScope?: string;
+  /** 该并发域的同时执行上限；0 / 不传 = 不限。 */
+  queueLimit?: number;
+  /**
    * 伴侣模式：为 true 时请求后端跳过「全局 AI 人设」（AiProfile.persona），
    * 只使用本调用注入的伴侣人设 —— 满足「ai 对话启动伴侣模式后只走伴侣人设、不受全局 AI 人设控制」。
    */
@@ -165,6 +172,8 @@ export interface UseAiChatResult {
   send: (text: string, images?: string[], attachments?: SendAttachment[], sendOpts?: SendOptions) => Promise<void>;
   /** 当前会话里排队等待发送的消息（生成中发出的消息自动进这里）。 */
   queued: QueuedTurn[];
+  /** 本轮正在等后端的跨会话并发槽（排队中，尚未开始调用模型）。 */
+  queuedBySlot: boolean;
   /** 编辑排队消息的文本。 */
   editQueued: (id: string, text: string) => void;
   /** 删除排队消息。 */
@@ -218,7 +227,7 @@ export interface QueuedTurn {
  */
 export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   // 注意：options.agent 已废弃（工具常开），故意不解构，避免"看起来还能关"。
-  const { persistKey = DEFAULT_PERSIST_KEY, personaPrompt, systemPrompt, allowEmpty = false, excludeGlobalPersona = false } = options;
+  const { persistKey = DEFAULT_PERSIST_KEY, personaPrompt, systemPrompt, allowEmpty = false, excludeGlobalPersona = false, queueScope, queueLimit } = options;
   const syncEvent = syncEventFor(persistKey);
   const syncReqEvent = syncReqEventFor(persistKey);
   // 工具常开：不再允许从 UI 关闭（用户 2026-10-19 决定）。
@@ -280,6 +289,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   // 生成中再发消息不丢：排队等本轮结束自动发；支持编辑 / 删除 / 插队。
   const queuedRef = useRef<Record<string, QueuedTurn[]>>({});
   const [queued, setQueued] = useState<QueuedTurn[]>([]);
+  // 后端跨会话并发槽满了 → 本轮还在排队（尚未真正开始调用模型）。
+  const [queuedBySlot, setQueuedBySlot] = useState(false);
   // runSend 在下方才定义；用 ref 让队列回调保持稳定引用（useAiStream 的 effect 依赖它们，
   // 内联函数会让监听器每轮重建，正是当初「delta 重复」的根因）。
   const runSendRef = useRef<
@@ -306,6 +317,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   // 事件不会匹配到这里，队列自然暂停，等用户下次手动发送。
   const handleRunFinish = useCallback((_requestId: string) => {
     currentToolRef.current = null;
+    setQueuedBySlot(false);
     const convId = streamConvIdRef.current;
     if (convId) drainQueue(convId);
   }, [drainQueue]);
@@ -347,6 +359,15 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   useEffect(() => {
     setQueued([...(queuedRef.current[activeId ?? ''] ?? [])]);
   }, [activeId]);
+
+  // 后端并发槽满时会推 ai-queued：本轮要显示「排队中」而不是「正在思考」。
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    void listen<{ requestId: string }>('ai-queued', (e) => {
+      if (e.payload.requestId === reqRef.current) setQueuedBySlot(true);
+    }).then((u) => { unlisten = u; });
+    return () => { unlisten?.(); };
+  }, []);
 
   /**
    * 停止本轮生成（用户点「停止」）。
@@ -636,6 +657,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     asstRef.current = asstId;
     busyRef.current = true;
     setBusy(true);
+    setQueuedBySlot(false);
     void isFirst;
 
     // historyOverride 优先（重新生成时用），其余场景照旧读最新会话状态
@@ -781,6 +803,10 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
           planGateTimeoutSecs: planGateTimeoutSecs(),
           // 计划作用域：按会话分槽，多对话并行时计划不会互相覆盖
           planScope: cid,
+          // 跨会话并发域：工作模块传；对话不传 → 后端立即执行，不排队。
+          ...(queueScope
+            ? { queueScope, queueLimit: queueLimit && queueLimit > 0 ? queueLimit : null }
+            : {}),
         });
       } else {
         await invoke('ai_chat', payload);
@@ -1273,6 +1299,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     clearAll,
     send,
     queued,
+    queuedBySlot,
     editQueued,
     deleteQueued,
     jumpQueued,

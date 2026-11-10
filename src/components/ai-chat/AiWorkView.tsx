@@ -29,6 +29,7 @@ export interface AiWorkViewProps {
   send: (text: string, images?: string[], attachments?: SendAttachment[]) => void;
   /** 当前会话排队中的消息（生成中发出的消息自动进队列） */
   queued?: QueuedTurn[];
+  queuedBySlot?: boolean;
   onEditQueued?: (id: string, text: string) => void;
   onDeleteQueued?: (id: string) => void;
   onJumpQueued?: (id: string) => void;
@@ -60,6 +61,7 @@ export const AiWorkView = memo(function AiWorkView({
   busy,
   send,
   queued,
+  queuedBySlot,
   onEditQueued,
   onDeleteQueued,
   onJumpQueued,
@@ -124,6 +126,7 @@ export const AiWorkView = memo(function AiWorkView({
           profileId={profileId || ''}
           send={send}
           queued={queued}
+          queuedBySlot={queuedBySlot}
           onEditQueued={onEditQueued}
           onDeleteQueued={onDeleteQueued}
           onJumpQueued={onJumpQueued}

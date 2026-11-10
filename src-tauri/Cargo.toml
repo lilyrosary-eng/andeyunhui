@@ -80,6 +80,8 @@ gongfang-kit = { path = "../crates/gongfang-kit", default-features = false }
 # AI 协作组态后端（P0）：harness 适配层 + 任务 runtime + 事件流。
 # 独立 crate 便于整体拆卸；去掉本行依赖 + main.rs 命令注册即可移除该能力。
 ai-collab-kit = { path = "../crates/ai-collab-kit" }
+# 执行层：跨会话并发槽 / 优先级 / 超时（协作房间与 AI 工作共用）。
+ai-task-kit = { path = "../crates/ai-task-kit" }
 # 多引擎下载内核：原生分块 / aria2c / ffmpeg 可替换引擎 + SQLite 任务与分片持久化。
 # 纯后端层（无 UI）；同样去掉本行依赖 + main.rs 的 dl_* 命令注册即可整体拆卸。
 download-kit = { path = "../crates/download-kit" }

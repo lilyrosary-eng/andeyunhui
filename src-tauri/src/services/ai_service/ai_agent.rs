@@ -878,23 +878,105 @@ pub async fn ai_agent_replay(
 // 协作式取消（协作点检查 flag）+ 强制中断（abort 在途 await）双保险。
 
 /// worker 运行状态（AtomicU8）取值。
+const ST_QUEUED: u8 = 0;
 const ST_RUNNING: u8 = 1;
 const ST_DONE: u8 = 2;
 const ST_CANCELLED: u8 = 3;
 
 /// 一张 worker 的登记信息。
 struct WorkerEntry {
-    /// 中断在途 await（reqwest / 工具 execute）用。
-    abort: tokio::task::AbortHandle,
+    /// 中断在途 await（reqwest / 工具 execute）用；排队中还没有任务可中断。
+    abort: Option<tokio::task::AbortHandle>,
     /// 协作式取消标记；用户取消时置 true，run_agent 在检查点主动退出。
     cancel: Arc<AtomicBool>,
-    /// 生命周期：RUNNING →（自然结束）DONE /（取消）CANCELLED。
+    /// 生命周期：QUEUED → RUNNING →（自然结束）DONE /（取消）CANCELLED。
     state: Arc<AtomicU8>,
 }
 
 static AGENT_WORKERS: OnceLock<Mutex<HashMap<String, WorkerEntry>>> = OnceLock::new();
 fn workers() -> &'static Mutex<HashMap<String, WorkerEntry>> {
     AGENT_WORKERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 跨会话并发调度器：scope = 模块（如 `ai-work`），limit 由前端按模块传。
+/// 对话（不传 scope）不排队，保持毫秒级首字延迟。
+static AGENT_SCHEDULER: OnceLock<Arc<ai_task_kit::Scheduler>> = OnceLock::new();
+fn agent_scheduler() -> &'static Arc<ai_task_kit::Scheduler> {
+    AGENT_SCHEDULER.get_or_init(|| {
+        let spawn: ai_task_kit::Spawner = Arc::new(|future| {
+            tokio::spawn(future);
+        });
+        ai_task_kit::Scheduler::new(spawn)
+    })
+}
+
+/// 一次 agent 请求的全部参数（排队后仍能原样启动）。
+struct AgentWork {
+    app: AppHandle,
+    request_id: String,
+    messages: Vec<ChatMessage>,
+    profile_id: Option<String>,
+    system: Option<String>,
+    max_rounds: Option<u32>,
+    project_root: Option<String>,
+    media: crate::services::ai_service::ai_tools::MediaPayload,
+    images: Vec<String>,
+    effort: Option<String>,
+    web_search: bool,
+    plan_gate: bool,
+    plan_gate_timeout_secs: u64,
+    plan_scope: String,
+}
+
+/// 真正跑一轮 agent，并在结束时收口 worker 状态。
+fn spawn_agent_worker(
+    work: AgentWork,
+    cancel: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let AgentWork {
+            app,
+            request_id,
+            messages,
+            profile_id,
+            system,
+            max_rounds,
+            project_root,
+            media,
+            images,
+            effort,
+            web_search,
+            plan_gate,
+            plan_gate_timeout_secs,
+            plan_scope,
+        } = work;
+        state.store(ST_RUNNING, Ordering::SeqCst);
+        let _ = run_agent(
+            app,
+            request_id.clone(),
+            messages,
+            profile_id,
+            system,
+            max_rounds,
+            project_root,
+            media,
+            images,
+            cancel,
+            effort,
+            web_search,
+            plan_gate,
+            plan_gate_timeout_secs,
+            plan_scope,
+        )
+        .await;
+        // 自然结束（非取消）→ 登记 DONE 后从注册表移除；取消走 cancel_worker 的 abort 路径。
+        let mut m = workers().lock().unwrap();
+        if let Some(w) = m.get(&request_id) {
+            let _ = w.state.compare_exchange(ST_RUNNING, ST_DONE, Ordering::SeqCst, Ordering::SeqCst);
+            m.remove(&request_id);
+        }
+    })
 }
 
 /// Agent 入口：把会话循环注册为后台 worker 后立即返回（事件驱动，对齐原契约）。
@@ -923,6 +1005,12 @@ pub async fn ai_chat_agent(
     plan_gate_timeout_secs: Option<u64>,
     // 计划作用域（前端会话 id）：plan 工具按它分槽，多会话并行不互相覆盖。留空 = 默认槽。
     plan_scope: Option<String>,
+    // 并发域：留空 = 不排队（对话）；传 `ai-work` 等模块名则按组合并发上限排队。
+    queue_scope: Option<String>,
+    // 该并发域的同时执行上限；0 / 留空 = 不限。
+    queue_limit: Option<u8>,
+    // 排队优先级：0 高 / 1 普通（缺省）/ 2 低。
+    priority: Option<u8>,
 ) -> Result<(), String> {
     // 同步预检：无 API Key 直接拒绝（对齐原契约），无需开后台任务。
     let config = load_config(&app);
@@ -932,43 +1020,95 @@ pub async fn ai_chat_agent(
     // 同 id 已有运行中任务 → 先取消（防重复续聊叠跑）。
     cancel_worker(&request_id);
 
-    let state = Arc::new(AtomicU8::new(ST_RUNNING));
+    let queue_scope = queue_scope
+        .map(|scope| scope.trim().to_string())
+        .filter(|scope| !scope.is_empty());
+    let state = Arc::new(AtomicU8::new(if queue_scope.is_some() {
+        ST_QUEUED
+    } else {
+        ST_RUNNING
+    }));
     let cancel = Arc::new(AtomicBool::new(false));
-    // 给后台闭包与 worker 注册表各备一份所有权，避免 async move 把外部变量整体移走。
-    let cancel_cl = cancel.clone();
-    let req_id = request_id.clone();
-    let app_worker = app.clone();
-    let task = tokio::spawn(async move {
-        let _ = run_agent(
-            app_worker,
-            req_id.clone(),
-            messages,
-            profile_id,
-            system,
-            max_rounds,
-            project_root,
-            media.unwrap_or_default(),
-            images.unwrap_or_default(),
-            cancel_cl,
-            effort,
-            web_search.unwrap_or(true),
-            plan_gate.unwrap_or(false),
-            clamp_plan_gate_timeout(plan_gate_timeout_secs),
-            plan_scope.unwrap_or_default(),
-        )
-        .await;
-        // 自然结束（非取消）→ 登记 DONE 后从注册表移除；取消走 cancel_worker 的 abort 路径。
-        let mut m = workers().lock().unwrap();
-        if let Some(w) = m.get(&req_id) {
-            let _ = w.state.compare_exchange(ST_RUNNING, ST_DONE, Ordering::SeqCst, Ordering::SeqCst);
-            m.remove(&req_id);
-        }
-    });
+    let work = AgentWork {
+        app: app.clone(),
+        request_id: request_id.clone(),
+        messages,
+        profile_id,
+        system,
+        max_rounds,
+        project_root,
+        media: media.unwrap_or_default(),
+        images: images.unwrap_or_default(),
+        effort,
+        web_search: web_search.unwrap_or(true),
+        plan_gate: plan_gate.unwrap_or(false),
+        plan_gate_timeout_secs: clamp_plan_gate_timeout(plan_gate_timeout_secs),
+        plan_scope: plan_scope.unwrap_or_default(),
+    };
 
+    let Some(scope) = queue_scope else {
+        // 不排队（对话）：与旧行为完全一致，立即起 worker。
+        let handle = spawn_agent_worker(work, cancel.clone(), state.clone());
+        workers().lock().unwrap().insert(
+            request_id.clone(),
+            WorkerEntry {
+                abort: Some(handle.abort_handle()),
+                cancel,
+                state,
+            },
+        );
+        return Ok(());
+    };
+
+    // 排队路径：先登记（排队中也能被取消 / 查状态），再由调度器出队。
     workers().lock().unwrap().insert(
         request_id.clone(),
-        WorkerEntry { abort: task.abort_handle(), cancel: cancel.clone(), state },
+        WorkerEntry {
+            abort: None,
+            cancel: cancel.clone(),
+            state: state.clone(),
+        },
     );
+    let limit = queue_limit.map(|value| value as usize).filter(|value| *value > 0);
+    // 同域新请求带来最新上限：立刻作用于排队中的任务。
+    agent_scheduler().update_limit(&scope, limit);
+    let spec = ai_task_kit::JobSpec {
+        id: request_id.clone(),
+        scope: scope.clone(),
+        priority: priority.unwrap_or(1).min(2),
+        limit,
+        timeout: None,
+    };
+    let cancel_job = cancel.clone();
+    let state_job = state.clone();
+    let request_job = request_id.clone();
+    let outcome = agent_scheduler().enqueue(
+        spec,
+        move || -> ai_task_kit::BoxFuture {
+            Box::pin(async move {
+                if cancel_job.load(Ordering::SeqCst) {
+                    return;
+                }
+                let handle = spawn_agent_worker(work, cancel_job.clone(), state_job);
+                // 启动后补上 abort handle，运行中取消才能强杀。
+                if let Some(entry) = workers().lock().unwrap().get_mut(&request_job) {
+                    entry.abort = Some(handle.abort_handle());
+                }
+                // 极端竞态：登记 abort 之前就被取消了 → 直接终止。
+                if cancel_job.load(Ordering::SeqCst) {
+                    handle.abort();
+                }
+                let _ = handle.await;
+            })
+        },
+        None,
+    );
+    if outcome == ai_task_kit::Enqueued::Queued {
+        let _ = app.emit(
+            "ai-queued",
+            serde_json::json!({ "requestId": request_id, "scope": scope, "limit": limit }),
+        );
+    }
     Ok(())
 }
 
@@ -976,9 +1116,15 @@ fn cancel_worker(request_id: &str) {
     let mut m = workers().lock().unwrap();
     if let Some(w) = m.remove(request_id) {
         w.cancel.store(true, Ordering::SeqCst);
+        // 排队中（QUEUED）也要能取消，不能只处理 RUNNING。
         let _ = w.state.compare_exchange(ST_RUNNING, ST_CANCELLED, Ordering::SeqCst, Ordering::SeqCst);
-        let _ = w.abort.abort();
+        let _ = w.state.compare_exchange(ST_QUEUED, ST_CANCELLED, Ordering::SeqCst, Ordering::SeqCst);
+        if let Some(abort) = w.abort {
+            let _ = abort.abort();
+        }
     }
+    // 排队中的任务还要从调度队列里摘掉（幂等，运行中的调用无副作用）。
+    agent_scheduler().cancel(request_id);
 }
 
 /// 取消运行中的 agent（按 request_id）。主动置取消标记 + 强制 abort 中断在途 await。
@@ -990,7 +1136,11 @@ pub async fn ai_agent_cancel(_app: AppHandle, request_id: String) -> Result<(), 
     };
     w.cancel.store(true, Ordering::SeqCst);
     let _ = w.state.compare_exchange(ST_RUNNING, ST_CANCELLED, Ordering::SeqCst, Ordering::SeqCst);
-    let _ = w.abort.abort();
+    let _ = w.state.compare_exchange(ST_QUEUED, ST_CANCELLED, Ordering::SeqCst, Ordering::SeqCst);
+    if let Some(abort) = w.abort {
+        let _ = abort.abort();
+    }
+    agent_scheduler().cancel(&request_id);
     Ok(())
 }
 
@@ -999,13 +1149,17 @@ pub async fn ai_agent_cancel(_app: AppHandle, request_id: String) -> Result<(), 
 pub async fn ai_agent_status(_app: AppHandle, request_id: String) -> Result<String, String> {
     let m = workers().lock().unwrap();
     match m.get(&request_id) {
-        Some(w) => Ok(serde_json::json!({
-            "running": w.state.load(Ordering::SeqCst) == ST_RUNNING,
-            "state": w.state.load(Ordering::SeqCst),
-            "cancelled": w.cancel.load(Ordering::SeqCst),
-        })
-        .to_string()),
-        None => Ok(serde_json::json!({ "running": false }).to_string()),
+        Some(w) => {
+            let state = w.state.load(Ordering::SeqCst);
+            Ok(serde_json::json!({
+                "running": state == ST_RUNNING,
+                "queued": state == ST_QUEUED,
+                "state": state,
+                "cancelled": w.cancel.load(Ordering::SeqCst),
+            })
+            .to_string())
+        }
+        None => Ok(serde_json::json!({ "running": false, "queued": false }).to_string()),
     }
 }
 
@@ -1181,7 +1335,7 @@ mod tests {
         // 模拟 ai_chat_agent 的注册。
         workers().lock().unwrap().insert(
             id.clone(),
-            WorkerEntry { abort, cancel: cancel.clone(), state: state.clone() },
+            WorkerEntry { abort: Some(abort), cancel: cancel.clone(), state: state.clone() },
         );
         assert!(workers().lock().unwrap().contains_key(&id));
 
@@ -1203,7 +1357,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         workers().lock().unwrap().insert(
             id.clone(),
-            WorkerEntry { abort, cancel: cancel.clone(), state: done_state.clone() },
+            WorkerEntry { abort: Some(abort), cancel: cancel.clone(), state: done_state.clone() },
         );
         cancel_worker(&id);
         assert!(!workers().lock().unwrap().contains_key(&id));
@@ -1222,7 +1376,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         workers().lock().unwrap().insert(
             id.clone(),
-            WorkerEntry { abort, cancel: cancel.clone(), state: state.clone() },
+            WorkerEntry { abort: Some(abort), cancel: cancel.clone(), state: state.clone() },
         );
         // running=true 时 status 附 state / cancelled。
         let m = workers().lock().unwrap();

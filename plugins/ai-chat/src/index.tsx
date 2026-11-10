@@ -169,7 +169,13 @@ const Root = memo(function Root() {
 
   // AIWork 统一任务实例：与主「AI 对话」彻底隔离，专属存储 key，侧栏任务区 / 对话工作台 / 蓝图画布共用。
   // allowEmpty = 与 AIWorkflow 一致：没任务不再自动保留保底会话，由 UI 提示「创建任务」。
-  const aiWorkChat = useAiChat({ persistKey: AI_AIWORK_CONVERSATIONS_KEY, allowEmpty: true });
+  const aiWorkChat = useAiChat({
+    persistKey: AI_AIWORK_CONVERSATIONS_KEY,
+    allowEmpty: true,
+    // 工作台多会话共用一个槽池：默认最多 3 个任务同时跑，其余排队。
+    queueScope: 'ai-work',
+    queueLimit: 3,
+  });
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [companionEnabled, setCompanionEnabled] = useState(readCompanionEnabled);
@@ -513,6 +519,7 @@ const Root = memo(function Root() {
         busy={aiWorkChat.busy}
         send={aiWorkChat.send}
         queued={aiWorkChat.queued}
+        queuedBySlot={aiWorkChat.queuedBySlot}
         onEditQueued={aiWorkChat.editQueued}
         onDeleteQueued={aiWorkChat.deleteQueued}
         onJumpQueued={aiWorkChat.jumpQueued}

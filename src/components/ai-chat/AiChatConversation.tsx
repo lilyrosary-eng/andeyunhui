@@ -352,6 +352,8 @@ export interface AiChatConversationProps {
   send: (text: string, images?: string[], attachments?: SendAttachment[]) => void;
   /** 当前会话排队中的消息（生成中发出的消息自动进这里）。 */
   queued?: QueuedTurn[];
+  /** 本轮在等后端跨会话并发槽（显示「排队中」而不是「正在思考」）。 */
+  queuedBySlot?: boolean;
   onEditQueued?: (id: string, text: string) => void;
   onDeleteQueued?: (id: string) => void;
   /** 插队：移到队首并尽量立刻开始（写文件时会等本轮结束）。 */
@@ -410,6 +412,7 @@ export const AiChatConversation = memo(function AiChatConversation({
   profileId,
   send,
   queued = [],
+  queuedBySlot = false,
   onEditQueued,
   onDeleteQueued,
   onJumpQueued,
@@ -879,7 +882,7 @@ async function fileToChatDataUrl(f: File): Promise<string> {
         )}
         <div className="min-w-0">
           <div className="text-sm font-semibold text-neutral-800 dark:text-stone-100 truncate">{activeConv?.title || 'AI 对话'}</div>
-          <div className="text-[11px] text-neutral-400 dark:text-stone-500">{busy ? '正在思考…' : '由统一 AI 核心驱动'}</div>
+          <div className="text-[11px] text-neutral-400 dark:text-stone-500">{busy ? (queuedBySlot ? '排队中：等待空闲执行槽' : '正在思考…') : '由统一 AI 核心驱动'}</div>
         </div>
         {compactCard && (
           <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex-shrink-0 pointer-events-auto">
