@@ -1484,6 +1484,8 @@ export const jaJP: Record<string, string> = {
   'transfer.docTranslateWorkspace': '文書を書式保持で翻訳',
   'transfer.originExternal': '外部ダウンロード',
   'transfer.originLocal': 'ローカル',
+  'transfer.renamePrompt': '新しいファイル名（名前のみ変更、フォルダは移動しません）',
+  'transfer.renameFailed': '名前の変更に失敗しました',
   'transfer.removeRecord': '記録を削除',
   'transfer.removeRecordArchived': '記録を削除（ゴミ箱へ）',
   'transfer.deleteRealFile': '実ファイルを削除（復元不可）',

@@ -477,6 +477,35 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
     [load, tr],
   );
 
+  /**
+   * 原地改名。只换文件名、不换目录 —— 「移动」是另一个动作，跨卷搬大文件是分钟级的，
+   * 不能藏在一个"改个名"的交互后面。同卷 rename 是原子的，所以这里是即时的。
+   */
+  const handleRename = useCallback(
+    async (file: StationFile) => {
+      if (file.status === 'missing') return;
+      const next = window.prompt(tr('transfer.renamePrompt'), file.originalName);
+      if (next === null) return;
+      const name = next.trim();
+      if (!name || name === file.originalName) return;
+      const p = file.absolutePath;
+      const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+      if (cut < 0) {
+        setDragNotice(`改不了：路径里没有目录分隔符（${p}）`);
+        return;
+      }
+      const sep = p.includes('\\') ? '\\' : '/';
+      try {
+        const res = await api.stationRelocate(file.id, `${p.slice(0, cut)}${sep}${name}`);
+        if (res.notice) setDragNotice(res.notice);
+        load();
+      } catch (err) {
+        setDragNotice(`${tr('transfer.renameFailed')}：${String(err)}`);
+      }
+    },
+    [load, tr],
+  );
+
   // 复选模式切换：退出时清空已选
   const toggleSelectMode = useCallback(() => {
     setSelectionMode((prev) => {
@@ -775,7 +804,16 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
                   {/* 文件信息 */}
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">
-                      {file.originalName}
+                      {/* 双击文件名原地改名（同卷 rename 是原子的，所以是即时的） */}
+                      <span
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          void handleRename(file);
+                        }}
+                        title={file.absolutePath}
+                      >
+                        {file.originalName}
+                      </span>
                     </div>
                     <div className="text-xs text-neutral-400 dark:text-stone-500 flex items-center gap-2">
                       <span>{file.importedAt}</span>

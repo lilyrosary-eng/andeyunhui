@@ -1487,6 +1487,8 @@ export const zhTW: Record<string, string> = {
   'transfer.docTranslateWorkspace': '文件格式保留翻譯',
   'transfer.originExternal': '外部下載',
   'transfer.originLocal': '本機',
+  'transfer.renamePrompt': '新的檔案名稱（只改名稱，不移動目錄）',
+  'transfer.renameFailed': '改名失敗',
   'transfer.removeRecord': '移除記錄',
   'transfer.removeRecordArchived': '移除記錄（先進資源回收筒）',
   'transfer.deleteRealFile': '刪除真實檔案（無法復原）',

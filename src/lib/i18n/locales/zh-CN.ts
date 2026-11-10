@@ -1600,6 +1600,8 @@ export const zhCN: Record<string, string> = {
   'transfer.docTranslateWorkspace': '文档格式保留翻译',
   'transfer.originExternal': '外部下载',
   'transfer.originLocal': '本机',
+  'transfer.renamePrompt': '新的文件名（同一次改名只改名字，不移动目录）',
+  'transfer.renameFailed': '改名失败',
   'transfer.removeRecord': '移除记录',
   'transfer.removeRecordArchived': '移除记录（先进回收站）',
   'transfer.deleteRealFile': '删除真实文件（不可恢复）',

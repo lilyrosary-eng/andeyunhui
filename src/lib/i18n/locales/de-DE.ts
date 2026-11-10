@@ -1484,6 +1484,8 @@ export const deDE: Record<string, string> = {
   'transfer.docTranslateWorkspace': 'Dokument uebersetzen (Layout erhalten)',
   'transfer.originExternal': 'Heruntergeladen',
   'transfer.originLocal': 'Lokal',
+  'transfer.renamePrompt': 'Neuer Dateiname (nur umbenennen, Ordner bleibt)',
+  'transfer.renameFailed': 'Umbenennen fehlgeschlagen',
   'transfer.removeRecord': 'Eintrag entfernen',
   'transfer.removeRecordArchived': 'Entfernen (in den Papierkorb)',
   'transfer.deleteRealFile': 'Echte Datei endgültig löschen',

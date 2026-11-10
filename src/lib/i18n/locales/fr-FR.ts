@@ -1483,6 +1483,8 @@ export const frFR: Record<string, string> = {
   'transfer.docTranslateWorkspace': 'Traduire un document (mise en page conservee)',
   'transfer.originExternal': 'Telecharge',
   'transfer.originLocal': 'Local',
+  'transfer.renamePrompt': 'Nouveau nom de fichier (renommage sur place, dossier inchangé)',
+  'transfer.renameFailed': 'Échec du renommage',
   'transfer.removeRecord': 'Retirer de la liste',
   'transfer.removeRecordArchived': 'Retirer (vers la corbeille)',
   'transfer.deleteRealFile': 'Supprimer le vrai fichier',

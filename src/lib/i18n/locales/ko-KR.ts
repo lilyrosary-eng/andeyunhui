@@ -1484,6 +1484,8 @@ export const koKR: Record<string, string> = {
   'transfer.docTranslateWorkspace': '서식 유지 문서 번역',
   'transfer.originExternal': '외부 다운로드',
   'transfer.originLocal': '로컬',
+  'transfer.renamePrompt': '새 파일 이름(이름만 변경, 폴더는 이동하지 않음)',
+  'transfer.renameFailed': '이름 변경 실패',
   'transfer.removeRecord': '기록 제거',
   'transfer.removeRecordArchived': '기록 제거(휴지통으로)',
   'transfer.deleteRealFile': '실제 파일 삭제(복구 불가)',
