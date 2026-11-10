@@ -20,6 +20,7 @@ import {
   translateSettingsFor,
   formatNotices,
   type TranslateResult,
+  type DocTranslateOutcome,
 } from '@/lib/translateLanguages';
 import { TranslateModelPicker } from '@/components/TranslateModelPicker';
 import { EVENTS } from '@/core/events/schema';
@@ -113,6 +114,9 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
   /** 拖出失败/不支持时的一次性提示（A10：以前只 console.error，用户完全无感） */
   const [dragNotice, setDragNotice] = useState<string | null>(null);
   const [translateOpen, setTranslateOpen] = useState(false);
+  // 文档格式保留翻译工作区（docx / pptx）。与 OCR / 文本翻译并列的第三个自包含工作区。
+  const [docOpen, setDocOpen] = useState(false);
+  const [docPrefill, setDocPrefill] = useState<string | null>(null);
   // 主站 OCR 工作区预填充图片（来自文件行点击 / 选中图片，可为 null = 空，等待拖入 / 粘贴）
   const [ocrPrefill, setOcrPrefill] = useState<string | null>(null);
   const selectedFile = files.find((f) => f.storedPath === selectedPath) ?? null;
@@ -358,6 +362,19 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
     setTranslateOpen((v) => !v);
   }, []);
 
+  // 文档翻译：从文件行选中 docx/pptx 就带过去；否则工作区里自己选。
+  const openDoc = useCallback(
+    (file?: ImportedFile) => {
+      if (docOpen) {
+        setDocOpen(false);
+        return;
+      }
+      setDocPrefill(file?.storedPath ?? null);
+      setDocOpen(true);
+    },
+    [docOpen],
+  );
+
   // 按 variant 选择 OCR / 翻译 处理函数：主站走自包含工作区，浮窗走内联
   const onOcr = variant === 'main' ? openOcr : runOcr;
   const onTranslate = variant === 'main' ? openTranslate : runTranslate;
@@ -552,6 +569,14 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
               title={tr('transfer.openTranslateWorkspace')}
             >
               <Languages size={14} /> {tr('transfer.translate')}
+            </button>
+            <button
+              type="button"
+              onClick={() => openDoc(selectedFile ?? undefined)}
+              className={`btn-press px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 border transition-colors ${docOpen ? 'border-[var(--element-bg)] bg-[var(--element-muted)] text-[var(--element-bg)]' : 'border-[var(--element-border)] text-neutral-600 dark:text-stone-300 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)]'}`}
+              title={tr('transfer.docTranslateHint')}
+            >
+              <FileText size={14} /> {tr('transfer.docTranslate')}
             </button>
           </div>
         )}
@@ -766,6 +791,212 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
           <TranslateWorkspace onClose={() => setTranslateOpen(false)} />
         </div>
       )}
+
+      {/* 主站右侧：文档格式保留翻译（docx / pptx 原地回填，原文件不改） */}
+      {variant === 'main' && docOpen && (
+        <div className="absolute right-6 top-6 bottom-6 w-80 z-10">
+          {/* key 跟着 prefill 走：从文件行换一个文档时整个工作区重建，
+              比在 effect 里 setState 少一次级联渲染（也避免 lint 的 set-state-in-effect）。 */}
+          <DocTranslateWorkspace
+            key={docPrefill ?? 'blank'}
+            prefillPath={docPrefill}
+            onClose={() => setDocOpen(false)}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 文档「格式保留」翻译工作区（docx / pptx）。
+ *
+ * 与 OCR 工作区的区别：OCR 是「图片 → 文字」，这里是把**原文档**翻译后另存 ——
+ * 样式 / 表格 / 图片 / 页眉页脚都不动，只换字（实现见 Rust `doc_translate.rs`）。
+ *
+ * ⚠️ 为什么这里不做 PDF：PDF 没有 OOXML 那种「文本节点 + 样式」的结构。
+ * 按坐标回填的话，译文一变长就溢出原版面；整页图片化则失去可编辑性 ——
+ * 两者都不叫「格式保留」。所以对 PDF 明确报「暂不支持」，而不是给一个悄悄毁版面的结果。
+ */
+function DocTranslateWorkspace({
+  prefillPath,
+  onClose,
+}: {
+  prefillPath: string | null;
+  onClose: () => void;
+}) {
+  const { t: tr } = useI18n();
+  const [path, setPath] = useState(prefillPath ?? '');
+  const [targetLang, setTargetLang] = useState<string>(() => loadTargetLang());
+  const [node, setNode] = useState<string>(() => loadTranslateSettings().node || 'auto');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [out, setOut] = useState<DocTranslateOutcome | null>(null);
+
+  const pick = useCallback(async () => {
+    try {
+      const files = await invoke<string[]>('pick_file', {
+        title: tr('transfer.docTranslatePickTitle'),
+        multiple: false,
+        filters: [
+          { name: tr('transfer.docTranslateFilter'), extensions: ['docx', 'docm', 'pptx', 'pptm'] },
+        ],
+      });
+      if (files?.[0]) {
+        setPath(files[0]);
+        setErr(null);
+        setOut(null);
+      }
+    } catch (e) {
+      setErr(String(e));
+    }
+  }, [tr]);
+
+  const run = useCallback(async () => {
+    if (!path.trim()) return;
+    setBusy(true);
+    setErr(null);
+    setOut(null);
+    try {
+      const res = await api.translateDocument(path, targetLang, 'auto', translateSettingsFor(node));
+      setOut(res);
+    } catch (e) {
+      // 后端 Err 已带 `[阶段]` 前缀与完整原因，原样显示 —— 截断就是让人猜
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [path, targetLang, node]);
+
+  const copyPath = useCallback(() => {
+    if (!out?.outPath) return;
+    navigator.clipboard?.writeText(out.outPath).catch(() => {
+      /* 剪贴板不可用：路径本身就在界面上，用户可手动选中 */
+    });
+  }, [out]);
+
+  const selCls =
+    'text-xs rounded-lg border border-[var(--element-border)] bg-white/60 dark:bg-stone-800/60 px-2 py-1 text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-bg)]';
+  const fileName = path.split(/[\\/]/).pop() || path;
+
+  return (
+    <div className="w-full h-full flex flex-col glass-panel rounded-xl overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--element-border)] flex-shrink-0">
+        <span className="text-sm font-medium flex items-center gap-1.5 text-neutral-700 dark:text-stone-200">
+          <FileText size={15} /> {tr('transfer.docTranslateWorkspace')}
+        </span>
+        <button
+          onClick={onClose}
+          className="btn-press p-1 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200 transition-colors"
+          aria-label={tr('common.close')}
+        >
+          <X size={16} />
+        </button>
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 flex flex-col gap-2">
+        {/* 文件：从文件行带过来，或自己选 */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <button
+            onClick={() => void pick()}
+            className="btn-press px-2.5 py-1 rounded-lg text-xs flex items-center gap-1.5 border border-[var(--element-border)] text-neutral-600 dark:text-stone-300 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors"
+          >
+            <Inbox size={13} /> {tr('transfer.docTranslatePick')}
+          </button>
+          <span
+            className={`text-[11px] truncate ${path ? 'text-neutral-600 dark:text-stone-300' : 'text-neutral-400 dark:text-stone-500'}`}
+            title={path}
+          >
+            {path ? fileName : tr('transfer.docTranslateNoFile')}
+          </span>
+        </div>
+
+        {/* 目标语言 + 翻译节点 */}
+        <div className="flex items-center gap-2 flex-wrap flex-shrink-0">
+          <span className="text-xs text-neutral-500 dark:text-stone-400">{tr('transfer.targetLang')}</span>
+          <select
+            value={targetLang}
+            onChange={(e) => {
+              setTargetLang(e.target.value);
+              saveTargetLang(e.target.value);
+            }}
+            className={selCls}
+          >
+            {TARGET_LANGS.map((l) => (
+              <option key={l.code} value={l.code}>
+                {l.label}
+              </option>
+            ))}
+          </select>
+          <span className="text-xs text-neutral-500 dark:text-stone-400">{tr('transfer.translateNode')}</span>
+          <select
+            value={node}
+            onChange={(e) => {
+              setNode(e.target.value);
+              const s = loadTranslateSettings();
+              s.node = e.target.value;
+              saveTranslateSettings(s);
+            }}
+            className={selCls}
+            title={TRANSLATE_NODES.find((n) => n.id === node)?.note}
+          >
+            {TRANSLATE_NODES.map((n) => (
+              <option key={n.id} value={n.id}>{n.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <button
+          onClick={() => void run()}
+          disabled={busy || !path.trim()}
+          className="btn-press px-3 py-1.5 rounded-lg text-xs flex items-center justify-center gap-1.5 border border-[var(--element-border)] text-neutral-600 dark:text-stone-300 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors disabled:opacity-40 flex-shrink-0"
+        >
+          {busy ? <Loader2 size={14} className="animate-spin" /> : <FileDown size={14} />}
+          {busy ? tr('transfer.docTranslateRunning') : tr('transfer.docTranslateRun')}
+        </button>
+
+        <p className="text-[10px] leading-relaxed text-neutral-400 dark:text-stone-500 flex-shrink-0">
+          {tr('transfer.docTranslateHint')}
+        </p>
+
+        {err && (
+          <pre className="text-[10px] leading-relaxed whitespace-pre-wrap break-all m-0 p-2 rounded-lg flex-shrink-0 bg-red-500/5 text-red-500">
+            {err}
+          </pre>
+        )}
+
+        {out && (
+          <div className="flex flex-col gap-1.5 flex-shrink-0">
+            <div className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium">
+              {tr('transfer.docTranslateDone')}
+            </div>
+            <div className="flex items-start gap-1.5">
+              <code className="flex-1 min-w-0 text-[10px] break-all text-neutral-600 dark:text-stone-300 bg-neutral-100/60 dark:bg-stone-800/60 rounded p-1.5">
+                {out.outPath}
+              </code>
+              <button
+                onClick={copyPath}
+                className="btn-press shrink-0 px-2 py-1 rounded text-[10px] border border-neutral-200 dark:border-stone-700 text-neutral-500 dark:text-stone-400 hover:text-[var(--element-bg)]"
+              >
+                {tr('transfer.docTranslateCopy')}
+              </button>
+            </div>
+            <div className="text-[10px] text-neutral-400 dark:text-stone-500">
+              {tr('transfer.docTranslateStats', {
+                total: String(out.paragraphs),
+                done: String(out.translated),
+                skipped: String(out.skipped),
+                failed: String(out.failed),
+              })}
+            </div>
+            {out.notices.length > 0 && (
+              <pre className="text-[10px] leading-relaxed whitespace-pre-wrap break-all m-0 p-2 rounded-lg bg-amber-500/5 text-amber-600 dark:text-amber-400">
+                {formatNotices(out.notices)}
+              </pre>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

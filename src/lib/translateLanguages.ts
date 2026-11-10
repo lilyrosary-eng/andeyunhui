@@ -157,6 +157,24 @@ export interface TranslateSettings {
   probe?: boolean;
 }
 
+/** `translate_document` 的结构化返回（格式保留翻译）。 */
+export interface DocTranslateOutcome {
+  /** 输出文件绝对路径（原文件不会被修改） */
+  outPath: string;
+  /** docx / pptx */
+  format: string;
+  /** 扫描到的段落总数 */
+  paragraphs: number;
+  /** 实际翻译的段落数 */
+  translated: number;
+  /** 主动跳过（空 / 纯数字 / 太短） */
+  skipped: number;
+  /** 翻译失败、保留原文 */
+  failed: number;
+  /** 所有提示（跳过原因、批量降级、样式合并说明…），前端原样展示不截断 */
+  notices: string[];
+}
+
 /** `translate_text` 的结构化返回。notices 是**给用户看的**，不许只进日志。 */
 export interface TranslateResult {
   text: string;
