@@ -1,0 +1,13 @@
+[package]
+name = "ai-task-kit"
+version = "0.1.0"
+edition = "2021"
+description = "通用任务调度：并发域限流 + 优先级队列 + 单任务超时（与具体模块无关）"
+authors = ["Rosary"]
+
+[dependencies]
+# 只用 time：调度本身不依赖具体 runtime，执行由宿主注入。
+tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync"] }

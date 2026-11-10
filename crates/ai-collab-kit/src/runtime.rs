@@ -11,10 +11,10 @@
 //! 预算/深度限制、重启恢复、等待用户输入的 parked 状态、房间并发槽 + 优先级队列、
 //! 基础设失败重试与房间级任务超时。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -1701,128 +1701,67 @@ async fn run_native_assignment(
     }
 }
 
-/// 排队中的任务：连同执行所需上下文一起存，出队后直接交给 `run_assignment`。
-struct QueuedTask {
-    app: AppHandle,
-    base: PathBuf,
-    room: Room,
-    assignment: Assignment,
-    position: u64,
-}
+/// 进程内调度器：并发槽 / 优先级 / 超时交给通用执行层（ai-task-kit），
+/// 这里只做业务映射（房间并发上限、任务优先级、超时收尾）。
+static TASK_SCHEDULER: OnceLock<Arc<ai_task_kit::Scheduler>> = OnceLock::new();
 
-/// 纯调度键：只保留出队判断需要的字段，便于脱离 AppHandle 单测。
-#[derive(Debug, Clone)]
-struct QueueKey {
-    room_id: String,
-    priority: u8,
-    position: u64,
-    /// None = 该房间不限并发。
-    limit: Option<usize>,
-}
-
-#[derive(Default)]
-struct Scheduler {
-    /// room_id -> 正在执行的任务数。
-    running: HashMap<String, usize>,
-    queue: Vec<QueuedTask>,
-    next_position: u64,
-}
-
-static SCHEDULER: OnceLock<Mutex<Scheduler>> = OnceLock::new();
-
-fn scheduler() -> &'static Mutex<Scheduler> {
-    SCHEDULER.get_or_init(|| Mutex::new(Scheduler::default()))
-}
-
-/// 选下一个可执行任务：房间并发未满，优先级数字小者先，同优先级按入队顺序。
-fn pick_runnable(keys: &[QueueKey], running: &HashMap<String, usize>) -> Option<usize> {
-    let mut best: Option<usize> = None;
-    for (index, key) in keys.iter().enumerate() {
-        if let Some(limit) = key.limit {
-            if running.get(&key.room_id).copied().unwrap_or(0) >= limit {
-                continue;
-            }
-        }
-        best = match best {
-            None => Some(index),
-            Some(current) => {
-                let (a, b) = (&keys[current], key);
-                if (b.priority, b.position) < (a.priority, a.position) {
-                    Some(index)
-                } else {
-                    Some(current)
-                }
-            }
-        };
-    }
-    best
-}
-
-/// 槽位守卫：任务结束（含 panic 展开）时释放并发槽，并拉起队列里的下一个。
-struct SlotGuard {
-    room_id: String,
-}
-
-impl Drop for SlotGuard {
-    fn drop(&mut self) {
-        if let Ok(mut sched) = scheduler().lock() {
-            if let Some(count) = sched.running.get_mut(&self.room_id) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    sched.running.remove(&self.room_id);
-                }
-            }
-        }
-        pump();
-    }
+fn task_scheduler() -> &'static Arc<ai_task_kit::Scheduler> {
+    TASK_SCHEDULER.get_or_init(|| {
+        let spawn: ai_task_kit::Spawner = Arc::new(|future| {
+            tauri::async_runtime::spawn(future);
+        });
+        ai_task_kit::Scheduler::new(spawn)
+    })
 }
 
 /// 放进调度队列，随后按槽位出队。房间不限并发时这里等价于立刻执行。
 fn enqueue(app: AppHandle, base: PathBuf, room: Room, assignment: Assignment) {
-    // 排队提示要用到的字段先留一份：任务随后会被移进队列。
+    // 排队提示与超时收尾要用到的字段先留一份：任务随后会被移进闭包。
     let assignment_id = assignment.id.clone();
     let assignee_id = assignment.assignee_id.clone();
     let room_id = room.id.clone();
     let limit = room_concurrency(&room);
+    let timeout_secs = room_task_timeout(&room);
     let app_cb = app.clone();
     let base_cb = base.clone();
-    let mut task = QueuedTask {
-        app,
-        base,
-        room,
-        assignment,
-        position: 0,
-    };
-    match scheduler().lock() {
-        Ok(mut sched) => {
-            // 同一个任务重复入队（恢复、重试）时先摘掉旧条目，避免被执行两次。
-            sched.queue.retain(|item| item.assignment.id != task.assignment.id);
-            task.position = sched.next_position;
-            sched.next_position += 1;
-            sched.queue.push(task);
-        }
-        Err(_) => {
-            // 锁损坏时退回「立刻执行」：宁可丢并发保护，也不能丢任务。
-            let QueuedTask {
-                app,
-                base,
-                room,
-                assignment,
-                ..
-            } = task;
-            tauri::async_runtime::spawn(run_assignment(app, base, room, assignment));
-            return;
-        }
-    }
-    pump();
+    let app_timeout = app.clone();
+    let base_timeout = base.clone();
+    let room_timeout = room.clone();
+    let assignment_timeout = assignment.clone();
 
-    // 出队后仍在队列里 = 被房间并发挡住了。补一条可见原因，
+    let spec = ai_task_kit::JobSpec {
+        id: assignment_id.clone(),
+        scope: room_id.clone(),
+        priority: assignment.priority,
+        limit,
+        timeout: timeout_secs.map(Duration::from_secs),
+    };
+    let outcome = task_scheduler().enqueue(
+        spec,
+        move || -> ai_task_kit::BoxFuture {
+            Box::pin(run_assignment(app, base, room, assignment))
+        },
+        Some(Box::new(move || {
+            // 取消路径已经发过 cancelled，别再用超时覆盖用户的选择。
+            if is_cancelled(&assignment_timeout.id) {
+                return;
+            }
+            fail_assignment(
+                &app_timeout,
+                &base_timeout,
+                &room_timeout,
+                &assignment_timeout,
+                &format!(
+                    "任务超时（{}s），已中止执行",
+                    timeout_secs.unwrap_or_default()
+                ),
+            );
+        })),
+    );
+
+    // 入队后仍在排队 = 被房间并发挡住了。补一条可见原因，
     // 否则看板上只有「排队」两个字，分不清是等外部认领还是等槽位。
-    let still_queued = scheduler()
-        .lock()
-        .map(|sched| sched.queue.iter().any(|item| item.assignment.id == assignment_id))
-        .unwrap_or(false);
-    if still_queued {
+    if outcome == ai_task_kit::Enqueued::Queued {
         if let Some(limit) = limit {
             let _ = emit_event(
                 &app_cb,
@@ -1839,91 +1778,23 @@ fn enqueue(app: AppHandle, base: PathBuf, room: Room, assignment: Assignment) {
     }
 }
 
-/// 按房间槽位出队。入队、任务结束、房间并发改大三种时机都调它。
-fn pump() {
-    let mut starts: Vec<QueuedTask> = Vec::new();
-    if let Ok(mut sched) = scheduler().lock() {
-        // 取消是另一条路径落盘的，队列里的残留在这里丢掉。
-        sched.queue.retain(|item| !is_cancelled(&item.assignment.id));
-        loop {
-            let keys: Vec<QueueKey> = sched
-                .queue
-                .iter()
-                .map(|item| QueueKey {
-                    room_id: item.room.id.clone(),
-                    priority: item.assignment.priority,
-                    position: item.position,
-                    limit: room_concurrency(&item.room),
-                })
-                .collect();
-            let Some(index) = pick_runnable(&keys, &sched.running) else {
-                break;
-            };
-            let item = sched.queue.remove(index);
-            *sched.running.entry(item.room.id.clone()).or_insert(0) += 1;
-            starts.push(item);
-        }
-    }
-    for item in starts {
-        let room_id = item.room.id.clone();
-        let timeout_secs = room_task_timeout(&item.room);
-        // 超时收尾要用到：先把这几份拷出来，run_assignment 会消费掉原来的。
-        let app_cb = item.app.clone();
-        let base_cb = item.base.clone();
-        let room_cb = item.room.clone();
-        let assignment_cb = item.assignment.clone();
-        tauri::async_runtime::spawn(async move {
-            let _slot = SlotGuard { room_id };
-            let Some(secs) = timeout_secs else {
-                run_assignment(item.app, item.base, item.room, item.assignment).await;
-                return;
-            };
-            // 房间配了超时：到点丢掉执行 future（子进程 kill_on_drop），按失败留痕。
-            let result = tokio::time::timeout(
-                Duration::from_secs(secs),
-                run_assignment(item.app, item.base, item.room, item.assignment),
-            )
-            .await;
-            if result.is_err() && !is_cancelled(&assignment_cb.id) {
-                fail_assignment(
-                    &app_cb,
-                    &base_cb,
-                    &room_cb,
-                    &assignment_cb,
-                    &format!("任务超时（{secs}s），已中止执行"),
-                );
-            }
-        });
-    }
-}
-
-/// 房间配置改过后重排队列：先把排队任务里的并发上限同步成最新值，再尝试出队。
+/// 房间配置改过后重排：先把最新并发上限同步给排队任务，再尝试出队。
 /// 改小不打断已在跑的任务，只影响之后还能出队多少个。
 pub fn pump_queue(base: &Path) {
     let rooms = store::read_rooms(base);
-    if let Ok(mut sched) = scheduler().lock() {
-        for item in sched.queue.iter_mut() {
-            if let Some(room) = rooms.iter().find(|room| room.id == item.room.id) {
-                item.room.concurrency = room.concurrency;
-                item.room.task_timeout_secs = room.task_timeout_secs;
-            }
-        }
+    for room in rooms {
+        task_scheduler().update_limit(&room.id, room_concurrency(&room));
     }
-    pump();
 }
 
 /// 取消排队中的任务时把它从队列里摘掉，避免继续占位。
 pub fn discard_queued(assignment_id: &str) {
-    if let Ok(mut sched) = scheduler().lock() {
-        sched.queue.retain(|item| item.assignment.id != assignment_id);
-    }
+    task_scheduler().cancel(assignment_id);
 }
 
 /// 房间被删除后清掉它排队中的任务：任务表都没了，再执行只会写出一堆失败事件。
 pub fn discard_room_queue(room_id: &str) {
-    if let Ok(mut sched) = scheduler().lock() {
-        sched.queue.retain(|item| item.room.id != room_id);
-    }
+    task_scheduler().discard_scope(room_id);
 }
 
 pub fn spawn_assignment(app: AppHandle, base: PathBuf, room: Room, assignment: Assignment) {
@@ -2658,55 +2529,6 @@ mod tests {
         assert_eq!(resumed.status, AssignmentStatus::Running);
         assert!(resumed.result.is_none());
         let _ = std::fs::remove_dir_all(base);
-    }
-
-    fn key(room: &str, priority: u8, position: u64, limit: Option<usize>) -> QueueKey {
-        QueueKey {
-            room_id: room.to_string(),
-            priority,
-            position,
-            limit,
-        }
-    }
-
-    /// 同房间并发满了就不再出队；另一个房间的任务不受影响（房间之间不互相串行）。
-    #[test]
-    fn scheduler_honors_room_slots_and_keeps_rooms_independent() {
-        let queue = vec![
-            key("a", PRIORITY_NORMAL, 0, Some(2)),
-            key("a", PRIORITY_NORMAL, 1, Some(2)),
-            key("a", PRIORITY_NORMAL, 2, Some(2)),
-            key("b", PRIORITY_NORMAL, 3, Some(1)),
-        ];
-        let mut running = HashMap::new();
-        running.insert("a".to_string(), 2usize);
-        running.insert("b".to_string(), 1usize);
-        assert_eq!(pick_runnable(&queue, &running), None);
-
-        running.insert("b".to_string(), 0usize);
-        assert_eq!(pick_runnable(&queue, &running), Some(3));
-
-        // 不限并发的房间永远可以出队。
-        let unlimited = vec![key("c", PRIORITY_NORMAL, 4, None)];
-        let mut busy = HashMap::new();
-        busy.insert("c".to_string(), 99usize);
-        assert_eq!(pick_runnable(&unlimited, &busy), Some(0));
-    }
-
-    /// 高优先级先出队；同优先级按入队顺序，不会插队。
-    #[test]
-    fn scheduler_prefers_priority_then_arrival() {
-        let queue = vec![
-            key("a", PRIORITY_LOW, 0, Some(4)),
-            key("a", PRIORITY_NORMAL, 1, Some(4)),
-            key("a", PRIORITY_HIGH, 2, Some(4)),
-            key("a", PRIORITY_HIGH, 3, Some(4)),
-        ];
-        let none = HashMap::new();
-        assert_eq!(pick_runnable(&queue, &none), Some(2));
-        // 选中后调用方移除该下标，下一次应轮到同优先级的后到者。
-        let rest = vec![queue[0].clone(), queue[1].clone(), queue[3].clone()];
-        assert_eq!(pick_runnable(&rest, &none), Some(2));
     }
 
     /// 0 = 不限；手填过大夹到上限，避免一个笔误把并发打到天上。

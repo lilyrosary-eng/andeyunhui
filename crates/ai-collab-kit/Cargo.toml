@@ -6,6 +6,8 @@ description = "AI 协作组态后端内核 —— 可拆卸 crate（harness 适�
 authors = ["Rosary"]
 
 [dependencies]
+# 执行层：并发槽 / 优先级队列 / 单任务超时，与业务无关。
+ai-task-kit = { path = "../ai-task-kit" }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
