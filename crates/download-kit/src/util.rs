@@ -143,6 +143,27 @@ pub fn dir_size(path: &Path) -> u64 {
     total
 }
 
+/// 计算单文件 SHA-256（小写 hex）。调用方负责放进 `spawn_blocking`。
+pub fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("打开校验文件失败: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("读取校验文件失败: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// 解析 `1.2MiB` / `34MB` / `512K` / `123` 这类人读大小。
 pub fn parse_human_size(raw: &str) -> Option<u64> {
     let text = raw.trim();

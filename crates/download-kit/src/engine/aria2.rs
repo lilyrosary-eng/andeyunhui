@@ -165,6 +165,14 @@ impl DownloadEngine for Aria2Engine {
             .arg("--download-result=hide")
             .arg("--user-agent")
             .arg(user_agent);
+        if let Some(speed) = task.max_speed {
+            command
+                .arg("--max-download-limit")
+                .arg(speed.to_string());
+        }
+        if let Some(proxy) = self.config.proxy.as_deref().filter(|s| !s.is_empty()) {
+            command.arg("--all-proxy").arg(proxy);
+        }
         if let Some(referer) = task.referer.as_deref().filter(|s| !s.is_empty()) {
             command.arg("--referer").arg(referer);
         }
@@ -174,8 +182,15 @@ impl DownloadEngine for Aria2Engine {
         for (name, value) in &task.headers {
             command.arg("--header").arg(format!("{name}: {value}"));
         }
+        // aria2 把多个 URI 视为同一文件的镜像源，正好复用它的源切换与分段。
+        // Metalink 本身就是多源清单，再传 mirrors 会被当成多个清单，直接忽略。
+        command.arg(&task.urls[0]);
+        if !metalink {
+            for mirror in &task.mirrors {
+                command.arg(mirror);
+            }
+        }
         command
-            .arg(&task.urls[0])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());

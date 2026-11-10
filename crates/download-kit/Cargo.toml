@@ -29,12 +29,21 @@ tokio = { version = "1", features = [
 # 与主 crate 保持同一版本口径：rustls 无系统 OpenSSL 依赖。
 # 不启用 gzip：Range 下载必须保证字节偏移与服务端文件一一对应，
 # 传输压缩会让 Content-Length / Range 语义错位，统一在请求里带 Accept-Encoding: identity。
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "stream",
+  # 代理支持（http/https/socks5）
+  "socks",
+  # HTTP/2 协商；多连接下载仍以引擎1 的分片并发为主
+  "http2",
+] }
 futures-util = "0.3"
 # 任务 + 分片表（分片清单模型），bundled 免外部 SQLite。
 rusqlite = { version = "0.32", features = ["bundled"] }
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
+# 下载完成后的 SHA-256 校验（纯 Rust，MIT/Apache-2.0）。
+sha2 = "0.10"
 
 [features]
 # 仅供 `cargo test`：把 comctl32 v6 清单链进测试二进制。

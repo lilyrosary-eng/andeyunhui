@@ -15,16 +15,17 @@ use tokio::process::Command;
 
 use crate::engine::{DownloadEngine, EngineCtx, EngineOutcome};
 use crate::manager::Control;
-use crate::types::{EngineKind, TaskStatus};
+use crate::types::{EngineConfig, EngineKind, TaskStatus};
 use crate::util::{dir_size, is_p2p_url, parse_human_size, tail_text};
 
 pub struct GopeedEngine {
+    config: EngineConfig,
     path: Option<PathBuf>,
 }
 
 impl GopeedEngine {
-    pub fn new(path: Option<PathBuf>) -> Self {
-        Self { path }
+    pub fn new(config: EngineConfig, path: Option<PathBuf>) -> Self {
+        Self { config, path }
     }
 }
 
@@ -83,6 +84,21 @@ impl DownloadEngine for GopeedEngine {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        if let Some(proxy) = self
+            .config
+            .proxy
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            // gopeed CLI 没有 --proxy 参数，走通用的代理环境变量。
+            command
+                .env("http_proxy", proxy)
+                .env("https_proxy", proxy)
+                .env("all_proxy", proxy)
+                .env_remove("no_proxy")
+                .env_remove("NO_PROXY");
+        }
         #[cfg(windows)]
         {
             command.creation_flags(0x08000000);
@@ -254,7 +270,7 @@ mod tests {
 
     #[test]
     fn unavailable_without_path() {
-        let engine = GopeedEngine::new(None);
+        let engine = GopeedEngine::new(EngineConfig::default(), None);
         assert!(engine.available().is_err());
     }
 }

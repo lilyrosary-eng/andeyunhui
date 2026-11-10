@@ -120,6 +120,9 @@ impl DownloadEngine for FfmpegEngine {
             if !headers.is_empty() {
                 command.arg("-headers").arg(headers);
             }
+            if let Some(proxy) = self.config.proxy.as_deref().filter(|s| !s.is_empty()) {
+                command.arg("-http_proxy").arg(proxy);
+            }
             command.arg("-i").arg(&task.urls[0]);
         }
         command

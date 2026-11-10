@@ -232,7 +232,7 @@ impl Inner {
         }
     }
 
-    fn complete(&self, id: &str) -> Result<(), String> {
+    async fn complete(&self, id: &str) -> Result<(), String> {
         let Some(task) = self.store.task(id)? else {
             return Ok(());
         };
@@ -261,6 +261,22 @@ impl Inner {
                 "文件大小校验失败：期望 {} 字节，实际 {} 字节",
                 task.total_bytes, size
             ));
+        }
+        if let Some(expected) = task.sha256.as_deref() {
+            if metadata.is_dir() {
+                return Err("目录任务不支持单一 SHA-256 校验".to_string());
+            }
+            let path = task.save_path.clone();
+            let actual = tokio::task::spawn_blocking(move || {
+                crate::util::sha256_file(std::path::Path::new(&path))
+            })
+            .await
+            .map_err(|e| format!("SHA-256 校验任务异常: {e}"))??;
+            if actual != expected {
+                return Err(format!(
+                    "SHA-256 校验失败：期望 {expected}，实际 {actual}"
+                ));
+            }
         }
         let downloaded = if strict_size && task.total_bytes > 0 {
             task.total_bytes
@@ -349,6 +365,22 @@ fn sniffed_metalink(sniff: Option<&ProbeResult>) -> bool {
         .unwrap_or(false)
 }
 
+/// 统一 SHA-256 口径：允许 `sha256:` 前缀，落库统一小写 hex。
+fn normalize_sha256(value: Option<String>) -> Result<Option<String>, String> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let lower = raw.trim().to_ascii_lowercase();
+    let hex = lower.trim_start_matches("sha256:").trim();
+    if hex.is_empty() {
+        return Ok(None);
+    }
+    if hex.len() != 64 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("SHA-256 必须是 64 位十六进制字符串".to_string());
+    }
+    Ok(Some(hex.to_string()))
+}
+
 /// 对外管理器。内部 `Arc` 可安全克隆给命令层/定时任务。
 #[derive(Clone)]
 pub struct DownloadManager {
@@ -407,12 +439,31 @@ impl DownloadManager {
         }
 
         let id = uuid::Uuid::new_v4().to_string();
+        let p2p = spec.engine == EngineKind::Gopeed || is_p2p_url(&urls[0]);
+        let metalink = is_metalink_url(&urls[0]);
+        let sha256 = normalize_sha256(spec.sha256)?;
+        if sha256.is_some() && (p2p || metalink) {
+            return Err("P2P / Metalink 任务包含多个文件，不支持单一 SHA-256 校验".to_string());
+        }
+
+        let mut mirrors: Vec<String> = spec
+            .mirrors
+            .into_iter()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        mirrors.retain(|url| url != &urls[0] && seen.insert(url.clone()));
+        if !mirrors.is_empty() && (p2p || urls.len() > 1) {
+            return Err("P2P / 多段任务不支持 mirrors".to_string());
+        }
+
         let raw_save = spec.save_path.trim();
         if raw_save.is_empty() {
             return Err("缺少保存路径".to_string());
         }
         let p2p = spec.engine == EngineKind::Gopeed || is_p2p_url(&urls[0]);
-        let directory_output = p2p || is_metalink_url(&urls[0]);
+        let directory_output = p2p || metalink;
         let mut save_path = PathBuf::from(raw_save);
         let filename;
         if directory_output {
@@ -455,6 +506,8 @@ impl DownloadManager {
 
         let config = self.inner.config();
         let connections = spec.connections.unwrap_or(config.connections).clamp(1, 32);
+        let speed = spec.max_speed.unwrap_or(config.speed_limit);
+        let max_speed = (speed > 0).then_some(speed);
         let now = now_ms();
         let task = DownloadTask {
             id,
@@ -471,6 +524,9 @@ impl DownloadManager {
             total_bytes: 0,
             downloaded_bytes: 0,
             max_bytes: spec.max_bytes,
+            mirrors,
+            sha256,
+            max_speed,
             connections,
             error: None,
             created_at: now,
@@ -827,7 +883,7 @@ async fn run_engine(
 
     match engine.run(ctx).await {
         Ok(EngineOutcome::Done) => {
-            if let Err(message) = inner.complete(id) {
+            if let Err(message) = inner.complete(id).await {
                 inner.fail(id, &message);
                 return Err(message);
             }
@@ -856,6 +912,11 @@ mod tests {
     use std::collections::BTreeMap;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(bytes))
+    }
 
     fn test_inner(base: PathBuf, store: Store, config: EngineConfig) -> Arc<Inner> {
         Arc::new(Inner {
@@ -900,6 +961,9 @@ mod tests {
             total_bytes: total,
             downloaded_bytes: 0,
             max_bytes: None,
+            mirrors: Vec::new(),
+            sha256: None,
+            max_speed: None,
             connections,
             error: None,
             created_at: now,
@@ -1033,7 +1097,7 @@ mod tests {
         let engine = crate::engine::native::NativeEngine::new(config, None);
         let outcome = engine.run(ctx).await.unwrap();
         assert_eq!(outcome, EngineOutcome::Done);
-        inner.complete(&task.id).unwrap();
+        inner.complete(&task.id).await.unwrap();
 
         assert_eq!(std::fs::read(&save_path).unwrap(), payload);
         let stored = inner.store.task(&task.id).unwrap().unwrap();
@@ -1115,7 +1179,7 @@ mod tests {
         let engine = crate::engine::native::NativeEngine::new(config, None);
         let outcome = engine.run(ctx).await.unwrap();
         assert_eq!(outcome, EngineOutcome::Done);
-        inner.complete(&task.id).unwrap();
+        inner.complete(&task.id).await.unwrap();
 
         assert_eq!(std::fs::read(&save_path).unwrap(), payload);
         let stored = inner.store.task(&task.id).unwrap().unwrap();
@@ -1158,7 +1222,7 @@ mod tests {
         let engine = crate::engine::native::NativeEngine::new(config, None);
         let outcome = engine.run(ctx).await.unwrap();
         assert_eq!(outcome, EngineOutcome::Done);
-        inner.complete(&task.id).unwrap();
+        inner.complete(&task.id).await.unwrap();
 
         assert_eq!(std::fs::read(&save_path).unwrap(), payload);
         // 降级后应只剩一个单流分片。
@@ -1204,12 +1268,132 @@ mod tests {
         let engine = crate::engine::simple::SimpleEngine::new(config, None);
         let outcome = engine.run(ctx).await.unwrap();
         assert_eq!(outcome, EngineOutcome::Done);
-        inner.complete(&task.id).unwrap();
+        inner.complete(&task.id).await.unwrap();
 
         assert_eq!(std::fs::read(&save_path).unwrap(), payload);
         let parts = inner.store.parts(&task.id).unwrap();
         assert_eq!(parts.len(), 1);
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 主地址不可用时，按 mirrors 顺序切到可用镜像。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn native_uses_mirror_when_primary_is_dead() {
+        let payload: Vec<u8> = (0..600_000usize).map(|i| (i % 179) as u8).collect();
+        let mirror = spawn_range_server(payload.clone()).await;
+
+        let base = temp_base("mirror");
+        let store = Store::open(&base).unwrap();
+        let config = EngineConfig {
+            connections: 2,
+            connect_timeout_secs: 1,
+            read_timeout_secs: 10,
+            ..Default::default()
+        };
+        let inner = test_inner(base.clone(), store, config.clone());
+        let save_path = base.join("mirror.bin");
+        let mut task = sample_task("http://127.0.0.1:9/file.bin", &save_path, 2, 0);
+        task.mirrors = vec![mirror];
+        inner.store.insert_task(&task).unwrap();
+
+        let (sender, receiver) = watch::channel(Control::Run);
+        inner
+            .controls
+            .lock()
+            .unwrap()
+            .insert(task.id.clone(), sender);
+        let ctx = EngineCtx {
+            inner: inner.clone(),
+            task_id: task.id.clone(),
+            save_path: save_path.clone(),
+            probe: None,
+            control: receiver,
+        };
+        let engine = crate::engine::native::NativeEngine::new(config, None);
+        let outcome = engine.run(ctx).await.unwrap();
+        assert_eq!(outcome, EngineOutcome::Done);
+        inner.complete(&task.id).await.unwrap();
+
+        assert_eq!(std::fs::read(&save_path).unwrap(), payload);
+        // 镜像列表必须能从库里读回，否则引擎根本不会切源。
+        let stored = inner.store.task(&task.id).unwrap().unwrap();
+        assert_eq!(stored.mirrors.len(), 1);
+        assert_eq!(stored.status, TaskStatus::Completed);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sha256_match_allows_completion() {
+        let payload: Vec<u8> = (0..500_000usize).map(|i| (i % 163) as u8).collect();
+        let url = spawn_range_server(payload.clone()).await;
+
+        let base = temp_base("sha-ok");
+        let store = Store::open(&base).unwrap();
+        let config = EngineConfig::default();
+        let inner = test_inner(base.clone(), store, config.clone());
+        let save_path = base.join("sha-ok.bin");
+        let mut task = sample_task(&url, &save_path, 2, 0);
+        task.sha256 = Some(sha256_hex(&payload));
+        inner.store.insert_task(&task).unwrap();
+
+        let (sender, receiver) = watch::channel(Control::Run);
+        inner
+            .controls
+            .lock()
+            .unwrap()
+            .insert(task.id.clone(), sender);
+        let ctx = EngineCtx {
+            inner: inner.clone(),
+            task_id: task.id.clone(),
+            save_path: save_path.clone(),
+            probe: None,
+            control: receiver,
+        };
+        let engine = crate::engine::native::NativeEngine::new(config, None);
+        engine.run(ctx).await.unwrap();
+        inner.complete(&task.id).await.unwrap();
+
+        let stored = inner.store.task(&task.id).unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Completed);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sha256_mismatch_blocks_completion() {
+        let payload: Vec<u8> = (0..500_000usize).map(|i| (i % 157) as u8).collect();
+        let url = spawn_range_server(payload.clone()).await;
+
+        let base = temp_base("sha-bad");
+        let store = Store::open(&base).unwrap();
+        let config = EngineConfig::default();
+        let inner = test_inner(base.clone(), store, config.clone());
+        let save_path = base.join("sha-bad.bin");
+        let mut task = sample_task(&url, &save_path, 2, 0);
+        task.sha256 = Some("0".repeat(64));
+        inner.store.insert_task(&task).unwrap();
+
+        let (sender, receiver) = watch::channel(Control::Run);
+        inner
+            .controls
+            .lock()
+            .unwrap()
+            .insert(task.id.clone(), sender);
+        let ctx = EngineCtx {
+            inner: inner.clone(),
+            task_id: task.id.clone(),
+            save_path: save_path.clone(),
+            probe: None,
+            control: receiver,
+        };
+        let engine = crate::engine::native::NativeEngine::new(config, None);
+        engine.run(ctx).await.unwrap();
+        let error = inner.complete(&task.id).await.unwrap_err();
+        assert!(error.contains("SHA-256"), "unexpected error: {error}");
+
+        let stored = inner.store.task(&task.id).unwrap().unwrap();
+        assert_ne!(stored.status, TaskStatus::Completed);
         let _ = std::fs::remove_dir_all(&base);
     }
 

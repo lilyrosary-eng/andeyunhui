@@ -63,11 +63,22 @@ impl DownloadEngine for CurlEngine {
         }
 
         let meta = HttpMeta::from_task(&task);
-        let probe = match ctx.probe() {
-            Some(probe) => probe,
-            None => probe::probe(&self.client, &task.urls[0], &meta)
-                .await
-                .unwrap_or_default(),
+        // 已有半成品时不切源，避免把不同镜像的字节拼在一起。
+        let existing = tokio::fs::metadata(&save_path)
+            .await
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let (source_url, probe) = match ctx.probe() {
+            Some(probe) => (task.urls[0].clone(), probe),
+            None if existing > 0 => {
+                let result = probe::probe(&self.client, &task.urls[0], &meta)
+                    .await
+                    .unwrap_or_default();
+                (task.urls[0].clone(), result)
+            }
+            None => {
+                probe::select_source(&self.client, &task.urls[0], &task.mirrors, &meta).await
+            }
         };
         let total = probe.total_bytes.max(task.total_bytes);
         if let Some(max) = task.max_bytes {
@@ -83,10 +94,7 @@ impl DownloadEngine for CurlEngine {
             return Ok(outcome);
         }
 
-        let mut partial = tokio::fs::metadata(&save_path)
-            .await
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+        let mut partial = existing;
         if total > 0 && partial >= total {
             ctx.set_progress(partial, total);
             return Ok(EngineOutcome::Done);
@@ -126,6 +134,12 @@ impl DownloadEngine for CurlEngine {
             .arg(self.config.retries.min(5).to_string())
             .arg("--retry-delay")
             .arg("1");
+        if let Some(speed) = task.max_speed {
+            command.arg("--limit-rate").arg(speed.to_string());
+        }
+        if let Some(proxy) = self.config.proxy.as_deref().filter(|s| !s.is_empty()) {
+            command.arg("--proxy").arg(proxy);
+        }
         if partial > 0 && resume {
             command.arg("--continue-at").arg("-");
         }
@@ -138,7 +152,7 @@ impl DownloadEngine for CurlEngine {
         for (name, value) in &task.headers {
             command.arg("--header").arg(format!("{name}: {value}"));
         }
-        command.arg(&task.urls[0]);
+        command.arg(&source_url);
 
         external::run_tool(command, "cURL", &save_path, total, &ctx).await
     }

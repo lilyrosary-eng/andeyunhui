@@ -161,6 +161,15 @@ pub struct DownloadSpec {
     /// 大小上限（字节），超过则拒绝，避免异常大文件写爆磁盘。
     #[serde(default)]
     pub max_bytes: Option<u64>,
+    /// 同一文件的备用源（镜像）。仅单地址任务生效；主地址失败时按顺序尝试。
+    #[serde(default)]
+    pub mirrors: Vec<String>,
+    /// 完成后校验的 SHA-256（64 位十六进制，可带 `sha256:` 前缀）。
+    #[serde(default)]
+    pub sha256: Option<String>,
+    /// 单任务限速（字节/秒，0 或空 = 不限）；缺省取全局配置。
+    #[serde(default)]
+    pub max_speed: Option<u64>,
 }
 
 /// 下载任务（不含分片明细，列表接口用它）。
@@ -190,6 +199,15 @@ pub struct DownloadTask {
     pub downloaded_bytes: u64,
     #[serde(default)]
     pub max_bytes: Option<u64>,
+    /// 备用源（镜像）。
+    #[serde(default)]
+    pub mirrors: Vec<String>,
+    /// 完成校验用 SHA-256（小写 hex）。
+    #[serde(default)]
+    pub sha256: Option<String>,
+    /// 单任务限速（字节/秒）；None = 不限。
+    #[serde(default)]
+    pub max_speed: Option<u64>,
     pub connections: u32,
     #[serde(default)]
     pub error: Option<String>,
@@ -249,6 +267,11 @@ pub struct EngineConfig {
     /// 两次读数据之间的最长静默时间；不限制整个请求，避免大文件被总时限掐断。
     pub read_timeout_secs: u64,
     pub user_agent: String,
+    /// 单任务默认限速（字节/秒，0 = 不限）。
+    pub speed_limit: u64,
+    /// HTTP / SOCKS 代理，例如 `http://127.0.0.1:7890`；空 = 不使用代理。
+    #[serde(default)]
+    pub proxy: Option<String>,
     /// aria2c 可执行文件路径；留空则自动在 external-deps / PATH 查找。
     #[serde(default)]
     pub aria2_path: Option<String>,
@@ -281,6 +304,8 @@ impl Default for EngineConfig {
             connect_timeout_secs: 20,
             read_timeout_secs: 60,
             user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36".to_string(),
+            speed_limit: 0,
+            proxy: None,
             aria2_path: None,
             ffmpeg_path: None,
             curl_path: None,
@@ -310,6 +335,7 @@ impl EngineConfig {
         self.curl_path = normalize_path(self.curl_path);
         self.wget_path = normalize_path(self.wget_path);
         self.gopeed_path = normalize_path(self.gopeed_path);
+        self.proxy = normalize_path(self.proxy);
         self
     }
 }

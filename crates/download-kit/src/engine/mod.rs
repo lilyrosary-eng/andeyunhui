@@ -8,6 +8,7 @@ pub mod curl;
 pub(crate) mod external;
 pub mod ffmpeg;
 pub mod gopeed;
+pub(crate) mod limiter;
 pub mod native;
 pub mod simple;
 pub(crate) mod tool;
@@ -250,7 +251,7 @@ pub fn build_registry(
     );
     registry.insert(
         EngineKind::Gopeed,
-        Arc::new(gopeed::GopeedEngine::new(gopeed)),
+        Arc::new(gopeed::GopeedEngine::new(config.clone(), gopeed)),
     );
     registry
 }

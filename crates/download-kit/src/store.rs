@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   total_bytes     INTEGER NOT NULL DEFAULT 0,
   downloaded_bytes INTEGER NOT NULL DEFAULT 0,
   max_bytes       INTEGER,
+  mirrors         TEXT NOT NULL DEFAULT '[]',
+  sha256          TEXT,
+  max_speed       INTEGER,
   connections     INTEGER NOT NULL DEFAULT 1,
   error           TEXT,
   created_at      INTEGER NOT NULL,
@@ -68,6 +71,7 @@ impl Store {
             .map_err(|e| format!("设置数据库忙等待失败: {e}"))?;
         conn.execute_batch(SCHEMA)
             .map_err(|e| format!("初始化下载数据库失败: {e}"))?;
+        ensure_columns(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -84,13 +88,15 @@ impl Store {
             .map_err(|e| format!("序列化下载地址失败: {e}"))?;
         let headers = serde_json::to_string(&task.headers)
             .map_err(|e| format!("序列化请求头失败: {e}"))?;
+        let mirrors = serde_json::to_string(&task.mirrors)
+            .map_err(|e| format!("序列化镜像地址失败: {e}"))?;
         let conn = self.lock()?;
         conn.execute(
             "INSERT INTO tasks (
                 id, urls, save_path, filename, referer, cookie, user_agent, headers,
                 engine, resolved_engine, status, total_bytes, downloaded_bytes, max_bytes,
-                connections, error, created_at, updated_at, completed_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                mirrors, sha256, max_speed, connections, error, created_at, updated_at, completed_at
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
             params![
                 task.id,
                 urls,
@@ -106,6 +112,9 @@ impl Store {
                 task.total_bytes as i64,
                 task.downloaded_bytes as i64,
                 task.max_bytes.map(|v| v as i64),
+                mirrors,
+                task.sha256,
+                task.max_speed.map(|v| v as i64),
                 task.connections as i64,
                 task.error,
                 task.created_at,
@@ -380,6 +389,7 @@ impl Store {
 fn row_to_task(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
     let urls_raw: String = row.get("urls")?;
     let headers_raw: String = row.get("headers")?;
+    let mirrors_raw: String = row.get("mirrors")?;
     let engine_raw: String = row.get("engine")?;
     let resolved_raw: Option<String> = row.get("resolved_engine")?;
     let status_raw: String = row.get("status")?;
@@ -398,6 +408,9 @@ fn row_to_task(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
         total_bytes: row.get::<_, i64>("total_bytes")? as u64,
         downloaded_bytes: row.get::<_, i64>("downloaded_bytes")? as u64,
         max_bytes: row.get::<_, Option<i64>>("max_bytes")?.map(|v| v as u64),
+        mirrors: serde_json::from_str(&mirrors_raw).unwrap_or_default(),
+        sha256: row.get("sha256")?,
+        max_speed: row.get::<_, Option<i64>>("max_speed")?.map(|v| v as u64),
         connections: row.get::<_, i64>("connections")?.max(1) as u32,
         error: row.get("error")?,
         created_at: row.get("created_at")?,
@@ -417,4 +430,71 @@ fn row_to_part(row: &Row<'_>) -> rusqlite::Result<DownloadPart> {
         state: PartState::parse(&state_raw).unwrap_or(PartState::Pending),
         temp_path: row.get("temp_path")?,
     })
+}
+
+/// 轻量迁移：老库缺新列时补齐，避免用户升级后任务表读不出来。
+fn ensure_columns(conn: &Connection) -> Result<(), String> {
+    let existing: Vec<String> = {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(tasks)")
+            .map_err(|e| format!("读取任务表结构失败: {e}"))?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("读取任务表字段失败: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("读取任务表字段失败: {e}"))?;
+        names
+    };
+
+    let additions = [
+        ("mirrors", "TEXT NOT NULL DEFAULT '[]'"),
+        ("sha256", "TEXT"),
+        ("max_speed", "INTEGER"),
+    ];
+    for (name, declaration) in additions {
+        if !existing.iter().any(|column| column == name) {
+            conn.execute(
+                &format!("ALTER TABLE tasks ADD COLUMN {name} {declaration}"),
+                [],
+            )
+            .map_err(|e| format!("迁移任务表字段 {name} 失败: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_table_gets_new_columns() {
+        let base = std::env::temp_dir().join(format!(
+            "download-kit-store-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let conn = Connection::open(base.join("tasks.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, created_at INTEGER);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open(&base).unwrap();
+        let guard = store.conn.lock().unwrap();
+        let mut stmt = guard.prepare("PRAGMA table_info(tasks)").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        drop(stmt);
+        drop(guard);
+
+        assert!(columns.contains(&"mirrors".to_string()));
+        assert!(columns.contains(&"sha256".to_string()));
+        assert!(columns.contains(&"max_speed".to_string()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

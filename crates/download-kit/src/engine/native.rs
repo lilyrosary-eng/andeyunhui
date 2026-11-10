@@ -1,4 +1,4 @@
-//! 综合下载引擎1：内置分块多连接引擎。
+﻿//! 综合下载引擎1：内置分块多连接引擎。
 //!
 //! 只使用公开的 HTTP 语义：
 //! - 探测拿 `Content-Length` / `Accept-Ranges`，按连接数切分片；
@@ -19,6 +19,7 @@ use reqwest::header::RANGE;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::process::Command;
 
+use crate::engine::limiter::SpeedLimiter;
 use crate::engine::{DownloadEngine, EngineCtx, EngineOutcome, PartResult};
 use crate::manager::{Control, TaskProgress};
 use crate::probe::{self, HttpMeta};
@@ -104,12 +105,23 @@ impl NativeEngine {
         kind: EngineKind,
     ) -> Result<EngineOutcome, String> {
         let meta = HttpMeta::from_task(&task);
-        let probe = match ctx.probe() {
-            Some(probe) => probe,
-            None => probe::probe(&self.client, &task.urls[0], &meta)
-                .await
-                .unwrap_or_default(),
+        // 已有分片时不切源：不同镜像的同名文件不保证字节一致，混着续会写坏。
+        let has_progress = parts
+            .iter()
+            .any(|part| part.downloaded > 0 || part.state == PartState::Completed);
+        let (source_url, probe) = match ctx.probe() {
+            Some(probe) => (task.urls[0].clone(), probe),
+            None if has_progress => {
+                let result = probe::probe(&self.client, &task.urls[0], &meta)
+                    .await
+                    .unwrap_or_default();
+                (task.urls[0].clone(), result)
+            }
+            None => {
+                probe::select_source(&self.client, &task.urls[0], &task.mirrors, &meta).await
+            }
         };
+        task.urls[0] = source_url;
         if probe.total_bytes > 0 {
             task.total_bytes = probe.total_bytes;
         }
@@ -155,6 +167,10 @@ impl NativeEngine {
         for part in &parts {
             final_progress.seed(part);
         }
+        let limiter = task
+            .max_speed
+            .and_then(SpeedLimiter::new)
+            .map(Arc::new);
 
         let mut attempt = self
             .download_parts(
@@ -164,6 +180,7 @@ impl NativeEngine {
                 &final_progress,
                 task.connections as usize,
                 multipart,
+                limiter.clone(),
             )
             .await;
 
@@ -181,7 +198,15 @@ impl NativeEngine {
                     retry_progress.seed(part);
                 }
                 attempt = self
-                    .download_parts(&ctx, &task, &reloaded, &retry_progress, 1, multipart)
+                    .download_parts(
+                        &ctx,
+                        &task,
+                        &reloaded,
+                        &retry_progress,
+                        1,
+                        multipart,
+                        limiter.clone(),
+                    )
                     .await;
                 if attempt.is_ok() {
                     final_progress = retry_progress;
@@ -202,6 +227,7 @@ impl NativeEngine {
                     &retry_progress,
                     1,
                     false,
+                    limiter.clone(),
                 )
                 .await;
             if attempt.is_ok() {
@@ -292,6 +318,10 @@ impl NativeEngine {
         for part in &parts {
             progress.seed(part);
         }
+        let limiter = task
+            .max_speed
+            .and_then(SpeedLimiter::new)
+            .map(Arc::new);
 
         ctx.transition(TaskStatus::Downloading)?;
         ctx.emit_state();
@@ -309,6 +339,7 @@ impl NativeEngine {
                 &mut owned,
                 &progress,
                 false,
+                limiter.clone(),
             )
             .await
             .map_err(|error| error.message)?;
@@ -510,6 +541,7 @@ impl NativeEngine {
         progress: &Arc<TaskProgress>,
         connections: usize,
         multipart: bool,
+        limiter: Option<Arc<SpeedLimiter>>,
     ) -> Result<PartsOutcome, PartsError> {
     let pending: Vec<DownloadPart> = parts
         .iter()
@@ -531,6 +563,7 @@ impl NativeEngine {
                 &mut part,
                 progress,
                 multipart,
+                limiter.clone(),
             )
             .await
             {
@@ -551,6 +584,7 @@ impl NativeEngine {
         let client = self.client.clone();
         let config = self.config.clone();
         let progress = progress.clone();
+        let limiter = limiter.clone();
         set.spawn(async move {
             let mut part = part;
             download_part(
@@ -561,6 +595,7 @@ impl NativeEngine {
                 &mut part,
                 &progress,
                 multipart,
+                limiter,
             )
             .await
         });
@@ -604,6 +639,7 @@ async fn download_part(
     part: &mut DownloadPart,
     progress: &Arc<TaskProgress>,
     multipart: bool,
+    limiter: Option<Arc<SpeedLimiter>>,
 ) -> Result<PartResult, PartsError> {
     let mut attempt = 0u32;
     loop {
@@ -613,7 +649,17 @@ async fn download_part(
             Control::Run => {}
         }
 
-        match download_once(client, ctx, task, part, progress, multipart).await {
+        match download_once(
+            client,
+            ctx,
+            task,
+            part,
+            progress,
+            multipart,
+            limiter.as_deref(),
+        )
+        .await
+        {
             Ok(()) => {
                 part.state = PartState::Completed;
                 progress.parts_done.fetch_add(1, Ordering::Relaxed);
@@ -664,6 +710,7 @@ async fn download_once(
     part: &mut DownloadPart,
     progress: &Arc<TaskProgress>,
     multipart: bool,
+    limiter: Option<&SpeedLimiter>,
 ) -> Result<(), PartFailure> {
     let expected = part.expected();
     if expected > 0 && part.downloaded >= expected {
@@ -766,6 +813,13 @@ async fn download_once(
             .map_err(|e| PartFailure::Fatal(format!("写入分片失败: {e}")))?;
         part.downloaded += length;
         progress.downloaded.fetch_add(length, Ordering::Relaxed);
+        if let Some(limiter) = limiter {
+            if let Some(failure) = throttle(limiter, length, ctx).await {
+                let _ = file.flush().await;
+                let _ = ctx.update_part(part);
+                return Err(failure);
+            }
+        }
         if ctx.tick(progress) {
             let _ = ctx.update_part(part);
         }
@@ -784,6 +838,23 @@ async fn download_once(
         )));
     }
     Ok(())
+}
+
+/// 限速等待：每 200ms 检查一次控制信号，低速限速下暂停也能及时生效。
+async fn throttle(limiter: &SpeedLimiter, bytes: u64, ctx: &EngineCtx) -> Option<PartFailure> {
+    loop {
+        match limiter.reserve(bytes) {
+            None => return None,
+            Some(wait) => {
+                tokio::time::sleep(wait.min(Duration::from_millis(200))).await;
+                match ctx.control_state() {
+                    Control::Pause => return Some(PartFailure::Paused),
+                    Control::Cancel => return Some(PartFailure::Canceled),
+                    Control::Run => {}
+                }
+            }
+        }
+    }
 }
 
 async fn sleep_with_control(ctx: &EngineCtx, millis: u64) -> Option<PartResult> {
@@ -951,6 +1022,9 @@ mod tests {
             total_bytes: total,
             downloaded_bytes: 0,
             max_bytes: None,
+            mirrors: Vec::new(),
+            sha256: None,
+            max_speed: None,
             connections,
             error: None,
             created_at: 0,
@@ -990,3 +1064,4 @@ mod tests {
         assert_eq!(parts[0].end, 0);
     }
 }
+

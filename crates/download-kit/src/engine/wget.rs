@@ -62,11 +62,22 @@ impl DownloadEngine for WgetEngine {
         }
 
         let meta = HttpMeta::from_task(&task);
-        let probe = match ctx.probe() {
-            Some(probe) => probe,
-            None => probe::probe(&self.client, &task.urls[0], &meta)
-                .await
-                .unwrap_or_default(),
+        // 已有半成品时不切源，避免把不同镜像的字节拼在一起。
+        let existing = tokio::fs::metadata(&save_path)
+            .await
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let (source_url, probe) = match ctx.probe() {
+            Some(probe) => (task.urls[0].clone(), probe),
+            None if existing > 0 => {
+                let result = probe::probe(&self.client, &task.urls[0], &meta)
+                    .await
+                    .unwrap_or_default();
+                (task.urls[0].clone(), result)
+            }
+            None => {
+                probe::select_source(&self.client, &task.urls[0], &task.mirrors, &meta).await
+            }
         };
         let total = probe.total_bytes.max(task.total_bytes);
         if let Some(max) = task.max_bytes {
@@ -82,10 +93,7 @@ impl DownloadEngine for WgetEngine {
             return Ok(outcome);
         }
 
-        let mut partial = tokio::fs::metadata(&save_path)
-            .await
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+        let mut partial = existing;
         if total > 0 && partial >= total {
             ctx.set_progress(partial, total);
             return Ok(EngineOutcome::Done);
@@ -117,6 +125,18 @@ impl DownloadEngine for WgetEngine {
             .arg(self.config.connect_timeout_secs.to_string())
             .arg("--waitretry")
             .arg("1");
+        if let Some(speed) = task.max_speed {
+            command.arg("--limit-rate").arg(speed.to_string());
+        }
+        if let Some(proxy) = self.config.proxy.as_deref().filter(|s| !s.is_empty()) {
+            // wget 没有统一的 --proxy 参数，走它支持的环境变量。
+            command
+                .env("http_proxy", proxy)
+                .env("https_proxy", proxy)
+                .env("all_proxy", proxy)
+                .env_remove("no_proxy")
+                .env_remove("NO_PROXY");
+        }
         if partial > 0 && resume {
             command.arg("--continue");
         }
@@ -129,7 +149,7 @@ impl DownloadEngine for WgetEngine {
         for (name, value) in &task.headers {
             command.arg("--header").arg(format!("{name}: {value}"));
         }
-        command.arg(&task.urls[0]);
+        command.arg(&source_url);
 
         external::run_tool(command, "Wget", &save_path, total, &ctx).await
     }

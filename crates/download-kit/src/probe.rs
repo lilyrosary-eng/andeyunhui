@@ -49,12 +49,23 @@ impl HttpMeta {
 }
 
 pub fn build_client(config: &EngineConfig) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        // 与既有下载命令一致：不走系统代理，避免本地代理拦截/劫持大文件下载。
-        .no_proxy()
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(config.connect_timeout_secs.max(1)))
         // read_timeout 是「两次读到数据之间」的上限，不是整个请求；大文件不会被总时限掐断。
-        .read_timeout(Duration::from_secs(config.read_timeout_secs.max(1)))
+        .read_timeout(Duration::from_secs(config.read_timeout_secs.max(1)));
+    builder = match config
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(proxy) => builder.proxy(
+            reqwest::Proxy::all(proxy).map_err(|e| format!("代理配置无效（{proxy}）: {e}"))?,
+        ),
+        // 未显式配置代理时保持既有行为：不走系统代理，避免本地代理劫持大文件下载。
+        None => builder.no_proxy(),
+    };
+    builder
         .build()
         .map_err(|e| format!("创建下载客户端失败: {e}"))
 }
@@ -83,6 +94,25 @@ pub fn apply_headers(
         request = request.header(name, value);
     }
     request
+}
+
+/// 主地址探测失败时按顺序尝试镜像；返回第一个可用源。
+/// 只做「启动时源切换」，不在下载中途切源（分片偏移可能与另一源不一致）。
+pub async fn select_source(
+    client: &reqwest::Client,
+    primary: &str,
+    mirrors: &[String],
+    meta: &HttpMeta,
+) -> (String, ProbeResult) {
+    if let Ok(result) = probe(client, primary, meta).await {
+        return (primary.to_string(), result);
+    }
+    for mirror in mirrors {
+        if let Ok(result) = probe(client, mirror, meta).await {
+            return (mirror.clone(), result);
+        }
+    }
+    (primary.to_string(), ProbeResult::default())
 }
 
 /// 探测 URL。先 HEAD，再用 Range 复核（部分服务器 HEAD 不给全信息）。
@@ -212,4 +242,23 @@ fn content_disposition_filename(headers: &HeaderMap) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_client_builds_without_proxy() {
+        assert!(build_client(&EngineConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn invalid_proxy_is_rejected() {
+        let config = EngineConfig {
+            proxy: Some("http://[::bad".to_string()),
+            ..Default::default()
+        };
+        assert!(build_client(&config).is_err());
+    }
 }
