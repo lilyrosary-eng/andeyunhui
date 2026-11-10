@@ -33,7 +33,7 @@ static CANCELLED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 pub const MAX_TASK_DEPTH: usize = 4;
 /// 单房间同时未结束（queued / running / waiting）的任务上限。
 pub const MAX_ACTIVE_TASKS: usize = 64;
-/// 内置模型单次调用上限：端点偶发不返回时不能把任务永久卡在 running。
+/// 自有模型单次调用上限：端点偶发不返回时不能把任务永久卡在 running。
 const NATIVE_TIMEOUT_SECS: u64 = 300;
 
 fn board_lock() -> &'static Mutex<()> {
@@ -1335,7 +1335,7 @@ async fn wait_cancelled(assignment_id: &str) {
     }
 }
 
-/// 应用内置模型执行器（native）：
+/// 应用自有模型执行器（native）：
 /// - 不拉起外部进程，prompt 交给宿主注册的 runner（宿主的 AI 配置 + 成员模型）；
 /// - 与 dsh headless 同为一次性调用，因此也注入共享会话最近上下文；
 /// - 取消 / 超时都只结束任务，不覆盖 `assignment.cancelled` 事件。
@@ -1363,7 +1363,7 @@ async fn run_native_assignment(
         AssignmentStatus::Running,
         "assignment.running",
         Some(format!(
-            "{} 已接单（应用内置模型）",
+            "{} 已接单（自有模型）",
             agent_name(&room, &assignment.assignee_id)
         )),
     );
@@ -1375,9 +1375,9 @@ async fn run_native_assignment(
         Some(assignment.assignee_id.clone()),
         Some(assignment.id.clone()),
         Some(if model.is_empty() {
-            "正在调用应用内置模型（跟随设置页当前模型）".to_string()
+            "正在调用自有模型（跟随设置页当前模型）".to_string()
         } else {
-            format!("正在调用应用内置模型：{model}")
+            format!("正在调用自有模型：{model}")
         }),
         None,
         None,
@@ -1405,7 +1405,7 @@ async fn run_native_assignment(
         result = tokio::time::timeout(Duration::from_secs(NATIVE_TIMEOUT_SECS), future) => {
             match result {
                 Ok(done) => done,
-                Err(_) => Err(format!("内置模型调用超时（{NATIVE_TIMEOUT_SECS}s）")),
+                Err(_) => Err(format!("自有模型调用超时（{NATIVE_TIMEOUT_SECS}s）")),
             }
         }
     };
@@ -1417,7 +1417,7 @@ async fn run_native_assignment(
         Ok(text) => {
             let trimmed = text.trim();
             let text = if trimmed.is_empty() {
-                "（内置模型未返回文本）".to_string()
+                "（自有模型未返回文本）".to_string()
             } else {
                 trimmed.to_string()
             };

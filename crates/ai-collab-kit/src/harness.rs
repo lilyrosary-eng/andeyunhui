@@ -34,7 +34,8 @@ pub const MCP: &str = "mcp";
 pub const ACP: &str = "acp";
 pub const STREAM_JSON: &str = "stream-json";
 pub const MAILBOX: &str = "mailbox";
-/// 应用内置模型（宿主 AI 配置）：不拉起外部进程，成员 `model` 填模型 id。
+/// 自有 harness（安得云荟自身）：进程内执行，模型来自宿主 AI 配置，不依赖任何外部 CLI。
+/// 注意：`dsh` 是**外部** harness（本机 CLI 子进程），与它只是进程/协议级调用，没有深度耦合。
 pub const NATIVE: &str = "native";
 
 const DSH_CONFIG_FILE: &str = "dsh.json";
@@ -389,46 +390,46 @@ pub fn catalog(app: &AppHandle) -> Vec<HarnessInfo> {
         EchoHarness.info(),
         HarnessInfo {
             id: NATIVE.to_string(),
-            name: "应用内置模型".to_string(),
+            name: "安得云荟（自有）".to_string(),
             kind: NATIVE.to_string(),
             available: crate::native::is_registered(),
             detail: if crate::native::is_registered() {
-                "直接使用设置页里的 AI 模型配置，不拉起外部进程；成员 model 填模型 id 即可用不同模型。".to_string()
+                "自有 harness：进程内执行，直接使用设置页里的 AI 模型配置，不依赖任何外部 CLI；成员 model 填模型 id 即可用不同模型。".to_string()
             } else {
-                "当前宿主未注册内置模型 runner（仅桌面版注入）。".to_string()
+                "当前宿主未注册自有模型 runner（仅桌面版注入）。".to_string()
             },
         },
         HarnessInfo {
             id: DSH.to_string(),
-            name: "DeepSeek Harness（本地）".to_string(),
+            name: "DeepSeek Harness（外部）".to_string(),
             kind: "headless".to_string(),
             available,
             detail,
         },
         HarnessInfo {
             id: MCP.to_string(),
-            name: "MCP 外部 harness".to_string(),
+            name: "MCP（外部）".to_string(),
             kind: MCP.to_string(),
             available: true,
-            detail: "任务只入队，由外部 harness（Trae / WorkBuddy）通过 ai-collab-mcp 认领并回报结果。".to_string(),
+            detail: "外部 harness：任务只入队，由 Trae / WorkBuddy 等通过 ai-collab-mcp 认领并回报结果；模型由对方决定。".to_string(),
         },
         HarnessInfo {
             id: ACP.to_string(),
-            name: "ACP CLI".to_string(),
+            name: "ACP（外部）".to_string(),
             kind: ACP.to_string(),
             available: false,
             detail: "P2：通过 Agent Client Protocol 获得流式更新与权限桥接。".to_string(),
         },
         HarnessInfo {
             id: STREAM_JSON.to_string(),
-            name: "通用 CLI（stream-json）".to_string(),
+            name: "通用 CLI（外部）".to_string(),
             kind: STREAM_JSON.to_string(),
             available: stream_available,
             detail: stream_detail,
         },
         HarnessInfo {
             id: MAILBOX.to_string(),
-            name: ".Talk 信箱".to_string(),
+            name: ".Talk 信箱（外部）".to_string(),
             kind: MAILBOX.to_string(),
             available: true,
             detail: "P3：房间绑定工作目录后生效 —— 任务写进 .adyh/collab/rooms/<id>/tasks/，外部 harness 写 results/ 回传结果；适合只能开 IDE 的参与者。".to_string(),

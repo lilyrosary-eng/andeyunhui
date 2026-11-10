@@ -1,4 +1,7 @@
-//! 应用内置模型 harness（native）的宿主注入点。
+//! 应用自有模型 harness（native）的宿主注入点。
+//!
+//! 「自有」指应用进程内执行、使用宿主自己的 AI 配置；dsh / MCP / CLI / 信箱都是外部 harness，
+//! 它们各自有独立的进程或协议边界，不在这里实现。
 //!
 //! ## 为什么是注册表而不是直接依赖
 //! `ai-collab-kit` 是可拆卸内核，不能反过来依赖宿主（`andeyunhui_lib`）的 AI 服务。
@@ -13,7 +16,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
-/// 一次内置模型调用的输入。
+/// 一次自有模型调用的输入。
 #[derive(Debug, Clone)]
 pub struct NativeRequest {
     pub room_id: String,
@@ -34,7 +37,7 @@ pub trait NativeRunner: Send + Sync {
 
 static RUNNER: OnceLock<Arc<dyn NativeRunner>> = OnceLock::new();
 
-/// 注册内置模型 runner。只接受一次注册：返回 false 表示已有实现，调用方可忽略。
+/// 注册自有模型 runner。只接受一次注册：返回 false 表示已有实现，调用方可忽略。
 pub fn register(runner: Arc<dyn NativeRunner>) -> bool {
     RUNNER.set(runner).is_ok()
 }
@@ -48,7 +51,7 @@ pub fn is_registered() -> bool {
 pub(crate) fn run(request: NativeRequest) -> Result<NativeFuture, String> {
     let runner = RUNNER
         .get()
-        .ok_or_else(|| "内置模型未注册：native harness 仅在桌面版可用".to_string())?;
+        .ok_or_else(|| "自有模型 runner 未注册：native harness 仅在桌面版可用".to_string())?;
     Ok(runner.run(request))
 }
 

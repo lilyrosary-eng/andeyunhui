@@ -65,12 +65,12 @@ function agentName(room: CollabRoom | null, agentId: string | null | undefined):
 /** harness 短名：界面上不直接抛 `stream-json` / `native` 这类内部 id。 */
 const HARNESS_LABEL: Record<string, string> = {
   echo: 'Echo',
-  native: '内置模型',
+  native: '安得云荟',
   dsh: 'DeepSeek',
   mcp: 'MCP',
   acp: 'ACP',
   'stream-json': 'CLI',
-  mailbox: '信箱',
+  mailbox: '.Talk 信箱',
 };
 
 function harnessLabel(harnessId: string): string {
@@ -78,7 +78,8 @@ function harnessLabel(harnessId: string): string {
 }
 
 /** 成员副标签：harness 名 + 成员模型。
- *  模型只在应用真的知道它时显示；MCP / 信箱 / CLI 的模型在对方侧，写出来就是假信息。 */
+ *  只有我们确实知道模型时才显示：自有 harness（安得云荟）与 dsh 的模型由本应用配置；
+ *  MCP / 信箱 / CLI 的模型在对方侧，写出来就是假信息。 */
 function agentMeta(agent: CollabAgent): string {
   const model = agent.model?.trim();
   return model ? `${harnessLabel(agent.harnessId)} · ${model}` : harnessLabel(agent.harnessId);
@@ -595,8 +596,8 @@ function RoomBuilderDialog({
           ))}
 
           <div className="text-[11px] leading-relaxed text-neutral-400 dark:text-stone-500">
-            任何可用 harness 都能当主导，没有优先级；应用内置模型、DeepSeek、MCP 与 .Talk 信箱可以同室。
-            外部 harness 的任务只入队/投递，由对方认领。
+            任何成员都能当主导，没有优先级。自有 harness（安得云荟）与外部 harness（DeepSeek / MCP /
+            信箱 / CLI）可以同室；外部成员的任务只入队或投递，由对方认领。
           </div>
 
           <div className="flex items-center justify-between pt-1">
