@@ -24,6 +24,10 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const hostApi = window.__HOST_API__;
 import { WebTerminal } from './Terminal';
 import { WebSidebarShell, GlobeIcon, type WebSidebarItem } from './WebSidebarShell';
+import { CloudDrawer, CloudIcon } from '@shared/CloudDrawer';
+import { OnlineWebView } from './online/OnlineWebView';
+import { toWebSite } from './online/webPlatforms';
+import { useNetworkSites } from '@shared/useNetworkSites';
 import {
   loadPresets, savePresets, newPresetId, validatePreset,
   suggestFromFile, scanAndRecognize, recognitionToPreset, baseName, dirName, extOf, RUNNABLE_EXTS,
@@ -821,6 +825,11 @@ function WebInterfaceModule() {
   const [showSettings, setShowSettings] = useState(false);
   const [showTerminal, setShowTerminal] = useState(true);
   const [refreshSignal, setRefreshSignal] = useState(0);
+  // 「云」入口：网络站点视图 + 站点选择抽屉（与视频/图片/笔记同一套交互）
+  const [showNetwork, setShowNetwork] = useState(false);
+  const [networkDrawerOpen, setNetworkDrawerOpen] = useState(false);
+  // 站点列表实时订阅共享注册表：设置在「茑萝 → 网络拓展」增删后抽屉立即刷新
+  const webSiteList = useNetworkSites('web').map(toWebSite);
   // 终止确认弹窗：点「终止」先提示保存，确认后才真正停止并强杀进程树
   const [confirmStop, setConfirmStop] = useState(false);
   // 每次启动自增，作为 RunPane 的 key 强制重挂 → 重复启动也能真正重启
@@ -982,13 +991,30 @@ function WebInterfaceModule() {
     }));
   }, [filtered, serviceRunning]);
 
+  // 「云」按钮：与视频 / 图片 / 笔记模块同一位置、同一套样式与同一个 SVG
+  const cloudButton = React.createElement(
+    'button',
+    {
+      onClick: () => setNetworkDrawerOpen((v) => !v),
+      title: '云',
+      className: `btn-press flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs transition-colors ${
+        showNetwork || networkDrawerOpen
+          ? 'text-[var(--element-color-raw)] bg-[var(--element-muted)]'
+          : 'text-neutral-500 dark:text-stone-400 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)]'
+      }`,
+    },
+    React.createElement(CloudIcon, { key: 'i', size: 15 }),
+    React.createElement('span', { key: 't' }, '云'),
+  );
+
   return (
     <>
-    <div className="flex h-full w-full gap-3 overflow-hidden">
+    <div className="relative flex h-full w-full gap-3 overflow-hidden">
       {/* 左侧：统一侧边栏（复用宿主 ModuleSidebarShell + 右键菜单） */}
       <WebSidebarShell
         icon={<GlobeIcon />}
         title="Web 接口"
+        titleActions={cloudButton}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         searchPlaceholder="搜索预设"
@@ -1061,6 +1087,56 @@ function WebInterfaceModule() {
           </div>
         )}
       </div>
+
+      {/* 网络站点视图：绝对定位覆盖在上层。
+          刻意**不卸载**下层内容 —— 本地服务可能正在跑（RunPane 里的 PTY 一旦卸载就会被杀），
+          这里只是把它盖住，服务与终端都保持原样。 */}
+      {showNetwork && (
+        <div className="absolute inset-0 z-30 flex bg-[var(--nav-bg)]">
+          <OnlineWebView
+            onExit={() => setShowNetwork(false)}
+            onOpenModuleSettings={handleOpenSettings}
+          />
+        </div>
+      )}
+
+      {/* 站点选择抽屉：与视频「云视频」/ 图片「网络图片」/ 笔记「网络检索」同一套组件 */}
+      <CloudDrawer
+        open={networkDrawerOpen}
+        onClose={() => setNetworkDrawerOpen(false)}
+        title="网络站点"
+        sectionLabel="站点来源"
+        groups={[
+          {
+            key: 'local',
+            title: '本地服务',
+            desc: '本机 Web 服务预设',
+            active: !showNetwork,
+            onSelect: () => {
+              setShowNetwork(false);
+              setNetworkDrawerOpen(false);
+            },
+          },
+          {
+            key: 'network',
+            title: '网络站点',
+            desc: '官方页面 · 浏览器窗口',
+            active: showNetwork,
+            defaultExpanded: true,
+            items: webSiteList.map((s) => ({
+              id: s.id,
+              name: s.name,
+              desc: s.desc,
+              accent: s.accent,
+            })),
+            onPick: () => {
+              setShowNetwork(true);
+              setNetworkDrawerOpen(false);
+            },
+          },
+        ]}
+        footer="只打开官方页面：登录与浏览都在站点自己完成，我们不抓取内容、不批量下载。"
+      />
     </div>
       {confirmStop && selected && (
         <ConfirmStopModal

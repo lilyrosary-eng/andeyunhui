@@ -13,7 +13,8 @@
 //  - 队列只增不减：补「清空已完成」（clearFinished 之前零调用）
 //  - 原生引擎开关状态不刷新：纯 API 架构下该开关已无意义，改为静态「支持 API」统计
 import React from 'react';
-import { VIDEO_PLATFORMS, apiPlatformCount, type OnlineVideoItem } from './videoPlatforms';
+import { toVideoPlatform, type OnlineVideoItem } from './videoPlatforms';
+import { useNetworkSites } from '../../../_shared/useNetworkSites';
 import { OnlineSidebarShell } from '@shared/OnlineSidebarShell';
 import { VideoIcon } from '@shared/icons';
 import { videoDownloadManager, type VideoDownloadTask } from './OnlineVideoDownloadManager';
@@ -73,8 +74,10 @@ export function OnlineVideoSidebar({
   const [dl, setDl] = useState<VideoDownloadTask[]>([]);
   useEffect(() => videoDownloadManager.subscribe(setDl), []);
 
-  const apiCount = apiPlatformCount();
-  const list = VIDEO_PLATFORMS.filter((p) => p.name.includes(search.trim()));
+  // 平台列表实时订阅共享注册表（设置里增删后无需重启）
+  const platforms = useNetworkSites('video').map(toVideoPlatform);
+  const apiCount = platforms.filter((p) => p.mode === 'api').length;
+  const list = platforms.filter((p) => p.name.includes(search.trim()));
   const activeDl = dl.filter((t) => t.status === 'downloading' || t.status === 'queued').length;
   const finishedDl = dl.filter((t) => t.status === 'done' || t.status === 'error' || t.status === 'canceled').length;
 
@@ -85,7 +88,7 @@ export function OnlineVideoSidebar({
     React.createElement(
       'div',
       { className: 'flex items-center gap-1.5 px-1 text-[11px] text-neutral-400 dark:text-stone-500' },
-      React.createElement('span', null, `共 ${VIDEO_PLATFORMS.length} 个平台`),
+      React.createElement('span', null, `共 ${platforms.length} 个平台`),
       React.createElement('span', { className: 'opacity-40' }, '·'),
       React.createElement('span', null, `${apiCount} 个支持 API`),
     ),

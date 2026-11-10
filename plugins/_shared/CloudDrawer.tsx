@@ -5,9 +5,52 @@
 //   标题栏云图标 + 右侧 w-80 滑出 + 遮罩 + 分组卡片（当前模块 / 云端列表）+ 可展开子项。
 // 这样三处入口的「云」按钮、抽屉宽窄、子项样式完全一致，用户只需要学一次。
 import React from 'react';
-import { CloudIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon } from './icons';
 
 const { useState, useEffect } = React;
+
+// 图标直接定义在本文件，**不从 `./icons` 导入**：
+// `_shared/icons.ts` 顶层是 `const React = window.__HOST_REACT__`，而宿主（src/）的
+// 静态 import 求值早于 PluginHost 挂载全局的 effect ⇒ 宿主里那个 React 是 undefined，
+// 抽屉一渲染就抛错，表现为「笔记模块点云按钮整个白屏」（插件侧因全局已就绪所以正常）。
+function SvgIcon({ size = 18, strokeWidth = 2, children }: {
+  size?: number; strokeWidth?: number; children: React.ReactNode;
+}) {
+  return React.createElement('svg', {
+    width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+    strokeWidth, strokeLinecap: 'round', strokeLinejoin: 'round',
+  }, children as never);
+}
+
+/** 云图标：路径与视频侧栏「云」按钮同源，保证三处入口看起来是同一个图标。 */
+export function CloudIcon(p: { size?: number; className?: string }) {
+  return (
+    <svg
+      width={p?.size || 18}
+      height={p?.size || 18}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={p?.className}
+    >
+      <path d="M17.5 19a4.5 4.5 0 0 0 .5-8.97 6 6 0 0 0-11.64-2A4 4 0 0 0 6.5 19h11z" />
+    </svg>
+  );
+}
+
+function CheckIcon(p: { size?: number }) {
+  return <SvgIcon size={p?.size || 14}><polyline points="20 6 9 17 4 12" /></SvgIcon>;
+}
+
+function ChevronDownIcon(p: { size?: number }) {
+  return <SvgIcon size={p?.size || 18}><polyline points="6 9 12 15 18 9" /></SvgIcon>;
+}
+
+function ChevronRightIcon(p: { size?: number }) {
+  return <SvgIcon size={p?.size || 18}><polyline points="9 6 15 12 9 18" /></SvgIcon>;
+}
 
 export interface CloudDrawerItem {
   id: string;

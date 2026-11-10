@@ -13,7 +13,8 @@ import {
   ChevronRightIcon,
 } from '../../_shared/icons';
 import { useLang } from '../../_shared/pluginRuntime';
-import { VIDEO_PLATFORMS } from './online/videoPlatforms';
+import { useNetworkSites } from '../../_shared/useNetworkSites';
+import { toVideoPlatform } from './online/videoPlatforms';
 
 interface VideoCloudDrawerProps {
   open: boolean;
@@ -144,6 +145,8 @@ export function VideoCloudDrawer({ open, onClose, isLocalActive, onOpenPlatform 
   const [mounted, setMounted] = useState(open);
   const [visible, setVisible] = useState(false);
   const [cloudExpanded, setCloudExpanded] = useState(true);
+  // 平台列表实时订阅共享注册表：用户在「设置 → 茑萝 → 网络拓展」增删后立即生效
+  const platforms = useNetworkSites('video').map(toVideoPlatform);
 
   useEffect(() => {
     if (open) {
@@ -200,7 +203,7 @@ export function VideoCloudDrawer({ open, onClose, isLocalActive, onOpenPlatform 
           title: '云端视频',
           accent: accents.cloud,
         },
-          VIDEO_PLATFORMS.map((p) => React.createElement(DrawerSubItem, {
+          platforms.map((p) => React.createElement(DrawerSubItem, {
             key: p.id,
             icon: React.createElement('div', {
               className: 'flex h-full w-full items-center justify-center rounded-lg text-white text-xs font-bold',

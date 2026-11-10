@@ -4,14 +4,15 @@
 // 形态与「网络视频」完全同构，便于三处（视频 / 笔记 / 图片）保持一套心智模型：
 // 侧栏换成源列表 → 主区显示对应内容。
 import React from 'react';
-import { IMAGE_PLATFORMS, type ImagePlatform } from './imagePlatforms';
+import { getImagePlatforms, toImagePlatform, type ImagePlatform } from './imagePlatforms';
+import { useNetworkSites } from '@shared/useNetworkSites';
 import { OnlineSidebarShell } from '@shared/OnlineSidebarShell';
 import { WebBrowserShell } from '@shared/WebBrowserShell';
 
 const { useState, useEffect } = React;
 
 interface Props {
-  /** 初始平台（当前只有 pixiv；保留参数便于以后加源） */
+  /** 初始平台（默认第一个；保留参数便于以后加源） */
   initialPlatformId?: string | null;
   onExit: () => void;
   onOpenModuleSettings?: () => void;
@@ -36,16 +37,18 @@ function ImageIcon() {
 }
 
 export function OnlineImageView({ initialPlatformId, onExit, onOpenModuleSettings }: Props) {
+  // 实时订阅共享注册表（设置里增删站点后立即刷新）
+  const platforms = useNetworkSites('image').map(toImagePlatform);
   const [activeId, setActiveId] = useState<string | null>(
-    initialPlatformId ?? IMAGE_PLATFORMS[0]?.id ?? null,
+    initialPlatformId ?? platforms[0]?.id ?? null,
   );
-  const platform = IMAGE_PLATFORMS.find((p) => p.id === activeId) ?? null;
+  const platform = platforms.find((p) => p.id === activeId) ?? null;
 
   // 离开网络视图时只关本模块的浏览器窗口（不能 close_all，否则会连带关掉视频的）
   useEffect(() => {
     return () => {
       const api: any = (window as any).__HOST_API__;
-      for (const p of IMAGE_PLATFORMS) {
+      for (const p of getImagePlatforms()) {
         void api?.invoke('browser_close', { target: p.id }).catch(() => {});
       }
     };
@@ -57,11 +60,11 @@ export function OnlineImageView({ initialPlatformId, onExit, onOpenModuleSetting
     React.createElement(
       'div',
       { className: 'flex items-center gap-1.5 px-1 text-[11px] text-neutral-400 dark:text-stone-500' },
-      React.createElement('span', null, `共 ${IMAGE_PLATFORMS.length} 个平台`),
+      React.createElement('span', null, `共 ${platforms.length} 个平台`),
       React.createElement('span', { className: 'opacity-40' }, '·'),
       React.createElement('span', null, '官方页面 · 浏览器窗口'),
     ),
-    IMAGE_PLATFORMS.map((p: ImagePlatform) => {
+    platforms.map((p: ImagePlatform) => {
       const isActive = activeId === p.id;
       return React.createElement(
         'button',

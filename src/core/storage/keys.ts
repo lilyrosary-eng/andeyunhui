@@ -16,6 +16,13 @@ export const KEYS = {
     // 默认 '1'（显示）：RAG 为默认开启的茑萝子模块；用户在「全局设置 → 茑萝」关掉后写 '0'，重启仍保持关闭
     ragVisible:        { key: 'niaoluo:rag-visible', kind: 'flag', scope: 'shared', default: '1' },
     capsuleTab:        { key: 'niaoluo:capsule-tab', kind: 'string', scope: 'shared', default: 'search' },
+    // 网络拓展：用户在「设置 → 茑萝」里为各模块追加的站点（JSON 数组，只存用户新增项；
+    // 内置站点仍写在各自插件里，避免升级覆盖）。插件侧经 plugins/_shared/networkSites.ts 读取。
+    networkSites:      { key: 'andeyunhui.network.sites', kind: 'json', scope: 'shared', note: '网络拓展自定义站点：video/image/web 三组' },
+  },
+  notes: {
+    // 网络检索结果的呈现方式：paged=分页 / infinite=无限下拉
+    networkLayout:     { key: 'andeyunhui.notes.network-layout', kind: 'string', scope: 'shared', default: 'infinite' },
   },
   aiPolish: {
     style:             { key: 'ai_polish_style', kind: 'string', scope: 'shared', default: 'keep' },

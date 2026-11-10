@@ -3,6 +3,7 @@ import { Switch } from "@/components/ui/switch"
 import { Slider } from "@/components/ui/slider"
 import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, ExternalLink, Database, Archive, FileText, File, Undo2, Trash2, ChevronDown, ChevronUp, RotateCcw, Search, Ban, Eye, FolderOpen, Cpu, Languages, UserRound } from 'lucide-react'
 import { ExtensionManagerPanel } from '@/core/settings/ExtensionManagerPanel'
+import { NetworkSitesPanel } from '@/core/settings/NetworkSitesPanel'
 import { BackgroundImageEditor } from '@/core/settings/BackgroundImageEditor'
 import { BlacklistManager } from '@/core/settings/BlacklistManager'
 import { ModelSettingsPage as ModelSettings } from './models/ModelSettingsPage'
@@ -1066,6 +1067,8 @@ export function GlobalSettingsPanel() {
           {activeTab === 'extensions' && (
             <div className="space-y-6">
               <ExtensionManagerPanel />
+              {/* 网络拓展：视频 / 图片 / Web 接口 三个模块的「云」站点清单（可增删） */}
+              <NetworkSitesPanel />
             </div>
           )}
 

@@ -51,6 +51,8 @@ export interface WebSidebarShellProps {
   onOpenModuleSettings?: () => void;
   /** 顶部主按钮：一键启动 / 终止 */
   primaryAction?: { label: string; onClick: () => void };
+  /** 标题栏右侧插槽（「云」按钮等，与视频/图片/笔记同位置） */
+  titleActions?: React.ReactNode;
   /** 底部「终端」开关 */
   onToggleTerminal?: () => void;
   terminalActive?: boolean;
@@ -144,7 +146,7 @@ function WebSidebarItem({ item, active, onSelect, onStart, onEdit, onDelete }: {
 
 export function WebSidebarShell({
   icon, title, searchQuery, onSearchChange, searchPlaceholder, onOpenModuleSettings,
-  primaryAction, onToggleTerminal, terminalActive, onRefresh,
+  primaryAction, titleActions, onToggleTerminal, terminalActive, onRefresh,
   onStart, onEdit, onDelete, items, selectedId, onSelect, emptyText,
 }: WebSidebarShellProps) {
   // 底部「终端 / 刷新」图标插槽（放在设置齿轮右侧，与宿主交互一致）
@@ -221,6 +223,7 @@ export function WebSidebarShell({
     onSearchChange,
     searchPlaceholder,
     primaryAction,
+    titleActions,
     footerExtra,
     children: SecondaryNavShell
       ? React.createElement(SecondaryNavShell, null, list)

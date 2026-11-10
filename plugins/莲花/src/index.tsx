@@ -3,7 +3,8 @@ import { ImageViewer } from './ImageViewer';
 import { ImageSidebar, albumCoverKey } from './ImageSidebar';
 import { ImageStatsPage } from './ImageStatsPage';
 import { OnlineImageView } from './online/OnlineImageView';
-import { IMAGE_PLATFORMS } from './online/imagePlatforms';
+import { toImagePlatform } from './online/imagePlatforms';
+import { useNetworkSites } from '@shared/useNetworkSites';
 import { CloudDrawer } from '@shared/CloudDrawer';
 import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
@@ -146,6 +147,8 @@ function ImageModule() {
   const [showNetwork, setShowNetwork] = useState(false);
   // 平台选择抽屉（入口与视频/音乐一致：侧栏标题栏的「网络」按钮 → 右侧抽屉）
   const [networkDrawerOpen, setNetworkDrawerOpen] = useState(false);
+  // 平台列表实时订阅共享注册表：设置里增删站点后抽屉立即刷新
+  const imagePlatformList = useNetworkSites('image').map(toImagePlatform);
   // 收藏的图片（路径列表，最近收藏在前）
   const [favorites, setFavorites] = useState<string[]>(() => {
     try {
@@ -641,13 +644,13 @@ function ImageModule() {
             desc: '官方页面 · 浏览器窗口',
             active: showNetwork,
             defaultExpanded: true,
-            items: IMAGE_PLATFORMS.map((p) => ({
+            items: imagePlatformList.map((p) => ({
               id: p.id,
               name: p.name,
               desc: p.desc,
               accent: p.accent,
-              // pixiv 在大陆被阻断：这里提前标注，避免用户以为是模块坏了
-              badge: p.id === 'pixiv' ? '需代理' : undefined,
+              // 需要代理的站点提前标注，避免用户以为是模块坏了
+              badge: p.needsProxy ? '需代理' : undefined,
             })),
             onPick: () => {
               setShowNetwork(true);
@@ -655,7 +658,7 @@ function ImageModule() {
             },
           },
         ]}
-        footer="只打开官方页面：登录与浏览都在站点自己完成，我们不抓取内容、不批量下载。pixiv 在大陆需代理（WebView2 跟随系统代理）。"
+        footer="只打开官方页面：登录与浏览都在站点自己完成，我们不抓取内容、不批量下载。pixiv 在大陆需代理（WebView2 跟随系统代理），其余站点可直接打开。"
       />
     </div>
   );

@@ -2,9 +2,11 @@
 import React from "react";
 import { T, useLang } from '../../_shared/pluginRuntime';
 import { ThumbImg, PageIndicator } from './ImageViewer';
+// 与笔记/视频侧栏**同一个**云图标（同源 SVG），保证「云」按钮三处看起来一样
+import { CloudIcon } from '@shared/CloudDrawer';
 const { useState } = React;
 const hostApi = window.__HOST_API__;
-const { ModuleSidebarShell, SecondaryNavShell, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, BarChart3, Globe: GlobeIcon } = window.__HOST_UI__ || {};
+const { ModuleSidebarShell, SecondaryNavShell, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, BarChart3 } = window.__HOST_UI__ || {};
 
 // 相册自选封面的键：两类相册共用一张表（见 index.tsx 的 STORAGE_KEY_COVERS），
 // 用前缀区分来源，避免键相互碰撞。放在这里而非 index.tsx，是为了避免
@@ -587,23 +589,21 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
       })
     : null;
 
-  // 网络入口：与视频/音乐一致 —— 侧栏标题栏右侧的「云」按钮（icon+文字），
-  // 点开由宿主渲染右侧抽屉选平台。不再用侧栏底部的小图标。
+  // 网络入口：与视频/音乐模块**逐字一致** —— 侧栏标题栏的「☁ 云」按钮 + 右侧抽屉，
+  // 图标直接用视频侧栏同一个 CloudIcon，文字也用「云」。
   const networkTitleAction = onOpenNetwork
     ? React.createElement('button', {
         key: 'open-network',
         onClick: () => onOpenNetwork(),
-        title: '网络图片',
+        title: '云',
         className: `btn-press flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs transition-colors ${
           networkActive
             ? 'text-[var(--element-color-raw)] bg-[var(--element-muted)]'
             : 'text-neutral-500 dark:text-stone-400 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)]'
         }`,
         children: [
-          GlobeIcon
-            ? React.createElement(GlobeIcon, { key: 'i', size: 14, strokeWidth: 2 })
-            : React.createElement('span', { key: 'i' }, '🌐'),
-          React.createElement('span', { key: 't' }, '网络'),
+          React.createElement(CloudIcon, { key: 'i', size: 15 }),
+          React.createElement('span', { key: 't' }, '云'),
         ],
       })
     : null;
