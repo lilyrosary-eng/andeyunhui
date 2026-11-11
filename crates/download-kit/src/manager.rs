@@ -6,7 +6,7 @@
 //! - 暂停/取消通过 `watch` 通道下发，分片在块边界检查，不依赖 kill 线程。
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -478,7 +478,7 @@ impl DownloadManager {
         let p2p = spec.engine == EngineKind::Gopeed || is_p2p_url(&urls[0]);
         let directory_output = p2p || metalink;
         let mut save_path = PathBuf::from(raw_save);
-        let filename;
+        let mut filename;
         if directory_output {
             // P2P / Metalink 的落盘单位是目录（可能包含多个文件）。
             // 目标目录已存在且非空时追加任务专属子目录，避免取消任务时误删用户已有内容。
@@ -515,6 +515,23 @@ impl DownloadManager {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "download.bin".to_string());
+        }
+
+        // HLS / DASH 的清单本身不是最终媒体文件；ffmpeg 会按输出扩展名选封装器，
+        // 若保留 .m3u8/.mpd 会写成播放列表或直接失败，这里统一改成 .mp4。
+        if urls.len() == 1 && (is_hls_url(&urls[0]) || is_dash_url(&urls[0])) {
+            let extension = Path::new(&filename)
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_ascii_lowercase());
+            if matches!(extension.as_deref(), Some("m3u8") | Some("mpd")) {
+                let stem = Path::new(&filename)
+                    .file_stem()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "download".to_string());
+                filename = format!("{stem}.mp4");
+                save_path.set_file_name(&filename);
+            }
         }
 
         let config = self.inner.config();

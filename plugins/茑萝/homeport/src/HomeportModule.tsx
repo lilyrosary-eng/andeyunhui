@@ -7,6 +7,7 @@ import type {
   EngineKind,
   EngineStatus,
   ProgressPayload,
+  TaskDetail,
   TaskStatus,
 } from './api';
 import {
@@ -19,6 +20,7 @@ import {
   isActiveStatus,
 } from './api';
 import { NewTaskPanel } from './NewTaskPanel';
+import { TaskDetailPanel } from './TaskDetailPanel';
 import { EngineSettings } from './EngineSettings';
 import {
   AlertIcon,
@@ -27,6 +29,7 @@ import {
   EmptyState,
   FolderIcon,
   IconButton,
+  InfoIcon,
   PauseIcon,
   PlayIcon,
   PlusIcon,
@@ -60,6 +63,8 @@ export function HomeportModule() {
   const [filter, setFilter] = useState<Filter>('all');
   const [view, setView] = useState<'tasks' | 'settings'>('tasks');
   const [showNew, setShowNew] = useState(false);
+  const [detail, setDetail] = useState<TaskDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -129,6 +134,18 @@ export function HomeportModule() {
               : task,
           ),
         );
+        setDetail((prev) =>
+          prev && prev.id === payload.taskId
+            ? {
+                ...prev,
+                status: payload.status,
+                downloadedBytes: payload.downloaded,
+                totalBytes: payload.total || prev.totalBytes,
+                connections: payload.connections,
+                error: payload.error ?? prev.error,
+              }
+            : prev,
+        );
       }),
     );
 
@@ -146,6 +163,7 @@ export function HomeportModule() {
           };
           return next;
         });
+        setDetail((prev) => (prev && prev.id === payload.id ? { ...prev, ...payload, parts: prev.parts } : prev));
       }),
     );
 
@@ -215,6 +233,20 @@ export function HomeportModule() {
       await dl.openPath(task.savePath);
     } catch (err) {
       setError(String(err));
+    }
+  };
+
+  const openDetail = async (task: TaskView) => {
+    setShowNew(false);
+    setDetailLoading(true);
+    try {
+      const full = await dl.get(task.id);
+      setDetail(full);
+      setError(null);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setDetailLoading(false);
     }
   };
 
@@ -296,6 +328,9 @@ export function HomeportModule() {
           </div>
 
           <div className="flex flex-shrink-0 items-center gap-0.5">
+            <IconButton title="详情" disabled={detailLoading} onClick={() => void openDetail(task)}>
+              <InfoIcon size={15} />
+            </IconButton>
             {active ? (
               <IconButton title="暂停" onClick={() => void act(dl.pause(task.id))}>
                 <PauseIcon size={15} />
@@ -368,7 +403,10 @@ export function HomeportModule() {
           </button>
           <button
             type="button"
-            onClick={() => setShowNew(true)}
+            onClick={() => {
+              setDetail(null);
+              setShowNew(true);
+            }}
             className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--element-bg)] px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition-opacity hover:opacity-90"
           >
             <PlusIcon size={14} />
@@ -460,6 +498,10 @@ export function HomeportModule() {
             void reload(true);
           }}
         />
+      ) : null}
+
+      {detail ? (
+        <TaskDetailPanel detail={detail} engines={engines} onClose={() => setDetail(null)} />
       ) : null}
     </div>
   );
