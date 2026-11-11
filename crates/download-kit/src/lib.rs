@@ -13,7 +13,7 @@
 //! - `gopeed`：调用用户自备的 gopeed（GPL-3.0，不随包分发），补足 BT / 磁力 / ed2k。
 //!
 //! 传输能力还包括：单任务限速与全局聚合限速、HTTP/SOCKS 代理、主源失败时切换镜像、
-//! 完成后 SHA-256 校验、续传前 ETag/Last-Modified 比对、下载前磁盘空间预检；
+//! 完成后校验（MD5 / SHA-1 / SHA-256）、续传前 ETag/Last-Modified 比对、下载前磁盘空间预检；
 //! 调度按 `priority` 从高到低，同优先级 FIFO。HTTP/2 由 reqwest 协商，
 //! 多连接仍由引擎1 的分片并发承担。
 //!

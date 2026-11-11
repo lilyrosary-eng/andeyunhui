@@ -286,17 +286,21 @@ impl Inner {
         }
         if let Some(expected) = task.sha256.as_deref() {
             if metadata.is_dir() {
-                return Err("目录任务不支持单一 SHA-256 校验".to_string());
+                return Err("目录任务不支持单一文件校验".to_string());
             }
+            let (algorithm, expected_hex) = crate::util::parse_checksum(expected)?;
             let path = task.save_path.clone();
             let actual = tokio::task::spawn_blocking(move || {
-                crate::util::sha256_file(std::path::Path::new(&path))
+                crate::util::checksum_file(std::path::Path::new(&path), algorithm)
             })
             .await
-            .map_err(|e| format!("SHA-256 校验任务异常: {e}"))??;
-            if actual != expected {
+            .map_err(|e| format!("校验任务异常: {e}"))??;
+            if actual != expected_hex {
                 return Err(format!(
-                    "SHA-256 校验失败：期望 {expected}，实际 {actual}"
+                    "{} 校验失败：期望 {}，实际 {}",
+                    algorithm.label(),
+                    expected_hex,
+                    actual
                 ));
             }
         }
@@ -390,20 +394,22 @@ fn sniffed_metalink(sniff: Option<&ProbeResult>) -> bool {
         .unwrap_or(false)
 }
 
-/// 统一 SHA-256 口径：允许 `sha256:` 前缀，落库统一小写 hex。
-fn normalize_sha256(value: Option<String>) -> Result<Option<String>, String> {
+/// 统一校验值口径：允许 `md5:` / `sha1:` / `sha256:` 前缀，无前缀按长度推断；
+/// 落库统一成 `算法:小写 hex`。
+fn normalize_checksum(value: Option<String>) -> Result<Option<String>, String> {
     let Some(raw) = value else {
         return Ok(None);
     };
-    let lower = raw.trim().to_ascii_lowercase();
-    let hex = lower.trim_start_matches("sha256:").trim();
-    if hex.is_empty() {
+    if raw.trim().is_empty() {
         return Ok(None);
     }
-    if hex.len() != 64 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err("SHA-256 必须是 64 位十六进制字符串".to_string());
-    }
-    Ok(Some(hex.to_string()))
+    let (algorithm, hex) = crate::util::parse_checksum(&raw)?;
+    let prefix = match algorithm {
+        crate::util::ChecksumAlgorithm::Md5 => "md5",
+        crate::util::ChecksumAlgorithm::Sha1 => "sha1",
+        crate::util::ChecksumAlgorithm::Sha256 => "sha256",
+    };
+    Ok(Some(format!("{prefix}:{hex}")))
 }
 
 /// 对外管理器。内部 `Arc` 可安全克隆给命令层/定时任务。
@@ -470,9 +476,9 @@ impl DownloadManager {
         let id = uuid::Uuid::new_v4().to_string();
         let p2p = spec.engine == EngineKind::Gopeed || is_p2p_url(&urls[0]);
         let metalink = is_metalink_url(&urls[0]);
-        let sha256 = normalize_sha256(spec.sha256)?;
+        let sha256 = normalize_checksum(spec.sha256)?;
         if sha256.is_some() && (p2p || metalink) {
-            return Err("P2P / Metalink 任务包含多个文件，不支持单一 SHA-256 校验".to_string());
+            return Err("P2P / Metalink 任务包含多个文件，不支持单一文件校验".to_string());
         }
 
         let mut mirrors: Vec<String> = spec

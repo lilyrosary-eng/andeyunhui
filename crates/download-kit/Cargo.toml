@@ -42,8 +42,10 @@ futures-util = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
-# 下载完成后的 SHA-256 校验（纯 Rust，MIT/Apache-2.0）。
+# 下载完成后的校验（SHA-256 / SHA-1 / MD5，纯 Rust，MIT/Apache-2.0）。
 sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
 # 下载前磁盘可用空间预检（跨平台，MIT/Apache-2.0）。
 fs2 = "0.4"
 

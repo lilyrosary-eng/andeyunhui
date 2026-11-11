@@ -442,7 +442,7 @@ export function HomeportModule() {
             </span>
           </div>
           <div className="text-[11px] text-neutral-400 dark:text-stone-500">
-            多引擎 · 分片续传 · HLS · BT / 磁力 · 镜像与 SHA-256
+            多引擎 · 分片续传 · HLS · BT / 磁力 · 镜像与校验
           </div>
         </div>
 

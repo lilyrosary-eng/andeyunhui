@@ -168,7 +168,7 @@ pub struct DownloadSpec {
     /// 同一文件的备用源（镜像）。仅单地址任务生效；主地址失败时按顺序尝试。
     #[serde(default)]
     pub mirrors: Vec<String>,
-    /// 完成后校验的 SHA-256（64 位十六进制，可带 `sha256:` 前缀）。
+    /// 完成后校验值（`md5:` / `sha1:` / `sha256:` 前缀；无前缀按长度推断）。
     #[serde(default)]
     pub sha256: Option<String>,
     /// 单任务限速（字节/秒，0 或空 = 不限）；缺省取全局配置。
@@ -209,7 +209,7 @@ pub struct DownloadTask {
     /// 备用源（镜像）。
     #[serde(default)]
     pub mirrors: Vec<String>,
-    /// 完成校验用 SHA-256（小写 hex）。
+    /// 完成校验值（`算法:hex`；旧记录为纯 SHA-256 hex）。
     #[serde(default)]
     pub sha256: Option<String>,
     /// 单任务限速（字节/秒）；None = 不限。

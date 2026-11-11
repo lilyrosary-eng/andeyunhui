@@ -443,15 +443,19 @@ export function NewTaskPanel({
           </Field>
 
           <Field
-            label="SHA-256"
-            hint={mode === 'batch' ? '批量模式不支持单文件校验' : '可选；完成后校验，不匹配不会标记完成'}
+            label="校验值"
+            hint={
+              mode === 'batch'
+                ? '批量模式不支持单文件校验'
+                : 'MD5 / SHA-1 / SHA-256，按长度自动识别'
+            }
           >
             <input
               value={sha256}
               onChange={(event) => setSha256(event.target.value)}
               spellCheck={false}
               disabled={mode === 'batch'}
-              placeholder="64 位十六进制，可带 sha256: 前缀"
+              placeholder="32 / 40 / 64 位十六进制，可带 md5: / sha1: / sha256: 前缀"
               className={`${inputClass} font-mono text-xs disabled:opacity-40`}
             />
           </Field>

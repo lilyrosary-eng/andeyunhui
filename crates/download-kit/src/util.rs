@@ -167,14 +167,79 @@ pub fn ensure_disk_space(path: &Path, total: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// 计算单文件 SHA-256（小写 hex）。调用方负责放进 `spawn_blocking`。
-pub fn sha256_file(path: &Path) -> Result<String, String> {
-    use sha2::{Digest, Sha256};
+/// 支持的校验算法。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChecksumAlgorithm {
+    Md5,
+    Sha1,
+    Sha256,
+}
+
+impl ChecksumAlgorithm {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Md5 => "MD5",
+            Self::Sha1 => "SHA-1",
+            Self::Sha256 => "SHA-256",
+        }
+    }
+
+    fn hex_len(self) -> usize {
+        match self {
+            Self::Md5 => 32,
+            Self::Sha1 => 40,
+            Self::Sha256 => 64,
+        }
+    }
+}
+
+/// 解析校验值：`md5:...` / `sha1:...` / `sha256:...`，无前缀时按长度推断。
+pub fn parse_checksum(raw: &str) -> Result<(ChecksumAlgorithm, String), String> {
+    let text = raw.trim().to_ascii_lowercase();
+    if text.is_empty() {
+        return Err("校验值为空".to_string());
+    }
+    let (algorithm, hex) = match text.split_once(':') {
+        Some((prefix, rest)) => {
+            let algorithm = match prefix.trim() {
+                "md5" => ChecksumAlgorithm::Md5,
+                "sha1" | "sha-1" => ChecksumAlgorithm::Sha1,
+                "sha256" | "sha-256" => ChecksumAlgorithm::Sha256,
+                other => return Err(format!("不支持的校验算法：{other}")),
+            };
+            (algorithm, rest.trim())
+        }
+        None => {
+            let algorithm = match text.len() {
+                32 => ChecksumAlgorithm::Md5,
+                40 => ChecksumAlgorithm::Sha1,
+                64 => ChecksumAlgorithm::Sha256,
+                _ => {
+                    return Err(
+                        "校验值长度必须是 32 (MD5) / 40 (SHA-1) / 64 (SHA-256) 位十六进制"
+                            .to_string(),
+                    )
+                }
+            };
+            (algorithm, text.as_str())
+        }
+    };
+    if hex.len() != algorithm.hex_len() || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(format!(
+            "{} 校验值必须是 {} 位十六进制",
+            algorithm.label(),
+            algorithm.hex_len()
+        ));
+    }
+    Ok((algorithm, hex.to_string()))
+}
+
+fn hash_file<D: sha2::Digest>(path: &Path) -> Result<String, String> {
     use std::io::Read;
 
     let mut file =
         std::fs::File::open(path).map_err(|e| format!("打开校验文件失败: {e}"))?;
-    let mut hasher = Sha256::new();
+    let mut hasher = D::new();
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let read = file
@@ -185,7 +250,21 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher
+        .finalize()
+        .as_slice()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// 计算文件摘要（MD5 / SHA-1 / SHA-256）。
+pub fn checksum_file(path: &Path, algorithm: ChecksumAlgorithm) -> Result<String, String> {
+    match algorithm {
+        ChecksumAlgorithm::Md5 => hash_file::<md5::Md5>(path),
+        ChecksumAlgorithm::Sha1 => hash_file::<sha1::Sha1>(path),
+        ChecksumAlgorithm::Sha256 => hash_file::<sha2::Sha256>(path),
+    }
 }
 
 /// 解析 `1.2MiB` / `34MB` / `512K` / `123` 这类人读大小。
@@ -257,6 +336,42 @@ pub fn tail_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checksum_parses_algorithms_and_lengths() {
+        assert_eq!(
+            parse_checksum(&"a".repeat(32)).unwrap().0,
+            ChecksumAlgorithm::Md5
+        );
+        assert_eq!(
+            parse_checksum(&"b".repeat(40)).unwrap().0,
+            ChecksumAlgorithm::Sha1
+        );
+        assert_eq!(
+            parse_checksum(&format!("sha256:{}", "c".repeat(64))).unwrap().0,
+            ChecksumAlgorithm::Sha256
+        );
+        assert!(parse_checksum("md5:abcd").is_err());
+        assert!(parse_checksum(&"z".repeat(32)).is_err());
+    }
+
+    #[test]
+    fn checksum_file_matches_known_values() {
+        let path = std::env::temp_dir().join(format!(
+            "download-kit-checksum-{}.bin",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            checksum_file(&path, ChecksumAlgorithm::Md5).unwrap(),
+            "900150983cd24fb0d6963f7d28e17f72"
+        );
+        assert_eq!(
+            checksum_file(&path, ChecksumAlgorithm::Sha1).unwrap(),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn human_size_parses_units() {

@@ -19,7 +19,7 @@ window.__PLUGIN_REGISTRY__.register({
   visible: false,
   parent: 'niaoluo',
   category: '传输',
-  desc: '多引擎下载：HTTP / HLS / BT / 磁力 / ed2k，分片续传、限速、代理、镜像与 SHA-256 校验',
+  desc: '多引擎下载：HTTP / HLS / BT / 磁力 / ed2k，分片续传、限速、代理、镜像与 MD5/SHA-1/SHA-256 校验',
   component: HomeportModule,
 });
 

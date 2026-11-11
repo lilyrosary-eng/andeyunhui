@@ -9,7 +9,7 @@
   "hostApiVersion": 1,
   "parent": "niaoluo",
   "codename": "茑萝",
-  "desc": "凌霄：多引擎下载中心。HTTP / HLS / BT / 磁力 / ed2k，分片续传、限速、代理、镜像与 SHA-256 校验",
+  "desc": "凌霄：多引擎下载中心。HTTP / HLS / BT / 磁力 / ed2k，分片续传、限速、代理、镜像与 MD5/SHA-1/SHA-256 校验",
   "permissions": {
     "commands": [
       "dl_enqueue",

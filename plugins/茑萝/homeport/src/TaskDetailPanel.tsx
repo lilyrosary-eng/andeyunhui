@@ -130,7 +130,7 @@ export function TaskDetailPanel({
               ) : null}
               {detail.sha256 ? (
                 <div className="col-span-2">
-                  <div className="text-[10px] text-neutral-400 dark:text-stone-500">SHA-256</div>
+                  <div className="text-[10px] text-neutral-400 dark:text-stone-500">校验值</div>
                   <div className="break-all font-mono text-[10px] text-neutral-600 dark:text-stone-300">{detail.sha256}</div>
                 </div>
               ) : null}
