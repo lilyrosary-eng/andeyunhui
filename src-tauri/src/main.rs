@@ -1142,6 +1142,11 @@ fn main() {    // **崩溃取证最先装**（2026-11-09）：`0xc000001d` 这�
         })
         .setup(|app| {
             app.manage(PendingOpenFiles(Default::default()));
+            // download-kit 的写入范围校验由宿主注入：crate 不依赖插件能力模型，
+            // 但插件经 `dl_enqueue` / `dl_cancel` 落盘或删文件时必须走这里。
+            download_kit::commands::set_write_guard(|app, plugin_id, path| {
+                andeyunhui_lib::services::plugin_access::ensure_plugin_write(app, plugin_id, path)
+            });
             // 透明窗口在 Wayland 下的已知问题：窗口失焦/被遮挡后合成器丢弃 buffer，
             // 回来时 WebKit 不主动重绘 ⇒ 用户看到"没内容了"（2026-11-07 实测）。
             // 这里在焦点回来、以及从完全遮挡状态恢复时强制重绘一次。
@@ -2179,6 +2184,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             dl_resume,
             dl_retry,
             dl_cancel,
+            dl_forget,
             dl_config_get,
             dl_config_set,
             dl_engines,

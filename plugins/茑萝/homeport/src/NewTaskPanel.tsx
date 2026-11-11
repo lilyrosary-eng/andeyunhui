@@ -96,6 +96,7 @@ export function NewTaskPanel({
       const id = await dl.enqueue({
         urls,
         savePath: ensureDirPath(savePath),
+        filename: probeResult?.filename ?? null,
         engine: engine as EngineKind,
         connections: Math.min(32, Math.max(1, Number(connections) || 8)),
         priority: Number.isFinite(Number(priority)) ? Math.trunc(Number(priority)) : 0,

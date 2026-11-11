@@ -19,6 +19,7 @@
       "dl_resume",
       "dl_retry",
       "dl_cancel",
+      "dl_forget",
       "dl_config_get",
       "dl_config_set",
       "dl_engines",

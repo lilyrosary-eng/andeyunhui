@@ -144,6 +144,10 @@ pub struct DownloadSpec {
     pub urls: Vec<String>,
     /// 完整文件路径，或以 `/` `\` 结尾的目录（此时用 URL 文件名）。
     pub save_path: String,
+    /// 目录目标时优先使用的文件名（通常来自探测的 Content-Disposition / 重定向地址）；
+    /// 显式文件路径时忽略。
+    #[serde(default)]
+    pub filename: Option<String>,
     #[serde(default)]
     pub referer: Option<String>,
     #[serde(default)]

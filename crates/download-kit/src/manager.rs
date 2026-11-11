@@ -503,9 +503,16 @@ impl DownloadManager {
                 || raw_save.ends_with('\\')
                 || save_path.is_dir();
             if directory_target {
-                let name =
-                    filename_from_url(&urls[0]).unwrap_or_else(|| "download.bin".to_string());
-                save_path = save_path.join(sanitize_filename(&name));
+                // 探测到的文件名优先：`/download?id=123` 这类地址从 URL 拿不到可用名字，
+                // 而 Content-Disposition / 重定向后的地址通常带正确扩展名。
+                let name = spec
+                    .filename
+                    .as_deref()
+                    .map(sanitize_filename)
+                    .or_else(|| filename_from_url(&urls[0]))
+                    .unwrap_or_else(|| "download.bin".to_string());
+                // 不覆盖目录里已有的同名文件：自动追加 ` (1)`、` (2)`。
+                save_path = unique_download_path(&save_path.join(name));
             }
             if let Some(parent) = save_path.parent() {
                 std::fs::create_dir_all(parent)
@@ -520,16 +527,8 @@ impl DownloadManager {
         // HLS / DASH 的清单本身不是最终媒体文件；ffmpeg 会按输出扩展名选封装器，
         // 若保留 .m3u8/.mpd 会写成播放列表或直接失败，这里统一改成 .mp4。
         if urls.len() == 1 && (is_hls_url(&urls[0]) || is_dash_url(&urls[0])) {
-            let extension = Path::new(&filename)
-                .extension()
-                .and_then(|value| value.to_str())
-                .map(|value| value.to_ascii_lowercase());
-            if matches!(extension.as_deref(), Some("m3u8") | Some("mpd")) {
-                let stem = Path::new(&filename)
-                    .file_stem()
-                    .map(|value| value.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "download".to_string());
-                filename = format!("{stem}.mp4");
+            if let Some(renamed) = stream_output_name(&filename) {
+                filename = renamed;
                 save_path.set_file_name(&filename);
             }
         }
@@ -801,6 +800,60 @@ fn temp_dir_for(save_path: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// ffmpeg 能按扩展名识别的常见容器；命中则保留用户/地址给的名字。
+const MEDIA_EXTENSIONS: &[&str] = &[
+    "mp4", "m4v", "mkv", "webm", "mov", "ts", "m2ts", "flv", "avi", "mpg", "mpeg", "mp3", "m4a",
+    "aac", "flac", "wav", "ogg", "opus", "wma",
+];
+
+/// ffmpeg 输出文件名：清单（.m3u8/.mpd）、`.bin`、无扩展名或未知扩展名统一改 `.mp4`。
+/// 返回 `None` 表示原名已经可用，不需要改动。
+fn stream_output_name(filename: &str) -> Option<String> {
+    let path = Path::new(filename);
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    if extension
+        .as_deref()
+        .map(|ext| MEDIA_EXTENSIONS.contains(&ext))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let stem = path
+        .file_stem()
+        .map(|value| value.to_string_lossy().into_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "download".to_string());
+    Some(format!("{stem}.mp4"))
+}
+
+/// 目录下载时的同名避让：`file.zip` → `file (1).zip` → `file (2).zip`。
+fn unique_download_path(target: &Path) -> PathBuf {
+    if !target.exists() {
+        return target.to_path_buf();
+    }
+    let stem = target
+        .file_stem()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".to_string());
+    let extension = target
+        .extension()
+        .map(|value| value.to_string_lossy().into_owned());
+    for index in 1..1000 {
+        let name = match extension.as_deref() {
+            Some(ext) => format!("{stem} ({index}).{ext}"),
+            None => format!("{stem} ({index})"),
+        };
+        let candidate = target.with_file_name(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    target.to_path_buf()
+}
+
 async fn scheduler(inner: Arc<Inner>) {
     loop {
         inner.wake.notified().await;
@@ -860,7 +913,7 @@ async fn run_engine(
     id: &str,
     control: watch::Receiver<Control>,
 ) -> Result<(), String> {
-    let Some(task) = inner.store.task(id)? else {
+    let Some(mut task) = inner.store.task(id)? else {
         return Ok(());
     };
     if task.status != TaskStatus::Downloading {
@@ -902,6 +955,24 @@ async fn run_engine(
         inner.fail(id, "没有可用的下载引擎");
         return Ok(());
     };
+
+    // 靠 Content-Type 嗅探才认出是 HLS/DASH 的地址没有 .m3u8/.mpd 后缀，入队阶段改不到；
+    // ffmpeg 按输出扩展名选封装器，这里在真正开跑前再兜一次（.bin / 无扩展名 → .mp4）。
+    if kind == EngineKind::Ffmpeg {
+        if let Some(renamed) = stream_output_name(&task.filename) {
+            let mut path = PathBuf::from(&task.save_path);
+            path.set_file_name(&renamed);
+            let path_text = path.to_string_lossy().into_owned();
+            match inner.store.update_save_path(id, &path_text, &renamed) {
+                Ok(()) => {
+                    task.save_path = path_text;
+                    task.filename = renamed;
+                    inner.emit_state_by_id(id);
+                }
+                Err(error) => eprintln!("[download-kit] 修正流媒体输出名失败: {error}"),
+            }
+        }
+    }
 
     if let Ok(Some(current)) = inner.store.task(id) {
         let _ = inner
@@ -1465,6 +1536,57 @@ mod tests {
         assert!(names.contains(&"cURL 外部引擎"));
         assert!(names.contains(&"Wget 外部引擎"));
         assert!(names.contains(&"Gopeed 外部引擎"));
+    }
+
+    #[test]
+    fn stream_output_renames_playlists_and_unknown_extensions() {
+        assert_eq!(stream_output_name("movie.m3u8").as_deref(), Some("movie.mp4"));
+        assert_eq!(stream_output_name("movie.mpd").as_deref(), Some("movie.mp4"));
+        assert_eq!(stream_output_name("download.bin").as_deref(), Some("download.mp4"));
+        assert_eq!(stream_output_name("playlist").as_deref(), Some("playlist.mp4"));
+        // 已知媒体容器保留用户选择，不强行改 mp4。
+        assert_eq!(stream_output_name("clip.mkv"), None);
+        assert_eq!(stream_output_name("audio.m4a"), None);
+    }
+
+    #[test]
+    fn unique_download_path_avoids_overwrite() {
+        let base = temp_base("unique-name");
+        let first = base.join("file.zip");
+        std::fs::write(&first, b"old").unwrap();
+        let second = unique_download_path(&first);
+        assert_eq!(second.file_name().unwrap(), "file (1).zip");
+        std::fs::write(&second, b"old").unwrap();
+        let third = unique_download_path(&first);
+        assert_eq!(third.file_name().unwrap(), "file (2).zip");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn enqueue_prefers_probed_filename_and_avoids_existing_file() {
+        let base = temp_base("enqueue-name");
+        std::fs::create_dir_all(&base).unwrap();
+        let store = Store::open(&base).unwrap();
+        let inner = test_inner(base.clone(), store, EngineConfig::default());
+        let manager = DownloadManager { inner: inner.clone() };
+
+        let dir = base.join("out");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("report.pdf"), b"old").unwrap();
+
+        let spec: DownloadSpec = serde_json::from_value(serde_json::json!({
+            "urls": ["https://example.test/download?id=1"],
+            "savePath": format!("{}/", dir.display()),
+            "filename": "report.pdf",
+            "engine": "native",
+            "priority": 0
+        }))
+        .unwrap();
+        let id = manager.enqueue(spec).unwrap();
+        let task = manager.get(&id).unwrap().task;
+        assert_eq!(task.filename, "report (1).pdf");
+        assert_eq!(Path::new(&task.save_path), dir.join("report (1).pdf"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
 

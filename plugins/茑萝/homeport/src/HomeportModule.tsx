@@ -38,6 +38,7 @@ import {
   RetryIcon,
   SettingsIcon,
   StatusChip,
+  TrashIcon,
   XIcon,
 } from './ui';
 
@@ -228,6 +229,18 @@ export function HomeportModule() {
     void act(dl.cancel(task.id, true));
   };
 
+  const removeTask = async (task: TaskView) => {
+    if (!window.confirm(`移除「${task.filename}」的任务记录？\n磁盘上的文件不会被删除。`)) return;
+    try {
+      await dl.forget(task.id);
+      setDetail((prev) => (prev && prev.id === task.id ? null : prev));
+      await refreshList();
+      setError(null);
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   const openTask = async (task: TaskView) => {
     try {
       await dl.openPath(task.savePath);
@@ -347,6 +360,11 @@ export function HomeportModule() {
             {completed ? (
               <IconButton title="打开文件" onClick={() => void openTask(task)}>
                 <FolderIcon size={15} />
+              </IconButton>
+            ) : null}
+            {!active && !paused ? (
+              <IconButton title="移除记录（不删文件）" onClick={() => void removeTask(task)}>
+                <TrashIcon size={15} />
               </IconButton>
             ) : null}
             {active || paused || task.status === 'queued' ? (

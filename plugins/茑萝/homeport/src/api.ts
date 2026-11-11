@@ -125,6 +125,8 @@ export interface ProgressPayload {
 export interface DownloadSpec {
   urls: string[];
   savePath: string;
+  /** 目录目标时优先使用的文件名（通常来自「解析地址」的结果）。 */
+  filename?: string | null;
   referer?: string | null;
   cookie?: string | null;
   userAgent?: string | null;
@@ -159,6 +161,7 @@ export const dl = {
   retry: (id: string) => invoke<void>('dl_retry', { id }),
   cancel: (id: string, deleteFile = true) =>
     invoke<void>('dl_cancel', { id, deleteFile }),
+  forget: (id: string) => invoke<void>('dl_forget', { id }),
   configGet: () => invoke<EngineConfig>('dl_config_get'),
   configSet: (config: EngineConfig) => invoke<EngineConfig>('dl_config_set', { config }),
   engines: () => invoke<EngineStatus>('dl_engines'),

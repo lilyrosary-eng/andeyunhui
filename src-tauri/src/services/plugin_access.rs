@@ -85,6 +85,7 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("dl_resume", "fs.write"),
     ("dl_retry", "fs.write"),
     ("dl_cancel", "fs.write"),
+    ("dl_forget", "fs.write"),
     ("dl_list", "fs.read"),
     ("dl_get", "fs.read"),
     ("dl_engines", "fs.read"),
