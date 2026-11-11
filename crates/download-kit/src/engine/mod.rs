@@ -230,6 +230,20 @@ pub fn descriptor(kind: EngineKind) -> Option<&'static EngineDescriptor> {
     DESCRIPTORS.iter().find(|item| item.kind == kind)
 }
 
+/// 远端文件的 ETag / Last-Modified 是否与首次下载时不同。
+/// 两边都有值才比较；服务器不提供校验器时无法判断，保持原进度。
+pub(crate) fn validators_conflict(task: &DownloadTask, probe: &ProbeResult) -> bool {
+    let etag_changed = matches!(
+        (&task.etag, &probe.etag),
+        (Some(old), Some(new)) if old != new
+    );
+    let modified_changed = matches!(
+        (&task.last_modified, &probe.last_modified),
+        (Some(old), Some(new)) if old != new
+    );
+    etag_changed || modified_changed
+}
+
 pub fn build_registry(
     app: &AppHandle,
     config: &EngineConfig,

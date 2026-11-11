@@ -20,7 +20,9 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::engine::limiter::{Limiters, SpeedLimiter};
-use crate::engine::{DownloadEngine, EngineCtx, EngineOutcome, PartResult};
+use crate::engine::{
+    validators_conflict, DownloadEngine, EngineCtx, EngineOutcome, PartResult,
+};
 use crate::manager::{Control, TaskProgress};
 use crate::probe::{self, HttpMeta};
 use crate::types::{
@@ -455,20 +457,6 @@ fn plan_single_stream(task: &DownloadTask, dir: &Path) -> DownloadPart {
             .to_string_lossy()
             .into_owned(),
     }
-}
-
-/// 远端文件的 ETag / Last-Modified 是否与首次下载时不同。
-/// 两边都有值才比较；服务器不提供校验器时无法判断，保持原进度。
-fn validators_conflict(task: &DownloadTask, probe: &crate::types::ProbeResult) -> bool {
-    let etag_changed = matches!(
-        (&task.etag, &probe.etag),
-        (Some(old), Some(new)) if old != new
-    );
-    let modified_changed = matches!(
-        (&task.last_modified, &probe.last_modified),
-        (Some(old), Some(new)) if old != new
-    );
-    etag_changed || modified_changed
 }
 
 fn temp_file(dir: &Path, prefix: &str, index: usize) -> String {

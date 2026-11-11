@@ -96,6 +96,18 @@ impl DownloadEngine for CurlEngine {
         }
 
         let mut partial = existing;
+        // 续传前比对远端版本：内容变了就丢弃半成品，避免两代字节拼成一个坏文件。
+        // 有镜像时不比较：镜像可能和主源不是同一份内容，旧半成品也可能来自另一个源。
+        if partial > 0
+            && task.mirrors.is_empty()
+            && crate::engine::validators_conflict(&task, &probe)
+        {
+            let _ = tokio::fs::remove_file(&save_path).await;
+            partial = 0;
+        }
+        if probe.etag.is_some() || probe.last_modified.is_some() {
+            ctx.update_validators(probe.etag.as_deref(), probe.last_modified.as_deref())?;
+        }
         if total > 0 && partial >= total {
             ctx.set_progress(partial, total);
             return Ok(EngineOutcome::Done);
