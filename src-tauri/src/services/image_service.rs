@@ -12,7 +12,16 @@ use serde::Serialize;
 use tauri::Emitter;
 use tauri::Manager;
 
-const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp"];
+// 扫描白名单。
+//
+// **AVIF 是 2026-11-11 增补的**：`image` 0.25 的 `default-features` 里
+// `default-formats` 就含 `avif`（走 ravif），所以尺寸探测（只读头）、缩略图、
+// 瓦片（非 PNG 路径 `image::open`）**不需要任何额外依赖或代码**就已经能用；
+// WebView2（Chromium）与 WebKitGTK 也都原生显示 AVIF。
+// 唯一没验证过的是超大 AVIF 的瓦片解码耗时，但它只在缩放时才触发，
+// 失败也有原图兜底（Windows），所以风险可控。
+// HEIC/RAW 没加：要引 libheif / libraw 这类原生库，收益仅"少数文件能打开"。
+const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp", "avif"];
 const MAX_IMAGE_FILES: usize = 50_000;
 const MAX_DEPTH: usize = 12;
 const MAX_RESULT_FOLDERS: usize = 5_000;
@@ -127,6 +136,22 @@ mod tests {
         let dir = std::env::temp_dir().join("andeyunhui-image-service-tests");
         std::fs::create_dir_all(&dir).expect("创建测试临时目录");
         dir.join(format!("{tag}-{}.bin", std::process::id()))
+    }
+
+    /// 扫描白名单必须覆盖 avif（2026-11-11 增补）。
+    ///
+    /// 为什么单独立一条：白名单决定"文件夹里能不能列出这张图"，
+    /// 少了某个扩展名，用户看到的是"图消失了"而不是"格式不支持"。
+    /// 而 avif 的下游（尺寸/缩略图/瓦片）本来就因为 image 的默认特性可用，
+    /// 所以只钉这一处即可。
+    #[test]
+    fn 白名单包含常见与avif格式() {
+        for ext in ["jpg", "JPG", "jpeg", "png", "gif", "webp", "bmp", "avif", "AVIF"] {
+            assert!(is_image(&format!("photo.{ext}")), "{ext} 应被扫描白名单接受");
+        }
+        for ext in ["txt", "mp4", "heic", "raw"] {
+            assert!(!is_image(&format!("photo.{ext}")), "{ext} 不应进白名单");
+        }
     }
 
     #[test]
