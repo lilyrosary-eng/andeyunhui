@@ -43,7 +43,7 @@ import {
 } from './ui';
 
 const React = window.__HOST_REACT__;
-const { useCallback, useEffect, useMemo, useState } = React;
+const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
 type TaskView = DownloadTask & {
   speed?: number;
@@ -57,6 +57,29 @@ const ACTIVE_STATUSES: TaskStatus[] = ['queued', 'probing', 'downloading', 'merg
 const FILTER_ACTIVE = new Set<TaskStatus>([...ACTIVE_STATUSES, 'paused']);
 const FILTER_FAILED = new Set<TaskStatus>(['failed', 'canceled']);
 
+/** 完成/失败时的系统通知；权限未授予或环境不支持时静默跳过。 */
+function notifyTask(task: DownloadTask) {
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  try {
+    const title = task.status === 'completed' ? '下载完成' : '下载失败';
+    const body =
+      task.status === 'failed' && task.error
+        ? `${task.filename}\n${task.error}`
+        : task.filename;
+    const notification = new Notification(title, { body, tag: `homeport-${task.id}` });
+    notification.onclick = () => {
+      try {
+        window.focus();
+      } catch {
+        /* 忽略 */
+      }
+      notification.close();
+    };
+  } catch {
+    /* 通知不可用时不影响下载 */
+  }
+}
+
 export function HomeportModule() {
   const [tasks, setTasks] = useState<TaskView[]>([]);
   const [engines, setEngines] = useState<EngineStatus | null>(null);
@@ -68,6 +91,8 @@ export function HomeportModule() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const statusRef = useRef<Record<string, TaskStatus>>({});
+  const notifyRef = useRef(true);
 
   const reload = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -81,6 +106,8 @@ export function HomeportModule() {
         const speeds = new Map(prev.map((task) => [task.id, task.speed ?? 0]));
         return list.map((task) => ({ ...task, speed: speeds.get(task.id) ?? 0 }));
       });
+      // 记录当前状态作为通知基线：只有「事件里发生状态跃迁」才提醒，避免重载时补发。
+      statusRef.current = Object.fromEntries(list.map((task) => [task.id, task.status]));
       setEngines(engineStatus);
       setConfig(engineConfig);
       setError(null);
@@ -102,6 +129,10 @@ export function HomeportModule() {
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  useEffect(() => {
+    notifyRef.current = config?.notifyOnComplete ?? true;
+  }, [config?.notifyOnComplete]);
 
   // 实时进度 / 状态事件；插件卸载时统一退订。
   useEffect(() => {
@@ -152,6 +183,16 @@ export function HomeportModule() {
 
     keep(
       window.__HOST_API__.listen<DownloadTask>('download-kit:state', ({ payload }) => {
+        const previous = statusRef.current[payload.id];
+        statusRef.current[payload.id] = payload.status;
+        if (
+          notifyRef.current &&
+          previous &&
+          previous !== payload.status &&
+          (payload.status === 'completed' || payload.status === 'failed')
+        ) {
+          notifyTask(payload);
+        }
         setTasks((prev) => {
           const index = prev.findIndex((task) => task.id === payload.id);
           if (index < 0) return [{ ...payload, speed: 0 }, ...prev];

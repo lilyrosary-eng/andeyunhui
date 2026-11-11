@@ -308,6 +308,8 @@ pub struct EngineConfig {
     pub gopeed_path: Option<String>,
     /// 启动时是否自动续传上一进程遗留的活动任务；false 则置为暂停。
     pub resume_on_start: bool,
+    /// 任务完成/失败时是否发系统通知（由前端消费，后端只负责持久化）。
+    pub notify_on_complete: bool,
 }
 
 impl Default for EngineConfig {
@@ -331,6 +333,7 @@ impl Default for EngineConfig {
             wget_path: None,
             gopeed_path: None,
             resume_on_start: true,
+            notify_on_complete: true,
         }
     }
 }

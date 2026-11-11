@@ -98,6 +98,7 @@ export interface EngineConfig {
   wgetPath?: string | null;
   gopeedPath?: string | null;
   resumeOnStart: boolean;
+  notifyOnComplete: boolean;
 }
 
 export interface ProbeResult {

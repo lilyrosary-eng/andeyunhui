@@ -43,6 +43,7 @@ export function EngineSettings({
   const [wgetPath, setWgetPath] = useState(config.wgetPath ?? '');
   const [gopeedPath, setGopeedPath] = useState(config.gopeedPath ?? '');
   const [resumeOnStart, setResumeOnStart] = useState(config.resumeOnStart);
+  const [notifyOnComplete, setNotifyOnComplete] = useState(config.notifyOnComplete);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -67,6 +68,7 @@ export function EngineSettings({
         wgetPath: wgetPath.trim() || null,
         gopeedPath: gopeedPath.trim() || null,
         resumeOnStart,
+        notifyOnComplete,
       };
       const result = await dl.configSet(next);
       onSaved(result);
@@ -168,6 +170,26 @@ export function EngineSettings({
                   className="h-3.5 w-3.5 accent-[var(--element-bg)]"
                 />
                 启动时恢复上次未完成的任务
+              </label>
+              <label className="flex items-center gap-2 text-xs text-neutral-600 dark:text-stone-300">
+                <input
+                  type="checkbox"
+                  checked={notifyOnComplete}
+                  onChange={async (event) => {
+                    const checked = event.target.checked;
+                    setNotifyOnComplete(checked);
+                    // 申请权限必须发生在用户手势里；被拒绝也不影响下载本身。
+                    if (checked && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+                      try {
+                        await Notification.requestPermission();
+                      } catch {
+                        /* 通知不可用时静默降级 */
+                      }
+                    }
+                  }}
+                  className="h-3.5 w-3.5 accent-[var(--element-bg)]"
+                />
+                完成/失败时发送系统通知
               </label>
             </div>
           </section>
