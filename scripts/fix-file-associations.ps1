@@ -124,6 +124,22 @@ if ($Preview) {
         exit 1
     }
     if ($fixed -gt 0) {
-        Write-Host 'Explorer may cache old icons. Restart explorer or sign out/in to refresh.'
+        # 注册表改了不代表资源管理器会立刻反映：图标和"类型"列都有缓存。
+        # 先重建图标缓存（不需要重启 explorer，不闪屏）。
+        $ie4 = Join-Path $env:SystemRoot 'System32\ie4uinit.exe'
+        if (Test-Path $ie4) {
+            & $ie4 -show
+            Write-Host 'Icon cache rebuilt (ie4uinit -show).'
+        } else {
+            Write-Host 'ie4uinit not found; skipping icon cache rebuild.'
+        }
+        Write-Host ''
+        Write-Host 'If icons / "Type" column still look wrong, restart Explorer'
+        Write-Host '(this closes all File Explorer windows):'
+        Write-Host '    Stop-Process -Name explorer -Force'
+        Write-Host ''
+        Write-Host 'NOTE: extensions that had no per-user choice before will now ask'
+        Write-Host 'which app to use ONCE - pick it and tick "Always". That choice is'
+        Write-Host 'yours; this script deliberately does not pick one for you.'
     }
 }

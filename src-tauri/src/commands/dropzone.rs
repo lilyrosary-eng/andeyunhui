@@ -310,8 +310,25 @@ pub struct OpenWithDirResult {
     paths: Vec<String>,
 }
 
+/// 「以安得云荟打开」时，超过这个大小就**不复制**、直接用原路径。
+///
+/// 为什么要有这条线：复制一个 2 GB 视频要读 2 GB + 写 2 GB，用户看到的是
+/// 点了之后两三秒没反应 —— 而他要的是"立刻播放"。用户开一个自己的文件，
+/// 本来也不需要我们先给他存一份。
+///
+/// 小文件仍然复制：几 MB 的东西复制是瞬时的，自包含（原文件被移走也能再看）。
+const OPENWITH_COPY_LIMIT: u64 = 100 * 1024 * 1024;
+
+/// 把「以安得云荟打开」的文件准备到临时目录。返回临时目录与每个文件的实际可播放路径。
+///
+/// ★ 曾经的实现有两个叠加的毛病，用户感知是"点了没反应两三秒"：
+///   1. `fs::read` 把整个文件读进内存再 `fs::write` 出去 —— 2 GB 视频就是
+///      2 GB 内存 + 2 GB 磁盘复制，而且全程在主线程；
+///   2. 无论多大都复制一份，等于凭空多占一份磁盘。
+///   现在：同步改异步（不冻界面）、小文件用 `fs::copy`（不进内存）、
+///   大文件完全不复制（直接返回原路径）。
 #[tauri::command]
-pub fn import_to_openwith_dir(
+pub async fn import_to_openwith_dir(
     app: tauri::AppHandle,
     module: String,
     files: Vec<OpenWithItem>,
@@ -319,35 +336,59 @@ pub fn import_to_openwith_dir(
     if module.is_empty() {
         return Err("module 不能为空".to_string());
     }
-    let dir = openwith_module_dir(&app, &module)?;
-    fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {}", e))?;
+    let app_bg = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let dir = openwith_module_dir(&app_bg, &module)?;
+        fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {}", e))?;
 
-    let mut final_paths: Vec<String> = Vec::new();
-    for item in files {
-        let (file_name, data): (String, Vec<u8>) = match item {
-            OpenWithItem::Path { path, name } => {
-                let src = std::path::Path::new(&path);
-                let name = name
-                    .filter(|n| !n.is_empty())
-                    .or_else(|| {
-                        src.file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                    })
-                    .ok_or_else(|| format!("无效路径: {}", path))?;
-                let bytes = fs::read(&src).map_err(|e| format!("读取源文件失败: {}", e))?;
-                (name, bytes)
+        let mut final_paths: Vec<String> = Vec::new();
+        for item in files {
+            match item {
+                OpenWithItem::Path { path, name } => {
+                    let src = std::path::Path::new(&path);
+                    let file_name = name
+                        .filter(|n| !n.is_empty())
+                        .or_else(|| {
+                            src.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                        })
+                        .ok_or_else(|| format!("无效路径: {}", path))?;
+                    if !src.is_file() {
+                        return Err(format!("文件不存在: {}", path));
+                    }
+                    let size = fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+                    if size > OPENWITH_COPY_LIMIT {
+                        // 大文件：不复制，直接用原路径。下面 `addRootPathEphemeral(dir)`
+                        // 注册的临时目录里不会有它，但播放走的是这个路径，够用。
+                        eprintln!(
+                            "[OpenWith] 「{}」{:.1} MB 超过复制阈值 {:.0} MB，直接使用原路径",
+                            file_name,
+                            size as f64 / 1048576.0,
+                            OPENWITH_COPY_LIMIT as f64 / 1048576.0
+                        );
+                        final_paths.push(path);
+                        continue;
+                    }
+                    let dest = dir.join(&file_name);
+                    // fs::copy 不把文件读进内存（对比原来的 read+write）
+                    fs::copy(src, &dest).map_err(|e| format!("复制到临时目录失败: {}", e))?;
+                    final_paths.push(dest.to_string_lossy().to_string());
+                }
+                OpenWithItem::Bytes { name, bytes } => {
+                    let dest = dir.join(&name);
+                    fs::write(&dest, &bytes).map_err(|e| format!("写入临时目录失败: {}", e))?;
+                    final_paths.push(dest.to_string_lossy().to_string());
+                }
             }
-            OpenWithItem::Bytes { name, bytes } => (name, bytes),
-        };
-        let dest = dir.join(&file_name);
-        fs::write(&dest, &data).map_err(|e| format!("写入临时目录失败: {}", e))?;
-        final_paths.push(dest.to_string_lossy().to_string());
-    }
+        }
 
-    Ok(OpenWithDirResult {
-        dir: dir.to_string_lossy().to_string(),
-        paths: final_paths,
+        Ok(OpenWithDirResult {
+            dir: dir.to_string_lossy().to_string(),
+            paths: final_paths,
+        })
     })
+    .await
+    .map_err(|e| format!("import_to_openwith_dir 任务失败: {e}"))?
 }
 
 /// 「以安得云荟打开」临时目录根：`<app_data>/openwith`
