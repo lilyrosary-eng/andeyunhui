@@ -45,7 +45,47 @@ pub(crate) fn resolve(
         }
     }
 
+    // PATH 之外再扫一遍常见包管理器/安装目录（用户没配 PATH 时也能发现）。
+    for dir in common_dirs() {
+        if let Some(path) = find_in(&dir, names) {
+            return Some(path);
+        }
+    }
+
     None
+}
+
+#[cfg(windows)]
+fn common_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(local).join("Microsoft").join("WinGet").join("Links"));
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        dirs.push(PathBuf::from(&home).join("scoop").join("shims"));
+    }
+    if let Some(program_data) = std::env::var_os("ProgramData") {
+        dirs.push(PathBuf::from(program_data).join("chocolatey").join("bin"));
+    }
+    dirs.push(PathBuf::from(r"C:\Program Files\aria2"));
+    dirs.push(PathBuf::from(r"C:\Program Files (x86)\aria2"));
+    dirs.push(PathBuf::from(r"C:\Program Files\ffmpeg\bin"));
+    dirs.push(PathBuf::from(r"C:\Program Files\Gopeed"));
+    dirs
+}
+
+#[cfg(not(windows))]
+fn common_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/snap/bin"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".local").join("bin"));
+    }
+    dirs
 }
 
 fn find_in(dir: &Path, names: &[&str]) -> Option<PathBuf> {

@@ -31,6 +31,7 @@
       "browser_download_captures_take",
       "clipboard_read",
       "pick_directory",
+      "pick_file",
       "fs_open_path"
     ],
     "capabilities": [

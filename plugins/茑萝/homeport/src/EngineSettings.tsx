@@ -19,6 +19,41 @@ function fromKb(value: string): number {
   return Number.isFinite(kb) && kb > 0 ? Math.round(kb * 1024) : 0;
 }
 
+function ToolField({
+  label,
+  value,
+  placeholder,
+  onChange,
+  onPick,
+}: {
+  label: string;
+  value: string;
+  placeholder?: string;
+  onChange: (value: string) => void;
+  onPick: () => void;
+}) {
+  return (
+    <Field label={label}>
+      <div className="flex gap-2">
+        <input
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          spellCheck={false}
+          placeholder={placeholder}
+          className={`${inputClass} min-w-0 font-mono text-xs`}
+        />
+        <button
+          type="button"
+          onClick={onPick}
+          className="flex-shrink-0 rounded-lg border border-black/10 px-2.5 text-[11px] font-medium text-neutral-600 transition-colors hover:bg-black/5 dark:border-white/10 dark:text-stone-300 dark:hover:bg-white/10"
+        >
+          选择
+        </button>
+      </div>
+    </Field>
+  );
+}
+
 export function EngineSettings({
   config,
   engines,
@@ -51,6 +86,15 @@ export function EngineSettings({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+
+  const pickTool = async (apply: (value: string) => void) => {
+    try {
+      const files = await dl.pickFile();
+      if (files[0]) apply(files[0]);
+    } catch (err) {
+      setError(String(err));
+    }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -292,49 +336,40 @@ export function EngineSettings({
               外部工具
             </h3>
             <div className="space-y-3">
-              <Field label="aria2c">
-                <input
-                  value={aria2Path}
-                  onChange={(event) => setAria2Path(event.target.value)}
-                  spellCheck={false}
-                  placeholder="留空自动在 external-deps / PATH 查找"
-                  className={`${inputClass} font-mono text-xs`}
-                />
-              </Field>
-              <Field label="ffmpeg">
-                <input
-                  value={ffmpegPath}
-                  onChange={(event) => setFfmpegPath(event.target.value)}
-                  spellCheck={false}
-                  className={`${inputClass} font-mono text-xs`}
-                />
-              </Field>
+              <ToolField
+                label="aria2c"
+                value={aria2Path}
+                placeholder="留空自动在 external-deps / PATH / 常见目录查找"
+                onChange={setAria2Path}
+                onPick={() => void pickTool(setAria2Path)}
+              />
+              <ToolField
+                label="ffmpeg"
+                value={ffmpegPath}
+                onChange={setFfmpegPath}
+                onPick={() => void pickTool(setFfmpegPath)}
+              />
               <div className="grid grid-cols-2 gap-3">
-                <Field label="curl">
-                  <input
-                    value={curlPath}
-                    onChange={(event) => setCurlPath(event.target.value)}
-                    spellCheck={false}
-                    className={`${inputClass} font-mono text-xs`}
-                  />
-                </Field>
-                <Field label="wget">
-                  <input
-                    value={wgetPath}
-                    onChange={(event) => setWgetPath(event.target.value)}
-                    spellCheck={false}
-                    className={`${inputClass} font-mono text-xs`}
-                  />
-                </Field>
-              </div>
-              <Field label="gopeed" hint="P2P：BT / 磁力 / ed2k">
-                <input
-                  value={gopeedPath}
-                  onChange={(event) => setGopeedPath(event.target.value)}
-                  spellCheck={false}
-                  className={`${inputClass} font-mono text-xs`}
+                <ToolField
+                  label="curl"
+                  value={curlPath}
+                  onChange={setCurlPath}
+                  onPick={() => void pickTool(setCurlPath)}
                 />
-              </Field>
+                <ToolField
+                  label="wget"
+                  value={wgetPath}
+                  onChange={setWgetPath}
+                  onPick={() => void pickTool(setWgetPath)}
+                />
+              </div>
+              <ToolField
+                label="gopeed"
+                value={gopeedPath}
+                placeholder="P2P：BT / 磁力 / ed2k"
+                onChange={setGopeedPath}
+                onPick={() => void pickTool(setGopeedPath)}
+              />
             </div>
           </section>
 

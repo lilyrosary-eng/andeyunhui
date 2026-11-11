@@ -196,6 +196,8 @@ export const dl = {
     invoke<BrowserCapture[]>('browser_download_captures_take'),
   openPath: (path: string) => invoke<void>('fs_open_path', { path }),
   pickDirectory: () => invoke<string | null>('pick_directory', {}),
+  pickFile: () =>
+    invoke<string[]>('pick_file', { filters: null, multiple: false }),
 };
 
 export const STATUS_LABEL: Record<TaskStatus, string> = {
