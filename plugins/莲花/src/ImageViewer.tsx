@@ -1820,7 +1820,10 @@ function FullView({
       )}
 
       {imgError || tileError ? (
-        <div className="flex flex-col items-center gap-3 text-neutral-300 dark:text-stone-600 text-sm">
+        // **z-30 + relative**：上面有 `absolute inset-0 z-10` 的"点一下切换工具栏"层，
+        // 还有一个 z-20 的拖动层（放大时）。错误块原本是静态定位，被它们盖住 ⇒
+        // 用户"点不到重试"。必须显式抬到最上层并恢复点击。
+        <div className="relative z-30 pointer-events-auto flex flex-col items-center gap-3 text-neutral-300 dark:text-stone-600 text-sm">
           <span>{T('image.viewer.loadFailed')}</span>
           <button
             type="button"

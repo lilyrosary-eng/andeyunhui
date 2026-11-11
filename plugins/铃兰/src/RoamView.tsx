@@ -147,6 +147,12 @@ const EqBars = memo(function EqBars({
   gap?: number;
 }) {
   const barsRef = useRef<Array<HTMLSpanElement | null>>([]);
+  /**
+   * 平滑状态放在 ref 里，**跨 effect 存活**。
+   * effect 依赖里有 `isPlaying`，切歌时 false→true 会重建 effect；
+   * 若 disp 在 effect 内 new，切歌瞬间所有条会被清零再重新涨起来 —— 观感就是"顿一下"。
+   */
+  const dispRef = useRef<Float32Array | null>(null);
   useEffect(() => {
     if (!active) return;
     const freqData = new Uint8Array(64);
@@ -159,7 +165,8 @@ const EqBars = memo(function EqBars({
     // 之前靠 CSS `transition: transform .05s` 做平滑，而 transform 每帧都在改 ⇒
     // 每帧都重新起一段 50ms 补间、下一帧又被改写，等于一个固定滞后的低通 + 抖动，
     // 观感就是用户说的"粘滞"。补间必须自己做在 JS 里，CSS 只负责最终值。
-    const disp = new Float32Array(EQ_BARS);
+    if (!dispRef.current) dispRef.current = new Float32Array(EQ_BARS);
+    const disp = dispRef.current;
     let raf = 0;
     let last = 0;
     const animate = (ts: number) => {

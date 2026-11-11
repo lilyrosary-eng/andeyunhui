@@ -25,7 +25,13 @@ const SPECTRUM_BARS: usize = 64;
 /// FFT 窗口大小（2 的幂，1024 点足够频率分辨率）
 const FFT_SIZE: usize = 1024;
 /// 推送间隔（~30fps）
-const PUSH_INTERVAL_MS: u64 = 33;
+// 推送间隔：33ms（30fps）→ 16ms（60fps）。
+//
+// 用户反馈"动画好一点但还不够丝滑"。30fps 的数据 + 60fps 的渲染 = 每个目标值被
+// 保持两帧，肉眼能看出台阶；JS 侧虽然做了指数平滑，但"目标本身是阶梯的"这件事
+// 平滑不掉。60fps 推 + JS 平滑是这类频谱可视化的常规组合。
+// 代价：每帧一次 emit（64 个 u8 → JSON 约 250B，约 15KB/s），可以忽略。
+const PUSH_INTERVAL_MS: u64 = 16;
 
 const SUBTYPE_FLOAT: GUID = GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
 const SUBTYPE_PCM: GUID = GUID::from_u128(0x00000001_0000_0010_8000_00aa00389b71);

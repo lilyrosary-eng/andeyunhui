@@ -1134,6 +1134,93 @@ impl LevelSampler {
     }
 }
 
+/// 非 PNG（JPEG/WebP/BMP…）的瓦片生成。
+///
+/// ## 为什么必须有这条路径（2026-11-11）
+/// 原来 `generate_tiles` 只认 PNG：`generate_png_tiles` 一读签名不是 PNG 就
+/// 返回 `Err("只支持 PNG 生成瓦片")`。于是**大 JPEG（也就是最多数的照片）
+/// 在完整模式下必定失败** —— 用户看到的「只有完整模式显示加载失败、
+/// 切到别的展示模式就正常」（别的模式直接用 <img> 原图）。
+///
+/// ## 内存
+/// JPEG 走 `decode_jpeg_scaled`（IDCT 阶段降采样），但瓦片最细层要 1:1，
+/// 所以基本等于整图解码：8192² 的 RGB 约 200MB。这是"能看"与"不能看"的取舍，
+/// 解码完立刻按层缩放并释放不了（要复用源图裁切），故只在必要时走这条路。
+fn generate_tiles_from_image(
+    image_path: &std::path::Path,
+    dir: &std::path::Path,
+    levels: &[TileLevel],
+    tile: u32,
+    w0: u32,
+    h0: u32,
+) -> Result<(), String> {
+    let src = decode_jpeg_scaled(image_path, w0.max(h0))
+        .or_else(|| image::open(image_path).ok())
+        .ok_or_else(|| format!("解码失败（不支持的格式？）: {}", image_path.display()))?
+        .to_rgb8();
+    log::info!(
+        "[tiles] 非 PNG 瓦片源解码完成: {}x{} → {}x{}",
+        w0, h0, src.width(), src.height()
+    );
+    let (sw, sh) = (src.width(), src.height());
+    if sw == 0 || sh == 0 {
+        return Err("解码结果尺寸为 0".to_string());
+    }
+
+    for (i, lv) in levels.iter().enumerate() {
+        // 该层尺寸可能是原图的整数分之一；不等于源尺寸时才做一次缩放
+        // 最细层直接借源图（**不要 clone**：8192² RGB 一次 clone 就是再吃 200MB）
+        let scaled: image::RgbImage;
+        let level_img: &image::RgbImage = if lv.width == sw && lv.height == sh {
+            &src
+        } else {
+            scaled = image::imageops::resize(
+                &src,
+                lv.width,
+                lv.height,
+                image::imageops::FilterType::Triangle,
+            );
+            &scaled
+        };
+        let (lw, lh) = (level_img.width(), level_img.height());
+        let level_dir = dir.join(format!("L{i}"));
+        std::fs::create_dir_all(&level_dir).map_err(|e| format!("创建瓦片目录失败: {e}"))?;
+        let stride = lw as usize * 3;
+        let raw = level_img.as_raw();
+
+        for r in 0..lv.rows {
+            for c in 0..lv.cols {
+                // 边缘瓦片按"复制最后一像素"补齐成整块 —— 与 PNG 流式路径一致，
+                // 否则前端按 c*tile 定位会留下黑边/缝。
+                let mut data = vec![0u8; (tile * tile * 3) as usize];
+                let copy_px = ((lw.saturating_sub(c * tile)).min(tile)) as usize;
+                for ty in 0..tile {
+                    let sy = ((r * tile + ty).min(lh.saturating_sub(1))) as usize;
+                    let src_row = sy * stride + (c * tile) as usize * 3;
+                    let dst_row = ty as usize * tile as usize * 3;
+                    // 整行拷贝（比逐像素快一个数量级）
+                    data[dst_row..dst_row + copy_px * 3]
+                        .copy_from_slice(&raw[src_row..src_row + copy_px * 3]);
+                    // 右侧补齐：复制本行最后一个像素（与 PNG 路径的补边口径一致）
+                    if copy_px < tile as usize {
+                        let mut last = [0u8; 3];
+                        last.copy_from_slice(&data[dst_row + (copy_px - 1) * 3..dst_row + copy_px * 3]);
+                        for k in copy_px..tile as usize {
+                            data[dst_row + k * 3..dst_row + k * 3 + 3].copy_from_slice(&last);
+                        }
+                    }
+                }
+                let img = image::RgbImage::from_raw(tile, tile, data)
+                    .ok_or_else(|| "构造瓦片图像失败".to_string())?;
+                let path = level_dir.join(format!("{r}_{c}.png"));
+                save_png_fast(&image::DynamicImage::ImageRgb8(img), &path)?;
+            }
+        }
+        log::info!("[tiles] L{i} {}x{} cols={} rows={} 已写出", lv.width, lv.height, lv.cols, lv.rows);
+    }
+    Ok(())
+}
+
 /// 为一张 PNG 生成 tile 金字塔（一次流式解码写出所有层）。
 fn generate_png_tiles(
     image_path: &std::path::Path,
@@ -1387,7 +1474,29 @@ pub fn generate_tiles(
         // 清掉可能残留的旧格式目录，避免新旧混放
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("创建瓦片目录失败: {e}"))?;
-        generate_png_tiles(std::path::Path::new(image_path), &dir, &levels, TILE_SIZE)?;
+        // 按真实格式分发：PNG 走"流式逐行抽样"（内存只占两行），
+        // 其它格式（JPEG/WebP/BMP）走 image crate 整图解码后裁切。
+        let is_png = std::fs::File::open(image_path)
+            .ok()
+            .and_then(|mut f| {
+                use std::io::Read as _;
+                let mut sig = [0u8; 8];
+                f.read_exact(&mut sig).ok().map(|_| &sig[1..4] == b"PNG")
+            })
+            .unwrap_or(false);
+        if is_png {
+            generate_png_tiles(std::path::Path::new(image_path), &dir, &levels, TILE_SIZE)?;
+        } else {
+            log::info!("[tiles] 非 PNG 源，走整图解码路径: {image_path}");
+            generate_tiles_from_image(
+                std::path::Path::new(image_path),
+                &dir,
+                &levels,
+                TILE_SIZE,
+                w0,
+                h0,
+            )?;
+        }
     // 逐层核对：哪层没写出来，日志里直接能看出来
     for (i, lv) in levels.iter().enumerate() {
         let first = dir.join(format!("L{i}")).join("0_0.png");
