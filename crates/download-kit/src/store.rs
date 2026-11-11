@@ -179,10 +179,36 @@ impl Store {
 
     /// 取优先级最高、同优先级最早入队的任务。
     pub fn next_queued(&self) -> Result<Option<DownloadTask>, String> {
+        self.next_queued_excluding(&[])
+    }
+
+    /// 取下一个排队任务，跳过 `excluded` 中的 id（调度器用于跳过已满的站点）。
+    pub fn next_queued_excluding(
+        &self,
+        excluded: &[String],
+    ) -> Result<Option<DownloadTask>, String> {
         let conn = self.lock()?;
+        if excluded.is_empty() {
+            return conn
+                .query_row(
+                    "SELECT * FROM tasks WHERE status = 'queued' ORDER BY priority DESC, created_at ASC LIMIT 1",
+                    [],
+                    row_to_task,
+                )
+                .optional()
+                .map_err(|e| format!("读取排队任务失败: {e}"));
+        }
+        let placeholders = (1..=excluded.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT * FROM tasks WHERE status = 'queued' AND id NOT IN ({placeholders}) \
+             ORDER BY priority DESC, created_at ASC LIMIT 1"
+        );
         conn.query_row(
-            "SELECT * FROM tasks WHERE status = 'queued' ORDER BY priority DESC, created_at ASC LIMIT 1",
-            [],
+            &sql,
+            rusqlite::params_from_iter(excluded.iter().map(|value| value.as_str())),
             row_to_task,
         )
         .optional()
@@ -604,6 +630,11 @@ mod tests {
         store.insert_task(&queued("high", 10, 2)).unwrap();
         let next = store.next_queued().unwrap().unwrap();
         assert_eq!(next.id, "high");
+        let next = store
+            .next_queued_excluding(&["high".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.id, "low");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

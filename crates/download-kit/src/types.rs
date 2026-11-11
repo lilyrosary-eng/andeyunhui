@@ -273,6 +273,8 @@ pub struct EngineConfig {
     pub connections: u32,
     /// 同时运行的下载任务数。
     pub max_concurrent_tasks: u32,
+    /// 同一站点同时运行的任务数上限（0 = 不限）。
+    pub max_per_host: u32,
     /// 单个分片失败后的重试次数。
     pub retries: u32,
     /// 整个任务失败后的自动重试次数（0 = 不重试）；只对网络类错误生效。
@@ -320,6 +322,7 @@ impl Default for EngineConfig {
             default_engine: EngineKind::Auto,
             connections: 8,
             max_concurrent_tasks: 3,
+            max_per_host: 0,
             retries: 4,
             task_retries: 1,
             retry_base_ms: 800,
@@ -346,6 +349,7 @@ impl EngineConfig {
     pub fn normalize(mut self) -> Self {
         self.connections = self.connections.clamp(1, 32);
         self.max_concurrent_tasks = self.max_concurrent_tasks.clamp(1, 8);
+        self.max_per_host = self.max_per_host.min(8);
         self.retries = self.retries.min(10);
         self.task_retries = self.task_retries.min(5);
         self.retry_base_ms = self.retry_base_ms.clamp(100, 10_000);

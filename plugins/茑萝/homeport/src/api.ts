@@ -83,6 +83,7 @@ export interface EngineConfig {
   defaultEngine: EngineKind;
   connections: number;
   maxConcurrentTasks: number;
+  maxPerHost: number;
   retries: number;
   taskRetries: number;
   retryBaseMs: number;

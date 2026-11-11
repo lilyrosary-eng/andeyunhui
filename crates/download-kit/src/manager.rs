@@ -95,6 +95,8 @@ pub(crate) struct Inner {
     controls: Mutex<HashMap<String, watch::Sender<Control>>>,
     /// 自动重试计数：成功、取消或手动重试时清零。
     retry_attempts: Mutex<HashMap<String, u32>>,
+    /// 当前活动任务按站点计数，用于「单站点并发」限制。
+    active_hosts: Mutex<HashMap<String, u32>>,
     active: AtomicU32,
     wake: Notify,
     scheduler_guard: tokio::sync::Mutex<()>,
@@ -443,6 +445,7 @@ impl DownloadManager {
             ),
             controls: Mutex::new(HashMap::new()),
             retry_attempts: Mutex::new(HashMap::new()),
+            active_hosts: Mutex::new(HashMap::new()),
             active: AtomicU32::new(0),
             wake: Notify::new(),
             scheduler_guard: tokio::sync::Mutex::new(()),
@@ -1025,12 +1028,14 @@ async fn scheduler(inner: Arc<Inner>) {
         inner.wake.notified().await;
         // 认领动作串行化：避免多个唤醒同时把并发数冲过上限。
         let _guard = inner.scheduler_guard.lock().await;
+        let mut skipped: Vec<String> = Vec::new();
         loop {
-            let max = inner.config().max_concurrent_tasks.max(1);
+            let config = inner.config();
+            let max = config.max_concurrent_tasks.max(1);
             if inner.active.load(Ordering::SeqCst) >= max {
                 break;
             }
-            let next = match inner.store.next_queued() {
+            let next = match inner.store.next_queued_excluding(&skipped) {
                 Ok(Some(task)) => task,
                 Ok(None) => break,
                 Err(error) => {
@@ -1038,6 +1043,18 @@ async fn scheduler(inner: Arc<Inner>) {
                     break;
                 }
             };
+            let host = task_host(&next.urls[0]);
+            if config.max_per_host > 0 {
+                let current = inner
+                    .active_hosts
+                    .lock()
+                    .map(|guard| guard.get(&host).copied().unwrap_or(0))
+                    .unwrap_or(0);
+                if current >= config.max_per_host {
+                    skipped.push(next.id.clone());
+                    continue;
+                }
+            }
             match inner.store.claim_queued(&next.id) {
                 Ok(true) => {}
                 Ok(false) => continue,
@@ -1045,6 +1062,9 @@ async fn scheduler(inner: Arc<Inner>) {
                     eprintln!("[download-kit] 认领任务失败: {error}");
                     break;
                 }
+            }
+            if let Ok(mut guard) = inner.active_hosts.lock() {
+                *guard.entry(host.clone()).or_insert(0) += 1;
             }
 
             let (sender, receiver) = watch::channel(Control::Run);
@@ -1055,16 +1075,38 @@ async fn scheduler(inner: Arc<Inner>) {
 
             let task_inner = inner.clone();
             let task_id = next.id.clone();
+            let task_host = host;
             tauri::async_runtime::spawn(async move {
-                run_task(task_inner, task_id, receiver).await;
+                run_task(task_inner, task_id, receiver, task_host).await;
             });
         }
     }
 }
 
-async fn run_task(inner: Arc<Inner>, id: String, control: watch::Receiver<Control>) {
+/// 任务站点标识：用 host 做并发分组；磁力/本地文件等无 host 的归入固定桶。
+fn task_host(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(|host| host.to_ascii_lowercase()))
+        .unwrap_or_else(|| "p2p".to_string())
+}
+
+async fn run_task(
+    inner: Arc<Inner>,
+    id: String,
+    control: watch::Receiver<Control>,
+    host: String,
+) {
     let result = run_engine(&inner, &id, control).await;
     inner.active.fetch_sub(1, Ordering::SeqCst);
+    if let Ok(mut guard) = inner.active_hosts.lock() {
+        if let Some(count) = guard.get_mut(&host) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                guard.remove(&host);
+            }
+        }
+    }
     if let Ok(mut controls) = inner.controls.lock() {
         controls.remove(&id);
     }
@@ -1206,6 +1248,7 @@ mod tests {
             global_limiter: RwLock::new(global_limiter),
             controls: Mutex::new(HashMap::new()),
             retry_attempts: Mutex::new(HashMap::new()),
+            active_hosts: Mutex::new(HashMap::new()),
             active: AtomicU32::new(0),
             wake: Notify::new(),
             scheduler_guard: tokio::sync::Mutex::new(()),
@@ -1740,6 +1783,13 @@ mod tests {
         assert!(!is_retryable_failure("HTTP 404 Not Found"));
         assert!(!is_retryable_failure("SHA-256 校验失败"));
         assert!(!is_retryable_failure("未找到 aria2c"));
+    }
+
+    #[test]
+    fn task_host_groups_by_domain() {
+        assert_eq!(task_host("https://Example.com/a.bin"), "example.com");
+        assert_eq!(task_host("ftp://files.test/a.bin"), "files.test");
+        assert_eq!(task_host("magnet:?xt=urn:btih:abc"), "p2p");
     }
 
     #[test]

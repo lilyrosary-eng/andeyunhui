@@ -33,6 +33,7 @@ export function EngineSettings({
   const [defaultEngine, setDefaultEngine] = useState(config.defaultEngine);
   const [connections, setConnections] = useState(String(config.connections));
   const [maxTasks, setMaxTasks] = useState(String(config.maxConcurrentTasks));
+  const [maxPerHost, setMaxPerHost] = useState(String(config.maxPerHost));
   const [taskRetries, setTaskRetries] = useState(String(config.taskRetries));
   const [speedKb, setSpeedKb] = useState(toKb(config.speedLimit));
   const [totalSpeedKb, setTotalSpeedKb] = useState(toKb(config.totalSpeedLimit));
@@ -59,6 +60,7 @@ export function EngineSettings({
         defaultEngine: defaultEngine as never,
         connections: Math.min(32, Math.max(1, Number(connections) || 8)),
         maxConcurrentTasks: Math.min(8, Math.max(1, Number(maxTasks) || 2)),
+        maxPerHost: Math.min(8, Math.max(0, Number(maxPerHost) || 0)),
         taskRetries: Math.min(5, Math.max(0, Number(taskRetries) || 0)),
         speedLimit: fromKb(speedKb),
         totalSpeedLimit: fromKb(totalSpeedKb),
@@ -160,6 +162,16 @@ export function EngineSettings({
                     max={8}
                     value={maxTasks}
                     onChange={(event) => setMaxTasks(event.target.value)}
+                    className={inputClass}
+                  />
+                </Field>
+                <Field label="单站点并发" hint="0 = 不限">
+                  <input
+                    type="number"
+                    min={0}
+                    max={8}
+                    value={maxPerHost}
+                    onChange={(event) => setMaxPerHost(event.target.value)}
                     className={inputClass}
                   />
                 </Field>
