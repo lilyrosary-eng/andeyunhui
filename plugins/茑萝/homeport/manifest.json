@@ -28,6 +28,7 @@
       "dl_engines",
       "dl_probe",
       "dl_hls_variants",
+      "browser_download_captures_take",
       "clipboard_read",
       "pick_directory",
       "fs_open_path"

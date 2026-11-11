@@ -32,11 +32,66 @@
 //! 载荷按窗口 label 存入 `media_relay` 的进程内缓冲，前端用 `browser_sniff(target)` 取走。
 //! 用「导航」而非 fetch 的原因：外部站点的 CSP 管不到导航，但很可能把 fetch 拦掉。
 
+use std::sync::Mutex;
+
 use tauri::http::{header, Response, StatusCode};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// 窗口 label 前缀（同时用于 `browser_close_all` 的批量识别）
 pub const LABEL_PREFIX: &str = "browser-";
+
+/// 浏览器下载被凌霄接管时发给前端的事件名。
+pub const DOWNLOAD_CAPTURE_EVENT: &str = "download-kit:browser-capture";
+
+/// 被浏览器触发、等待用户决定是否交给凌霄的下载。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserDownloadCapture {
+    pub url: String,
+    pub created_at: i64,
+}
+
+/// 进程内缓冲：凌霄没打开时先把捕获存下来，下次打开再取。
+static PENDING_DOWNLOAD_CAPTURES: Mutex<Vec<BrowserDownloadCapture>> = Mutex::new(Vec::new());
+
+fn push_download_capture(app: &AppHandle, url: String) {
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    let capture = BrowserDownloadCapture { url, created_at };
+    if let Ok(mut guard) = PENDING_DOWNLOAD_CAPTURES.lock() {
+        if guard.iter().any(|item| item.url == capture.url) {
+            return;
+        }
+        guard.push(capture.clone());
+        if guard.len() > 50 {
+            guard.remove(0);
+        }
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = app.emit(DOWNLOAD_CAPTURE_EVENT, capture);
+    });
+}
+
+/// 读取凌霄的接管开关；读不到配置时按开启处理（默认接管）。
+fn takeover_enabled(app: &AppHandle) -> bool {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| download_kit::config::load(&dir.join("download-kit")).browser_takeover)
+        .unwrap_or(true)
+}
+
+/// 取走尚未处理的浏览器下载捕获（凌霄打开时调用）。
+#[tauri::command]
+pub fn browser_download_captures_take() -> Vec<BrowserDownloadCapture> {
+    PENDING_DOWNLOAD_CAPTURES
+        .lock()
+        .map(|mut guard| std::mem::take(&mut *guard))
+        .unwrap_or_default()
+}
 
 /// 浏览器窗口的 UA：伪装成普通桌面 Edge。
 ///
@@ -258,6 +313,20 @@ pub async fn browser_open(
     }
     let nav_label = label.clone();
     builder = builder.on_navigation(move |u| sniff_navigation(&nav_label, u));
+
+    // 下载接管：命中 Requested 时取消浏览器自身下载，转交凌霄处理。
+    // 关闭接管时返回 true，保持浏览器原生下载行为。
+    let capture_app = app.clone();
+    builder = builder.on_download(move |_webview, event| match event {
+        tauri::webview::DownloadEvent::Requested { url, .. } => {
+            if !takeover_enabled(&capture_app) {
+                return true;
+            }
+            push_download_capture(&capture_app, url.to_string());
+            false
+        }
+        _ => true,
+    });
 
     let win = builder
         .build()

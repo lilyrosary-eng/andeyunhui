@@ -46,6 +46,7 @@ export function EngineSettings({
   const [gopeedPath, setGopeedPath] = useState(config.gopeedPath ?? '');
   const [resumeOnStart, setResumeOnStart] = useState(config.resumeOnStart);
   const [notifyOnComplete, setNotifyOnComplete] = useState(config.notifyOnComplete);
+  const [browserTakeover, setBrowserTakeover] = useState(config.browserTakeover);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -73,6 +74,7 @@ export function EngineSettings({
         gopeedPath: gopeedPath.trim() || null,
         resumeOnStart,
         notifyOnComplete,
+        browserTakeover,
       };
       const result = await dl.configSet(next);
       onSaved(result);
@@ -214,6 +216,20 @@ export function EngineSettings({
                   className="h-3.5 w-3.5 accent-[var(--element-bg)]"
                 />
                 完成/失败时发送系统通知
+              </label>
+              <label className="flex items-start gap-2 text-xs text-neutral-600 dark:text-stone-300">
+                <input
+                  type="checkbox"
+                  checked={browserTakeover}
+                  onChange={(event) => setBrowserTakeover(event.target.checked)}
+                  className="mt-0.5 h-3.5 w-3.5 accent-[var(--element-bg)]"
+                />
+                <span>
+                  接管内置浏览器下载
+                  <span className="mt-0.5 block text-[10px] leading-relaxed text-neutral-400 dark:text-stone-500">
+                    在玉兰 / 网际等内置浏览器里触发的下载会转到凌霄，由你选目录后入队
+                  </span>
+                </span>
               </label>
             </div>
           </section>

@@ -2,6 +2,7 @@
 // 凌霄 · 下载中心主面板：任务列表 + 新建下载 + 引擎设置。
 
 import type {
+  BrowserCapture,
   DownloadTask,
   EngineConfig,
   EngineKind,
@@ -89,6 +90,8 @@ export function HomeportModule() {
   const [showNew, setShowNew] = useState(false);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [captures, setCaptures] = useState<BrowserCapture[]>([]);
+  const [captureTarget, setCaptureTarget] = useState<BrowserCapture | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const statusRef = useRef<Record<string, TaskStatus>>({});
@@ -133,6 +136,29 @@ export function HomeportModule() {
   useEffect(() => {
     notifyRef.current = config?.notifyOnComplete ?? true;
   }, [config?.notifyOnComplete]);
+
+  // 内置浏览器触发的下载：先取进程内缓冲，再持续监听新捕获。
+  useEffect(() => {
+    let alive = true;
+    void dl
+      .takeBrowserCaptures()
+      .then((list) => {
+        if (alive && list.length > 0) setCaptures(list);
+      })
+      .catch(() => {});
+    const unlisten = window.__HOST_API__.listen<BrowserCapture>(
+      'download-kit:browser-capture',
+      ({ payload }) => {
+        setCaptures((prev) =>
+          prev.some((item) => item.url === payload.url) ? prev : [...prev, payload].slice(-20),
+        );
+      },
+    );
+    return () => {
+      alive = false;
+      void unlisten.then((off) => off()).catch(() => {});
+    };
+  }, []);
 
   // 实时进度 / 状态事件；插件卸载时统一退订。
   useEffect(() => {
@@ -304,6 +330,17 @@ export function HomeportModule() {
     } finally {
       setDetailLoading(false);
     }
+  };
+
+  const dismissCapture = (url: string) => {
+    setCaptures((prev) => prev.filter((item) => item.url !== url));
+  };
+
+  const takeCapture = (capture: BrowserCapture) => {
+    dismissCapture(capture.url);
+    setDetail(null);
+    setCaptureTarget(capture);
+    setShowNew(true);
   };
 
   const renderTask = (task: TaskView) => {
@@ -486,6 +523,7 @@ export function HomeportModule() {
             type="button"
             onClick={() => {
               setDetail(null);
+              setCaptureTarget(null);
               setShowNew(true);
             }}
             className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--element-bg)] px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition-opacity hover:opacity-90"
@@ -495,6 +533,57 @@ export function HomeportModule() {
           </button>
         </div>
       </div>
+
+      {captures.length > 0 ? (
+        <div className="mx-6 mt-3 rounded-2xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 dark:border-amber-400/20 dark:bg-amber-400/10">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+              内置浏览器捕获了 {captures.length} 个下载
+            </span>
+            <button
+              type="button"
+              onClick={() => setCaptures([])}
+              className="ml-auto text-[10px] text-amber-700/70 transition-colors hover:text-amber-800 dark:text-amber-300/70 dark:hover:text-amber-200"
+            >
+              全部忽略
+            </button>
+          </div>
+          <div className="mt-2 space-y-1.5">
+            {captures.slice(0, 3).map((capture) => (
+              <div
+                key={capture.url}
+                className="flex items-center gap-2 rounded-xl bg-white/60 px-2.5 py-1.5 dark:bg-stone-900/40"
+              >
+                <span
+                  className="min-w-0 flex-1 truncate text-[11px] text-neutral-600 dark:text-stone-300"
+                  title={capture.url}
+                >
+                  {hostOf(capture.url)} · {capture.url}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => takeCapture(capture)}
+                  className="rounded-lg bg-[var(--element-bg)] px-2.5 py-1 text-[10px] font-semibold text-white transition-opacity hover:opacity-90"
+                >
+                  下载
+                </button>
+                <button
+                  type="button"
+                  onClick={() => dismissCapture(capture.url)}
+                  className="rounded-lg px-2 py-1 text-[10px] text-neutral-500 transition-colors hover:bg-black/5 dark:text-stone-400 dark:hover:bg-white/10"
+                >
+                  忽略
+                </button>
+              </div>
+            ))}
+            {captures.length > 3 ? (
+              <div className="text-[10px] text-amber-700/70 dark:text-amber-300/70">
+                还有 {captures.length - 3} 个，逐条处理后会继续显示
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       {view === 'tasks' ? (
         <>
@@ -570,11 +659,17 @@ export function HomeportModule() {
 
       {showNew ? (
         <NewTaskPanel
+          key={captureTarget?.createdAt ?? 'new'}
           engines={engines}
           config={config}
-          onClose={() => setShowNew(false)}
+          initialUrl={captureTarget?.url}
+          onClose={() => {
+            setShowNew(false);
+            setCaptureTarget(null);
+          }}
           onCreated={() => {
             setShowNew(false);
+            setCaptureTarget(null);
             setFilter('all');
             void reload(true);
           }}

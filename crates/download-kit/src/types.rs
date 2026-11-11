@@ -314,6 +314,8 @@ pub struct EngineConfig {
     pub resume_on_start: bool,
     /// 任务完成/失败时是否发系统通知（由前端消费，后端只负责持久化）。
     pub notify_on_complete: bool,
+    /// 是否接管内置浏览器里触发的下载（由宿主浏览器读取该开关）。
+    pub browser_takeover: bool,
 }
 
 impl Default for EngineConfig {
@@ -340,6 +342,7 @@ impl Default for EngineConfig {
             gopeed_path: None,
             resume_on_start: true,
             notify_on_complete: true,
+            browser_takeover: true,
         }
     }
 }

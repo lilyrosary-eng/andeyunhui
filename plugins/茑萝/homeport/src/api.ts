@@ -101,6 +101,7 @@ export interface EngineConfig {
   gopeedPath?: string | null;
   resumeOnStart: boolean;
   notifyOnComplete: boolean;
+  browserTakeover: boolean;
 }
 
 export interface ProbeResult {
@@ -151,6 +152,12 @@ export interface HlsVariant {
   name: string;
 }
 
+/** 内置浏览器里被拦截、等待凌霄接管的一次下载。 */
+export interface BrowserCapture {
+  url: string;
+  createdAt: number;
+}
+
 export interface ProbeRequest {
   url: string;
   referer?: string | null;
@@ -184,6 +191,8 @@ export const dl = {
   hlsVariants: (request: ProbeRequest) =>
     invoke<HlsVariant[]>('dl_hls_variants', { request }),
   readClipboard: () => invoke<string>('clipboard_read'),
+  takeBrowserCaptures: () =>
+    invoke<BrowserCapture[]>('browser_download_captures_take'),
   openPath: (path: string) => invoke<void>('fs_open_path', { path }),
   pickDirectory: () => invoke<string | null>('pick_directory', {}),
 };

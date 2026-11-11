@@ -19,15 +19,17 @@ const { useState } = React;
 export function NewTaskPanel({
   engines,
   config,
+  initialUrl,
   onClose,
   onCreated,
 }: {
   engines: EngineStatus | null;
   config: EngineConfig | null;
+  initialUrl?: string;
   onClose: () => void;
   onCreated: (id: string) => void;
 }) {
-  const [urlText, setUrlText] = useState('');
+  const [urlText, setUrlText] = useState(initialUrl ?? '');
   const [mode, setMode] = useState<'concat' | 'batch'>('concat');
   const [pasting, setPasting] = useState(false);
   const [mirrorText, setMirrorText] = useState('');
