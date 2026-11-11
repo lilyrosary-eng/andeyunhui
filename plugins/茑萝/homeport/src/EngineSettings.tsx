@@ -33,6 +33,7 @@ export function EngineSettings({
   const [defaultEngine, setDefaultEngine] = useState(config.defaultEngine);
   const [connections, setConnections] = useState(String(config.connections));
   const [maxTasks, setMaxTasks] = useState(String(config.maxConcurrentTasks));
+  const [taskRetries, setTaskRetries] = useState(String(config.taskRetries));
   const [speedKb, setSpeedKb] = useState(toKb(config.speedLimit));
   const [totalSpeedKb, setTotalSpeedKb] = useState(toKb(config.totalSpeedLimit));
   const [proxy, setProxy] = useState(config.proxy ?? '');
@@ -58,6 +59,7 @@ export function EngineSettings({
         defaultEngine: defaultEngine as never,
         connections: Math.min(32, Math.max(1, Number(connections) || 8)),
         maxConcurrentTasks: Math.min(8, Math.max(1, Number(maxTasks) || 2)),
+        taskRetries: Math.min(5, Math.max(0, Number(taskRetries) || 0)),
         speedLimit: fromKb(speedKb),
         totalSpeedLimit: fromKb(totalSpeedKb),
         proxy: proxy.trim() || null,
@@ -140,7 +142,7 @@ export function EngineSettings({
                   ))}
                 </select>
               </Field>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 <Field label="默认连接数" hint="1–32">
                   <input
                     type="number"
@@ -158,6 +160,16 @@ export function EngineSettings({
                     max={8}
                     value={maxTasks}
                     onChange={(event) => setMaxTasks(event.target.value)}
+                    className={inputClass}
+                  />
+                </Field>
+                <Field label="任务自动重试" hint="0–5 次">
+                  <input
+                    type="number"
+                    min={0}
+                    max={5}
+                    value={taskRetries}
+                    onChange={(event) => setTaskRetries(event.target.value)}
                     className={inputClass}
                   />
                 </Field>

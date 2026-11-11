@@ -84,6 +84,7 @@ export interface EngineConfig {
   connections: number;
   maxConcurrentTasks: number;
   retries: number;
+  taskRetries: number;
   retryBaseMs: number;
   retryMaxMs: number;
   connectTimeoutSecs: number;

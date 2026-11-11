@@ -93,6 +93,8 @@ pub(crate) struct Inner {
     /// 全局聚合限速：内置引擎1/2 的所有任务共享。
     global_limiter: RwLock<Option<Arc<SpeedLimiter>>>,
     controls: Mutex<HashMap<String, watch::Sender<Control>>>,
+    /// 自动重试计数：成功、取消或手动重试时清零。
+    retry_attempts: Mutex<HashMap<String, u32>>,
     active: AtomicU32,
     wake: Notify,
     scheduler_guard: tokio::sync::Mutex<()>,
@@ -301,6 +303,9 @@ impl Inner {
         if self.store.complete(id, downloaded, total)? {
             self.emit_state_by_id(id);
         }
+        if let Ok(mut guard) = self.retry_attempts.lock() {
+            guard.remove(id);
+        }
         Ok(())
     }
 
@@ -421,6 +426,7 @@ impl DownloadManager {
                 SpeedLimiter::new(config.total_speed_limit).map(Arc::new),
             ),
             controls: Mutex::new(HashMap::new()),
+            retry_attempts: Mutex::new(HashMap::new()),
             active: AtomicU32::new(0),
             wake: Notify::new(),
             scheduler_guard: tokio::sync::Mutex::new(()),
@@ -656,6 +662,9 @@ impl DownloadManager {
             return Ok(());
         }
         self.inner.store.delete_parts(id)?;
+        if let Ok(mut guard) = self.inner.retry_attempts.lock() {
+            guard.remove(id);
+        }
         // 只有真正开始写过盘的才删；刚入队就取消时不能误删用户已有的同名文件。
         let touched = task.status != TaskStatus::Queued || task.downloaded_bytes > 0;
         if delete_file && touched {
@@ -696,6 +705,9 @@ impl DownloadManager {
         }
         if let Ok(mut controls) = self.inner.controls.lock() {
             controls.remove(id);
+        }
+        if let Ok(mut guard) = self.inner.retry_attempts.lock() {
+            guard.remove(id);
         }
         let changed = self.inner.store.update_status_guarded(
             id,
@@ -854,6 +866,79 @@ fn unique_download_path(target: &Path) -> PathBuf {
     target.to_path_buf()
 }
 
+/// 只对看起来可恢复的失败做自动重试；确定性错误（404 / 校验失败 / 配置缺失）直接终止。
+fn is_retryable_failure(message: &str) -> bool {
+    const FATAL_MARKERS: &[&str] = &[
+        "404",
+        "401",
+        "403",
+        "410",
+        "校验失败",
+        "不支持",
+        "未找到",
+        "缺少",
+        "文件过大",
+        "磁盘空间",
+        "没有可用的下载引擎",
+        "SHA-256",
+    ];
+    !FATAL_MARKERS.iter().any(|marker| message.contains(marker))
+}
+
+/// 失败后按配置延迟重新排队；返回 true 表示已安排自动重试。
+///
+/// 等待期间保持 `failed` 状态（不占并发槽，也不会被调度器提前认领）；
+/// 延迟结束后只在「仍处于 failed」时改回 queued，用户取消/手动重试都不会被覆盖。
+fn schedule_retry(inner: &Arc<Inner>, id: &str, message: &str) -> bool {
+    let config = inner.config();
+    if config.task_retries == 0 || !is_retryable_failure(message) {
+        return false;
+    }
+    let attempt = {
+        let Ok(mut guard) = inner.retry_attempts.lock() else {
+            return false;
+        };
+        let entry = guard.entry(id.to_string()).or_insert(0);
+        if *entry >= config.task_retries {
+            return false;
+        }
+        *entry += 1;
+        *entry
+    };
+    let delay = config
+        .retry_base_ms
+        .saturating_mul(1u64 << (attempt - 1).min(5))
+        .clamp(1_000, config.retry_max_ms.max(1_000));
+    let notice = format!(
+        "第 {attempt}/{} 次自动重试将在 {} 秒后开始：{message}",
+        config.task_retries,
+        (delay + 999) / 1000
+    );
+    let changed = inner
+        .store
+        .update_status_guarded(id, TaskStatus::Failed, Some(&notice), ACTIVE)
+        .unwrap_or(false);
+    if !changed {
+        return false;
+    }
+    inner.emit_state_by_id(id);
+    let inner = inner.clone();
+    let task_id = id.to_string();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+        if let Ok(true) = inner.store.update_status_guarded(
+            &task_id,
+            TaskStatus::Queued,
+            None,
+            &[TaskStatus::Failed],
+        ) {
+            inner.emit_state_by_id(&task_id);
+            inner.wake.notify_one();
+        }
+    });
+    true
+}
+
 async fn scheduler(inner: Arc<Inner>) {
     loop {
         inner.wake.notified().await;
@@ -1005,7 +1090,11 @@ async fn run_engine(
         }
         Ok(EngineOutcome::Canceled) => Ok(()),
         Err(message) => {
-            inner.fail(id, &message);
+            if schedule_retry(inner, id, &message) {
+                eprintln!("[download-kit] 任务 {id} 将按配置自动重试: {message}");
+            } else {
+                inner.fail(id, &message);
+            }
             Err(message)
         }
     }
@@ -1035,6 +1124,7 @@ mod tests {
             engine_map: RwLock::new(HashMap::new()),
             global_limiter: RwLock::new(global_limiter),
             controls: Mutex::new(HashMap::new()),
+            retry_attempts: Mutex::new(HashMap::new()),
             active: AtomicU32::new(0),
             wake: Notify::new(),
             scheduler_guard: tokio::sync::Mutex::new(()),
@@ -1560,6 +1650,15 @@ mod tests {
         let third = unique_download_path(&first);
         assert_eq!(third.file_name().unwrap(), "file (2).zip");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn retryable_failures_exclude_deterministic_errors() {
+        assert!(is_retryable_failure("连接超时"));
+        assert!(is_retryable_failure("HTTP 503 Service Unavailable"));
+        assert!(!is_retryable_failure("HTTP 404 Not Found"));
+        assert!(!is_retryable_failure("SHA-256 校验失败"));
+        assert!(!is_retryable_failure("未找到 aria2c"));
     }
 
     #[test]

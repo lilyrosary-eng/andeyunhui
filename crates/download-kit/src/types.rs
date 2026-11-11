@@ -275,6 +275,8 @@ pub struct EngineConfig {
     pub max_concurrent_tasks: u32,
     /// 单个分片失败后的重试次数。
     pub retries: u32,
+    /// 整个任务失败后的自动重试次数（0 = 不重试）；只对网络类错误生效。
+    pub task_retries: u32,
     /// 重试退避基数（毫秒），按指数增长。
     pub retry_base_ms: u64,
     /// 重试退避上限（毫秒）。
@@ -319,6 +321,7 @@ impl Default for EngineConfig {
             connections: 8,
             max_concurrent_tasks: 3,
             retries: 4,
+            task_retries: 1,
             retry_base_ms: 800,
             retry_max_ms: 30_000,
             connect_timeout_secs: 20,
@@ -344,6 +347,7 @@ impl EngineConfig {
         self.connections = self.connections.clamp(1, 32);
         self.max_concurrent_tasks = self.max_concurrent_tasks.clamp(1, 8);
         self.retries = self.retries.min(10);
+        self.task_retries = self.task_retries.min(5);
         self.retry_base_ms = self.retry_base_ms.clamp(100, 10_000);
         self.retry_max_ms = self.retry_max_ms.clamp(self.retry_base_ms, 120_000);
         self.connect_timeout_secs = self.connect_timeout_secs.clamp(5, 300);
