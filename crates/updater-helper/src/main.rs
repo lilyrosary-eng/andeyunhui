@@ -7,7 +7,7 @@ mod user;
 
 /// 与 Tauri 更新配置里的公钥保持一致（base64 编码的 minisign 公钥文件内容）。
 /// 由 scripts/updater-keys.mjs 生成后写入；发布构建前必须替换 PLACEHOLDER。
-const PUBKEY_B64: &str = include_str!("pubkey.txt");
+const PUBKEY_B64: &str = include_str!("pubkey.b64");
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
