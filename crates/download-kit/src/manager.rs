@@ -1445,6 +1445,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// 动态分段：分片大于 4MB 时会拆成多块回队列，最终仍按原范围合并。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn native_chunks_large_parts() {
+        let payload: Vec<u8> = (0..9_000_000usize).map(|i| (i % 241) as u8).collect();
+        let url = spawn_range_server(payload.clone()).await;
+
+        let base = temp_base("steal-chunks");
+        let store = Store::open(&base).unwrap();
+        let config = EngineConfig {
+            connections: 2,
+            read_timeout_secs: 30,
+            ..Default::default()
+        };
+        let inner = test_inner(base.clone(), store, config.clone());
+        let save_path = base.join("out.bin");
+        let task = sample_task(&url, &save_path, 2, 0);
+        inner.store.insert_task(&task).unwrap();
+
+        let (sender, receiver) = watch::channel(Control::Run);
+        inner
+            .controls
+            .lock()
+            .unwrap()
+            .insert(task.id.clone(), sender);
+        let ctx = EngineCtx {
+            inner: inner.clone(),
+            task_id: task.id.clone(),
+            save_path: save_path.clone(),
+            probe: None,
+            control: receiver,
+        };
+        let engine = crate::engine::native::NativeEngine::new(config, None);
+        let outcome = engine.run(ctx).await.unwrap();
+        assert_eq!(outcome, EngineOutcome::Done);
+        inner.complete(&task.id).await.unwrap();
+
+        assert_eq!(std::fs::read(&save_path).unwrap(), payload);
+        let parts = inner.store.parts(&task.id).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(parts.iter().all(|part| part.state == PartState::Completed));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// 续传：已落库的分片从 `downloaded` 偏移继续，不重复写字节。
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn native_resumes_from_persisted_parts() {

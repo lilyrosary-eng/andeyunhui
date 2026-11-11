@@ -193,7 +193,7 @@ pub const DESCRIPTORS: &[EngineDescriptor] = &[
     EngineDescriptor {
         kind: EngineKind::Native,
         name: "综合下载引擎1",
-        description: "内置分块多连接：Range 分片、断点续传、失败重试，适合大多数直链",
+        description: "内置分块多连接：Range 分片、动态分段、断点续传，适合大多数直链",
         builtin: true,
         platform: "跨平台",
     },

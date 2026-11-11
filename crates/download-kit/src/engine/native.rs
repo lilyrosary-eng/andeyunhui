@@ -8,6 +8,7 @@
 //!
 //! 不涉及浏览器集成 / 系统驱动 / 站点抓取，只负责传输内核。
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -32,6 +33,8 @@ use crate::util::{tail_text, DEFAULT_UA};
 
 /// 小于这个大小的文件不值得切块（切了也只是多几次请求）。
 const MIN_PART_BYTES: u64 = 256 * 1024;
+/// 动态分段：每个连接一次最多连续下载 4MB，然后回到队列，让空闲连接接手剩余部分。
+const STEAL_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
 /// 合并分片时的拷贝缓冲。
 const COPY_BUFFER: usize = 1024 * 1024;
 
@@ -666,28 +669,51 @@ impl NativeEngine {
         return Ok(PartsOutcome::Done);
     }
 
+    // 动态分段：分片放进共享队列，每个连接每次只拿 4MB，下完一块再回队列。
+    // 空闲连接会自然接过其他分片的剩余部分，避免某个慢连接拖住整段。
+    let worker_count = connections.min(pending.len()).max(1);
+    let queue = Arc::new(tokio::sync::Mutex::new(VecDeque::from(pending)));
     let mut set: tokio::task::JoinSet<Result<PartResult, PartsError>> =
         tokio::task::JoinSet::new();
-    for part in pending {
+    for _ in 0..worker_count {
         let ctx2 = ctx.clone();
         let task2 = task.clone();
         let client = self.client.clone();
         let config = self.config.clone();
         let progress = progress.clone();
         let limiters = limiters.clone();
+        let queue = queue.clone();
         set.spawn(async move {
-            let mut part = part;
-            download_part(
-                &client,
-                &config,
-                &ctx2,
-                &task2,
-                &mut part,
-                &progress,
-                multipart,
-                limiters,
-            )
-            .await
+            loop {
+                let Some(mut part) = ({ queue.lock().await.pop_front() }) else {
+                    break;
+                };
+                match download_part_chunk(
+                    &client,
+                    &config,
+                    &ctx2,
+                    &task2,
+                    &mut part,
+                    &progress,
+                    multipart,
+                    limiters.clone(),
+                )
+                .await
+                {
+                    Ok(ChunkResult::Complete) => {
+                        part.state = PartState::Completed;
+                        progress.parts_done.fetch_add(1, Ordering::Relaxed);
+                        let _ = ctx2.update_part(&part);
+                    }
+                    Ok(ChunkResult::Partial) => {
+                        queue.lock().await.push_back(part);
+                    }
+                    Ok(ChunkResult::Paused) => return Ok(PartResult::Paused),
+                    Ok(ChunkResult::Canceled) => return Ok(PartResult::Canceled),
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(PartResult::Done)
         });
     }
 
@@ -747,14 +773,18 @@ async fn download_part(
             progress,
             multipart,
             &limiters,
+            0,
         )
         .await
         {
-            Ok(()) => {
+            Ok(true) => {
                 part.state = PartState::Completed;
                 progress.parts_done.fetch_add(1, Ordering::Relaxed);
                 let _ = ctx.update_part(part);
                 return Ok(PartResult::Done);
+            }
+            Ok(false) => {
+                return Err(PartsError::retry("分片未下满（未启用分块时的异常状态）"));
             }
             Err(PartFailure::Paused) => return Ok(PartResult::Paused),
             Err(PartFailure::Canceled) => return Ok(PartResult::Canceled),
@@ -784,6 +814,76 @@ async fn download_part(
     }
 }
 
+/// 动态分段的基本单位：最多连续下载 `STEAL_CHUNK_BYTES` 后把分片交回队列。
+enum ChunkResult {
+    Complete,
+    Partial,
+    Paused,
+    Canceled,
+}
+
+async fn download_part_chunk(
+    client: &reqwest::Client,
+    config: &EngineConfig,
+    ctx: &EngineCtx,
+    task: &DownloadTask,
+    part: &mut DownloadPart,
+    progress: &Arc<TaskProgress>,
+    multipart: bool,
+    limiters: Limiters,
+) -> Result<ChunkResult, PartsError> {
+    let mut attempt = 0u32;
+    loop {
+        match ctx.control_state() {
+            Control::Pause => return Ok(ChunkResult::Paused),
+            Control::Cancel => return Ok(ChunkResult::Canceled),
+            Control::Run => {}
+        }
+        match download_once(
+            client,
+            ctx,
+            task,
+            part,
+            progress,
+            multipart,
+            &limiters,
+            STEAL_CHUNK_BYTES,
+        )
+        .await
+        {
+            Ok(true) => return Ok(ChunkResult::Complete),
+            Ok(false) => return Ok(ChunkResult::Partial),
+            Err(PartFailure::Paused) => return Ok(ChunkResult::Paused),
+            Err(PartFailure::Canceled) => return Ok(ChunkResult::Canceled),
+            Err(PartFailure::RangeUnsupported) => {
+                return Err(PartsError::range_unsupported(
+                    "服务器不支持 Range，无法多连接分块下载",
+                ));
+            }
+            Err(PartFailure::Fatal(message)) => return Err(PartsError::fatal(message)),
+            Err(PartFailure::Retry(message)) => {
+                attempt += 1;
+                if attempt > config.retries {
+                    return Err(PartsError::retry(format!(
+                        "重试 {} 次后仍失败：{message}",
+                        config.retries
+                    )));
+                }
+                let backoff = config
+                    .retry_base_ms
+                    .saturating_mul(1u64 << attempt.min(6))
+                    .min(config.retry_max_ms);
+                match sleep_with_control(ctx, backoff).await {
+                    Some(PartResult::Paused) => return Ok(ChunkResult::Paused),
+                    Some(PartResult::Canceled) => return Ok(ChunkResult::Canceled),
+                    Some(PartResult::Done) => {}
+                    None => {}
+                }
+            }
+        }
+    }
+}
+
 enum PartFailure {
     Retry(String),
     Fatal(String),
@@ -801,10 +901,11 @@ async fn download_once(
     progress: &Arc<TaskProgress>,
     multipart: bool,
     limiters: &Limiters,
-) -> Result<(), PartFailure> {
+    chunk_limit: u64,
+) -> Result<bool, PartFailure> {
     let expected = part.expected();
     if expected > 0 && part.downloaded >= expected {
-        return Ok(());
+        return Ok(true);
     }
 
     let temp = PathBuf::from(&part.temp_path);
@@ -818,7 +919,12 @@ async fn download_once(
     let meta = HttpMeta::from_task(task);
     let mut request = probe::apply_headers(client.get(&part.url), &meta, DEFAULT_UA);
     if expected > 0 {
-        request = request.header(RANGE, format!("bytes={}-{}", offset, part.end - 1));
+        let end = if chunk_limit > 0 {
+            (offset + chunk_limit - 1).min(part.end - 1)
+        } else {
+            part.end - 1
+        };
+        request = request.header(RANGE, format!("bytes={}-{}", offset, end));
     } else if part.downloaded > 0 {
         request = request.header(RANGE, format!("bytes={}-", offset));
     }
@@ -832,7 +938,7 @@ async fn download_once(
     if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
         // 常见于「本地其实已经下满，只是 last 1 字节的记录没落库」。
         if expected > 0 && part.downloaded >= expected {
-            return Ok(());
+            return Ok(true);
         }
         return Err(PartFailure::Fatal(
             "服务端拒绝 Range 请求（416），无法继续续传".to_string(),
@@ -922,12 +1028,16 @@ async fn download_once(
     let _ = ctx.update_part(part);
 
     if expected > 0 && part.downloaded != expected {
+        // 动态分段：一块下完但分片未满，交回队列继续；未开分块时才算失败。
+        if chunk_limit > 0 && part.downloaded < expected {
+            return Ok(false);
+        }
         return Err(PartFailure::Retry(format!(
             "分片未下满：期望 {} 字节，实际 {} 字节",
             expected, part.downloaded
         )));
     }
-    Ok(())
+    Ok(true)
 }
 
 /// 限速等待：每 200ms 检查一次控制信号，低速限速下暂停也能及时生效。
