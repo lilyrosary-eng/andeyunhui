@@ -168,6 +168,10 @@ export const dl = {
   enqueue: (spec: DownloadSpec) => invoke<string>('dl_enqueue', { spec }),
   pause: (id: string) => invoke<void>('dl_pause', { id }),
   resume: (id: string) => invoke<void>('dl_resume', { id }),
+  pauseAll: () => invoke<number>('dl_pause_all'),
+  resumeAll: () => invoke<number>('dl_resume_all'),
+  updateOptions: (id: string, priority: number, connections: number, maxSpeed: number) =>
+    invoke<void>('dl_update_options', { id, priority, connections, maxSpeed }),
   retry: (id: string) => invoke<void>('dl_retry', { id }),
   cancel: (id: string, deleteFile = true) =>
     invoke<void>('dl_cancel', { id, deleteFile }),

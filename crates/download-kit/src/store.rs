@@ -376,6 +376,34 @@ impl Store {
     }
 
     /// 改写任务的落盘路径（文件被移动/重命名后必须调用）。
+    pub fn update_options(
+        &self,
+        id: &str,
+        priority: i32,
+        connections: u32,
+        max_speed: Option<u64>,
+    ) -> Result<(), String> {
+        let conn = self.lock()?;
+        let changed = conn
+            .execute(
+                "UPDATE tasks SET priority = ?1, connections = ?2, max_speed = ?3, updated_at = ?4
+                 WHERE id = ?5",
+                params![
+                    priority,
+                    connections as i64,
+                    max_speed.map(|value| value as i64),
+                    now_ms(),
+                    id
+                ],
+            )
+            .map_err(|e| format!("更新下载参数失败: {e}"))?;
+        if changed == 0 {
+            return Err(format!("下载任务不存在: {id}"));
+        }
+        Ok(())
+    }
+
+    /// 改写任务的落盘路径（文件被移动/重命名后必须调用）。
     ///
     /// 为什么必须回写：`save_path` 是断点续传、重试、以及宿主侧「这个文件在哪」
     /// 的唯一锚点。只改磁盘不改库，任务记录就指向一个不存在的文件，

@@ -234,6 +234,8 @@ export function HomeportModule() {
     () => ({
       all: tasks.length,
       active: tasks.filter((task) => FILTER_ACTIVE.has(task.status)).length,
+      running: tasks.filter((task) => ACTIVE_STATUSES.includes(task.status)).length,
+      paused: tasks.filter((task) => task.status === 'paused').length,
       completed: tasks.filter((task) => task.status === 'completed').length,
       failed: tasks.filter((task) => FILTER_FAILED.has(task.status)).length,
     }),
@@ -255,7 +257,7 @@ export function HomeportModule() {
   const engineName = (kind: EngineKind) =>
     engines?.engines.find((item) => item.kind === kind)?.name ?? ENGINE_LABEL[kind] ?? kind;
 
-  const act = async (promise: Promise<void>) => {
+  const act = async (promise: Promise<unknown>) => {
     try {
       await promise;
       await refreshList();
@@ -445,6 +447,26 @@ export function HomeportModule() {
         </div>
 
         <div className="ml-auto flex items-center gap-1.5">
+          {counts.running > 0 ? (
+            <button
+              type="button"
+              onClick={() => void act(dl.pauseAll())}
+              className="inline-flex items-center gap-1.5 rounded-xl px-2.5 py-2 text-xs font-medium text-neutral-500 transition-colors hover:bg-black/5 dark:text-stone-400 dark:hover:bg-white/10"
+            >
+              <PauseIcon size={14} />
+              全部暂停
+            </button>
+          ) : null}
+          {counts.paused > 0 ? (
+            <button
+              type="button"
+              onClick={() => void act(dl.resumeAll())}
+              className="inline-flex items-center gap-1.5 rounded-xl px-2.5 py-2 text-xs font-medium text-neutral-500 transition-colors hover:bg-black/5 dark:text-stone-400 dark:hover:bg-white/10"
+            >
+              <PlayIcon size={14} />
+              全部继续
+            </button>
+          ) : null}
           <IconButton title="刷新" onClick={() => void reload()}>
             <RefreshIcon size={15} className={loading ? 'animate-spin' : ''} />
           </IconButton>
@@ -560,7 +582,12 @@ export function HomeportModule() {
       ) : null}
 
       {detail ? (
-        <TaskDetailPanel detail={detail} engines={engines} onClose={() => setDetail(null)} />
+        <TaskDetailPanel
+          detail={detail}
+          engines={engines}
+          onClose={() => setDetail(null)}
+          onChanged={() => void openDetail(detail)}
+        />
       ) : null}
     </div>
   );

@@ -740,6 +740,63 @@ impl DownloadManager {
         self.inner.config()
     }
 
+    /// 暂停所有活动/排队任务，返回实际暂停的数量。
+    pub fn pause_all(&self) -> Result<u32, String> {
+        let tasks = self.inner.store.tasks(None, 5000)?;
+        let mut count = 0u32;
+        for task in tasks {
+            if matches!(
+                task.status,
+                TaskStatus::Queued
+                    | TaskStatus::Probing
+                    | TaskStatus::Downloading
+                    | TaskStatus::Merging
+            ) && self.pause(&task.id).is_ok()
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// 继续所有已暂停任务，返回实际继续的数量；失败/取消的任务保持原状。
+    pub fn resume_all(&self) -> Result<u32, String> {
+        let tasks = self.inner.store.tasks(Some(TaskStatus::Paused), 5000)?;
+        let mut count = 0u32;
+        for task in tasks {
+            if self.resume(&task.id).is_ok() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// 调整尚未完成任务的调度参数；活动中的任务在下次启动时生效。
+    pub fn update_options(
+        &self,
+        id: &str,
+        priority: i32,
+        connections: u32,
+        max_speed: u64,
+    ) -> Result<(), String> {
+        let task = self
+            .inner
+            .store
+            .task(id)?
+            .ok_or_else(|| format!("下载任务不存在: {id}"))?;
+        if matches!(task.status, TaskStatus::Completed | TaskStatus::Canceled) {
+            return Err("已完成/已取消的任务不能调整参数".to_string());
+        }
+        let connections = connections.clamp(1, 32);
+        let max_speed = (max_speed > 0).then_some(max_speed);
+        self.inner
+            .store
+            .update_options(id, priority, connections, max_speed)?;
+        self.inner.emit_state_by_id(id);
+        self.inner.wake.notify_one();
+        Ok(())
+    }
+
     /// 文件被移动/重命名后，把新的落盘路径同步回任务记录。
     ///
     /// 只在文件**已经**移到位之后调用：先动磁盘再改库，中间失败最多是记录指向旧路径，

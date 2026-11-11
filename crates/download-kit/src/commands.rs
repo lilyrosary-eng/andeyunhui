@@ -172,6 +172,30 @@ pub fn dl_resume(app: AppHandle, id: String) -> Result<(), String> {
     manager(&app)?.resume(&id)
 }
 
+/// 暂停所有活动/排队任务，返回实际暂停数量。
+#[tauri::command]
+pub fn dl_pause_all(app: AppHandle) -> Result<u32, String> {
+    manager(&app)?.pause_all()
+}
+
+/// 继续所有已暂停任务，返回实际继续数量。
+#[tauri::command]
+pub fn dl_resume_all(app: AppHandle) -> Result<u32, String> {
+    manager(&app)?.resume_all()
+}
+
+/// 调整未完成任务的优先级 / 连接数 / 限速（0 = 不限速）。
+#[tauri::command]
+pub fn dl_update_options(
+    app: AppHandle,
+    id: String,
+    priority: i32,
+    connections: u32,
+    max_speed: u64,
+) -> Result<(), String> {
+    manager(&app)?.update_options(&id, priority, connections, max_speed)
+}
+
 /// 失败重试：语义与 resume 一致，单独命名方便前端区分按钮文案。
 #[tauri::command]
 pub fn dl_retry(app: AppHandle, id: String) -> Result<(), String> {
