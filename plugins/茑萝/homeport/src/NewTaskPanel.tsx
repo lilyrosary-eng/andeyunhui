@@ -20,12 +20,14 @@ export function NewTaskPanel({
   engines,
   config,
   initialUrl,
+  initialCookie,
   onClose,
   onCreated,
 }: {
   engines: EngineStatus | null;
   config: EngineConfig | null;
   initialUrl?: string;
+  initialCookie?: string;
   onClose: () => void;
   onCreated: (id: string) => void;
 }) {
@@ -42,7 +44,7 @@ export function NewTaskPanel({
   const [speedKb, setSpeedKb] = useState('');
   const [sha256, setSha256] = useState('');
   const [referer, setReferer] = useState('');
-  const [cookie, setCookie] = useState('');
+  const [cookie, setCookie] = useState(initialCookie ?? '');
   const [userAgent, setUserAgent] = useState('');
   const [advanced, setAdvanced] = useState(false);
   const [probing, setProbing] = useState(false);

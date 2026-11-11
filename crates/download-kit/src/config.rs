@@ -15,7 +15,7 @@ pub fn load(base: &Path) -> EngineConfig {
         Ok(raw) => serde_json::from_str::<EngineConfig>(&raw)
             .map(EngineConfig::normalize)
             .unwrap_or_else(|e| {
-                eprintln!("[download-kit] 配置解析失败，使用默认值: {e}");
+                log::warn!("[download-kit] 配置解析失败，使用默认值: {e}");
                 EngineConfig::default()
             }),
         Err(_) => EngineConfig::default(),

@@ -53,6 +53,7 @@ type TaskView = DownloadTask & {
 };
 
 type Filter = 'all' | 'active' | 'completed' | 'failed';
+type CaptureTarget = BrowserCapture & { cookie?: string };
 
 const ACTIVE_STATUSES: TaskStatus[] = ['queued', 'probing', 'downloading', 'merging'];
 const FILTER_ACTIVE = new Set<TaskStatus>([...ACTIVE_STATUSES, 'paused']);
@@ -92,7 +93,7 @@ export function HomeportModule() {
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [captures, setCaptures] = useState<BrowserCapture[]>([]);
-  const [captureTarget, setCaptureTarget] = useState<BrowserCapture | null>(null);
+  const [captureTarget, setCaptureTarget] = useState<CaptureTarget | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const statusRef = useRef<Record<string, TaskStatus>>({});
@@ -344,10 +345,16 @@ export function HomeportModule() {
     setCaptures((prev) => prev.filter((item) => item.url !== url));
   };
 
-  const takeCapture = (capture: BrowserCapture) => {
+  const takeCapture = async (capture: BrowserCapture) => {
     dismissCapture(capture.url);
     setDetail(null);
-    setCaptureTarget(capture);
+    let cookie = '';
+    try {
+      cookie = await dl.browserCookieHeader(capture.target, capture.url);
+    } catch {
+      // 取不到 Cookie 不阻断下载，用户仍可在高级选项里手动填。
+    }
+    setCaptureTarget({ ...capture, cookie: cookie || undefined });
     setShowNew(true);
   };
 
@@ -680,6 +687,7 @@ export function HomeportModule() {
           engines={engines}
           config={config}
           initialUrl={captureTarget?.url}
+          initialCookie={captureTarget?.cookie}
           onClose={() => {
             setShowNew(false);
             setCaptureTarget(null);

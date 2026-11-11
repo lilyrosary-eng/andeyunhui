@@ -69,6 +69,12 @@ export function TaskDetailPanel({
     ENGINE_LABEL[detail.resolvedEngine ?? detail.engine] ??
     detail.engine;
   const percent = detail.totalBytes > 0 ? Math.min(100, (detail.downloadedBytes / detail.totalBytes) * 100) : 0;
+  const connectionText =
+    (detail.resolvedEngine ?? detail.engine) === 'ffmpeg'
+      ? '流式'
+      : detail.connections > 0
+        ? String(detail.connections)
+        : '自动';
 
   return (
     <div
@@ -116,7 +122,7 @@ export function TaskDetailPanel({
             />
             <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-[11px]">
               <Info label="引擎" value={engineName} />
-              <Info label="连接数" value={detail.connections > 0 ? String(detail.connections) : '自动'} />
+              <Info label="连接数" value={connectionText} />
               <Info label="分片" value={detail.parts.length > 0 ? `${detail.parts.length} 片` : '引擎管理'} />
               <Info label="优先级" value={String(detail.priority)} />
               <Info

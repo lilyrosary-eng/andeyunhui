@@ -96,6 +96,7 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("dl_probe", "net"),
     ("dl_hls_variants", "net"),
     ("browser_download_captures_take", "net"),
+    ("browser_cookie_header", "net"),
     ("dl_config_set", "system"),
     ("import_to_openwith_dir", "fs.write"),
     ("add_bytes_to_dropzone", "fs.write"),

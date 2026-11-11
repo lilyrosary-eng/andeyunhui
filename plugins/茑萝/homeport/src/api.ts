@@ -157,6 +157,8 @@ export interface HlsVariant {
 export interface BrowserCapture {
   url: string;
   createdAt: number;
+  /** 触发下载的浏览器窗口 label。 */
+  target: string;
 }
 
 export interface ProbeRequest {
@@ -194,6 +196,8 @@ export const dl = {
   readClipboard: () => invoke<string>('clipboard_read'),
   takeBrowserCaptures: () =>
     invoke<BrowserCapture[]>('browser_download_captures_take'),
+  browserCookieHeader: (target: string, url: string) =>
+    invoke<string>('browser_cookie_header', { target, url }),
   openPath: (path: string) => invoke<void>('fs_open_path', { path }),
   pickDirectory: () => invoke<string | null>('pick_directory', {}),
   pickFile: () =>

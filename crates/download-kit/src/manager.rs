@@ -453,7 +453,7 @@ impl DownloadManager {
 
         let recovered = inner.store.recover_stale(config.resume_on_start)?;
         if recovered > 0 {
-            eprintln!("[download-kit] 已恢复 {recovered} 个上次未完成的任务");
+            log::info!("[download-kit] 已恢复 {recovered} 个上次未完成的任务");
         }
 
         let scheduler_inner = inner.clone();
@@ -833,7 +833,7 @@ impl DownloadManager {
         if !self.inner.store.delete_task(id)? {
             return Err(format!("下载任务不存在: {id}"));
         }
-        eprintln!("[download-kit] 已移除任务记录（未动文件）: {id}");
+        log::info!("[download-kit] 已移除任务记录（未动文件）: {id}");
         Ok(())
     }
 
@@ -1048,7 +1048,7 @@ async fn scheduler(inner: Arc<Inner>) {
                 Ok(Some(task)) => task,
                 Ok(None) => break,
                 Err(error) => {
-                    eprintln!("[download-kit] 读取排队任务失败: {error}");
+                    log::warn!("[download-kit] 读取排队任务失败: {error}");
                     break;
                 }
             };
@@ -1068,7 +1068,7 @@ async fn scheduler(inner: Arc<Inner>) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(error) => {
-                    eprintln!("[download-kit] 认领任务失败: {error}");
+                    log::warn!("[download-kit] 认领任务失败: {error}");
                     break;
                 }
             }
@@ -1121,7 +1121,7 @@ async fn run_task(
     }
     inner.wake.notify_one();
     if let Err(error) = result {
-        eprintln!("[download-kit] 任务 {id} 结束于错误: {error}");
+        log::error!("[download-kit] 任务 {id} 结束于错误: {error}");
     }
 }
 
@@ -1173,6 +1173,17 @@ async fn run_engine(
         return Ok(());
     };
 
+    // 外部 CLI / 流媒体不是分片模型，连接数落成 1，避免 UI 显示误导。
+    if matches!(
+        kind,
+        EngineKind::Curl | EngineKind::Wget | EngineKind::Ffmpeg
+    ) && task.connections != 1
+    {
+        let _ = inner.store.update_connections(id, 1);
+        task.connections = 1;
+        inner.emit_state_by_id(id);
+    }
+
     // 靠 Content-Type 嗅探才认出是 HLS/DASH 的地址没有 .m3u8/.mpd 后缀，入队阶段改不到；
     // ffmpeg 按输出扩展名选封装器，这里在真正开跑前再兜一次（.bin / 无扩展名 → .mp4）。
     if kind == EngineKind::Ffmpeg {
@@ -1186,7 +1197,7 @@ async fn run_engine(
                     task.filename = renamed;
                     inner.emit_state_by_id(id);
                 }
-                Err(error) => eprintln!("[download-kit] 修正流媒体输出名失败: {error}"),
+                Err(error) => log::warn!("[download-kit] 修正流媒体输出名失败: {error}"),
             }
         }
     }
@@ -1223,7 +1234,7 @@ async fn run_engine(
         Ok(EngineOutcome::Canceled) => Ok(()),
         Err(message) => {
             if schedule_retry(inner, id, &message) {
-                eprintln!("[download-kit] 任务 {id} 将按配置自动重试: {message}");
+                log::warn!("[download-kit] 任务 {id} 将按配置自动重试: {message}");
             } else {
                 inner.fail(id, &message);
             }

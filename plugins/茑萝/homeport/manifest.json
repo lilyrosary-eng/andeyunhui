@@ -29,6 +29,7 @@
       "dl_probe",
       "dl_hls_variants",
       "browser_download_captures_take",
+      "browser_cookie_header",
       "clipboard_read",
       "pick_directory",
       "pick_file",

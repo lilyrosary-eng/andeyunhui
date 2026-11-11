@@ -14,6 +14,8 @@ path = "src/lib.rs"
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 统一走宿主的会话日志（log_service 注册的全局后端）；crate 本身不建日志系统。
+log = "0.4"
 # 队列调度 / 分块并发 / 外部进程（aria2c、ffmpeg）。
 # fs 特性用于分片文件随机定位写入，process 用于外部引擎。
 tokio = { version = "1", features = [

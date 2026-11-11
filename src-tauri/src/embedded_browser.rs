@@ -49,17 +49,23 @@ pub const DOWNLOAD_CAPTURE_EVENT: &str = "download-kit:browser-capture";
 pub struct BrowserDownloadCapture {
     pub url: String,
     pub created_at: i64,
+    /// 触发下载的浏览器窗口 label（取 Cookie 时用）。
+    pub target: String,
 }
 
 /// 进程内缓冲：凌霄没打开时先把捕获存下来，下次打开再取。
 static PENDING_DOWNLOAD_CAPTURES: Mutex<Vec<BrowserDownloadCapture>> = Mutex::new(Vec::new());
 
-fn push_download_capture(app: &AppHandle, url: String) {
+fn push_download_capture(app: &AppHandle, url: String, target: String) {
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0);
-    let capture = BrowserDownloadCapture { url, created_at };
+    let capture = BrowserDownloadCapture {
+        url,
+        created_at,
+        target,
+    };
     if let Ok(mut guard) = PENDING_DOWNLOAD_CAPTURES.lock() {
         if guard.iter().any(|item| item.url == capture.url) {
             return;
@@ -91,6 +97,31 @@ pub fn browser_download_captures_take() -> Vec<BrowserDownloadCapture> {
         .lock()
         .map(|mut guard| std::mem::take(&mut *guard))
         .unwrap_or_default()
+}
+
+/// 取某个浏览器窗口对目标 URL 的 Cookie，拼成请求头值（`a=1; b=2`）。
+#[tauri::command]
+pub fn browser_cookie_header(
+    app: AppHandle,
+    target: Option<String>,
+    url: String,
+) -> Result<String, String> {
+    let parsed = tauri::Url::parse(&url).map_err(|e| format!("Cookie 目标地址无效: {e}"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Ok(String::new());
+    }
+    let label = window_label(target.as_deref());
+    let win = app
+        .get_webview_window(&label)
+        .ok_or_else(|| "浏览器窗口尚未打开".to_string())?;
+    let cookies = win
+        .cookies_for_url(parsed)
+        .map_err(|e| format!("读取浏览器 Cookie 失败: {e}"))?;
+    Ok(cookies
+        .iter()
+        .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+        .collect::<Vec<_>>()
+        .join("; "))
 }
 
 /// 浏览器窗口的 UA：伪装成普通桌面 Edge。
@@ -317,12 +348,13 @@ pub async fn browser_open(
     // 下载接管：命中 Requested 时取消浏览器自身下载，转交凌霄处理。
     // 关闭接管时返回 true，保持浏览器原生下载行为。
     let capture_app = app.clone();
+    let capture_label = label.clone();
     builder = builder.on_download(move |_webview, event| match event {
         tauri::webview::DownloadEvent::Requested { url, .. } => {
             if !takeover_enabled(&capture_app) {
                 return true;
             }
-            push_download_capture(&capture_app, url.to_string());
+            push_download_capture(&capture_app, url.to_string(), capture_label.clone());
             false
         }
         _ => true,

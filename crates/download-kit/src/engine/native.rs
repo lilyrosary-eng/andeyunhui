@@ -48,7 +48,7 @@ pub struct NativeEngine {
 impl NativeEngine {
     pub fn new(config: EngineConfig, ffmpeg: Option<PathBuf>) -> Self {
         let client = probe::build_client(&config).unwrap_or_else(|e| {
-            eprintln!("[download-kit] 创建 HTTP 客户端失败，回退默认客户端: {e}");
+            log::warn!("[download-kit] 创建 HTTP 客户端失败，回退默认客户端: {e}");
             reqwest::Client::new()
         });
         Self {
