@@ -129,6 +129,7 @@ function TileImage({
   onSmall,
   onFallback,
   onImageLoaded,
+  retryToken = 0,
 }: {
   imagePath: string;
   /** 当前缩放倍率（用来选层） */
@@ -149,6 +150,8 @@ function TileImage({
   /** 瓦片不可用 —— 父级改用 200px 缩略图兜底 */
   onFallback?: () => void;
   onImageLoaded?: (size: { width: number; height: number }) => void;
+  /** 重试计数：父级点「重试」时 +1，本组件据此重新发起请求 */
+  retryToken?: number;
 }) {
   const [info, setInfo] = useState<TilesInfo | null>(null);
   const [failed, setFailed] = useState(false);
@@ -156,6 +159,9 @@ function TileImage({
   const readyRef = useRef(false);
   /** 已上报过 fallback（只报一次，避免无限 IPC 循环） */
   const fallbackNotifiedRef = useRef(false);
+  /** 回调放进 ref：effect 里异步取用，不把它们放进依赖（否则父级每次渲染都重发请求） */
+  const onSmallRef = useRef(onSmall);
+  onSmallRef.current = onSmall;
 
   // 懒生成瓦片（后端限流解码 + 磁盘缓存，重复调用直接命中）
   useEffect(() => {
@@ -164,32 +170,60 @@ function TileImage({
     setFailed(false);
     readyRef.current = false;
     fallbackNotifiedRef.current = false;
-    // **换图必须立刻丢掉上一张的 info**（2026-11-09）：
-    // 不清的话，新图的请求还在路上时，canvas 仍在用**上一张**的 levels/dir 画，
-    // 而 base 矩形已经换成新图的 ⇒ 要么画出上一张的残留、要么整块被跳过，
-    // 表现就是「翻页了但还是这张图，缩放也没反应」。
-    // 清空后 TileImage 直接返回 null，这段时间由底图（displaySrc/原图）顶着。
-    const t0 = performance.now();
-    console.info('[莲花/tiles] 请求瓦片:', imagePath);
+    // **换图必须立刻丢掉上一张的 info**：不清的话，新图请求还在路上时，
+    // canvas 仍在用上一张的 levels/dir 画，而 base 矩形已换成新图 ⇒ 画出上一张的残留。
     setInfo(null);
-    void hostApi
-      .invoke<TilesInfo>('generate_tiles', { imagePath })
-      .then((t) => {
-        const ms = performance.now() - t0;
-        console.info(`[莲花/tiles] 瓦片就绪 ${ms.toFixed(0)}ms dir=${t.dir} levels=${t.levels.length}`);
-        if (ms > 1500) {
-          console.warn(`[莲花/tiles] 瓦片生成偏慢 ${ms.toFixed(0)}ms（可能是排队/大图解码）: ${imagePath}`);
+
+    const t0 = performance.now();
+    // **防抖 180ms**：快速翻页时只给"停下来"的那张发请求。
+    // 为什么必须做：后端解码名额只有 DECODE_MAX=2，而每次 generate_tiles 都要
+    // 完整解码 + 写金字塔。翻页翻得快就会把队列排满，你正在看的那张排在别人后面
+    // ⇒ 表现为"首次打开文件夹非常慢"。
+    const timer = setTimeout(() => {
+      void (async () => {
+        // ① **先查尺寸**（只读文件头，毫秒级）：≤2560 的小图根本不需要瓦片。
+        //    以前是先 generate_tiles、等它把金字塔都写完，再拿 info.width 判断小图 ——
+        //    小图因此白白排在解码队列里（用户实测"包括小图都要加载半天"）。
+        try {
+          const m = await hostApi.invoke<{ width?: number; height?: number }>('get_image_metadata', {
+            filePath: imagePath,
+          });
+          if (!alive) return;
+          const w = m?.width ?? 0;
+          const h = m?.height ?? 0;
+          if (w > 0 && h > 0 && w <= 2560 && h <= 2560) {
+            console.info(`[莲花/tiles] 小图跳过瓦片 ${w}x${h}（${(performance.now() - t0).toFixed(0)}ms）:`, imagePath);
+            onSmallRef.current?.();
+            return;
+          }
+        } catch (e) {
+          // 查不到尺寸就继续走瓦片（可能只是格式不支持读头），但要留痕
+          console.warn('[莲花/tiles] 尺寸查询失败，继续尝试瓦片:', imagePath, e);
         }
-        if (alive) setInfo(t);
-      })
-      .catch((e) => {
-        console.warn('[莲花/tiles] 瓦片请求失败:', imagePath, e);
-        if (alive) setFailed(true);
-      });
+        if (!alive) return;
+
+        // ② 真正生成瓦片
+        console.info('[莲花/tiles] 请求瓦片:', imagePath);
+        try {
+          const t = await hostApi.invoke<TilesInfo>('generate_tiles', { imagePath });
+          const ms = performance.now() - t0;
+          console.info(`[莲花/tiles] 瓦片就绪 ${ms.toFixed(0)}ms dir=${t.dir} levels=${t.levels.length}`);
+          if (ms > 1500) {
+            console.warn(`[莲花/tiles] 瓦片生成偏慢 ${ms.toFixed(0)}ms（排队/大图解码）: ${imagePath}`);
+          }
+          if (alive) setInfo(t);
+        } catch (e) {
+          console.warn('[莲花/tiles] 瓦片请求失败:', imagePath, e);
+          if (alive) setFailed(true);
+        }
+      })();
+    }, 180);
+
     return () => {
       alive = false;
+      clearTimeout(timer);
     };
-  }, [imagePath]);
+  }, [imagePath, retryToken]);
 
   // 按缩放选层（**必须有层次变化**，这是金字塔的意义所在）。
   //
@@ -1665,6 +1699,17 @@ function FullView({
   /** 瓦片层首批渲染完成 —— 完成后隐藏底层 <img>，避免两个大图层叠加合成 */
   const [tilesReady, setTilesReady] = useState(false);
   /**
+   * 瓦片加载失败（**独立的错误位**，不要复用 imgError）。
+   *
+   * 2026-11-11 用户反馈：一次没加载出来，之后再打开这个文件永远显示"加载失败"，没有重试。
+   * 原因就是当时把瓦片失败写进了 `imgError`，而 `imgError` 只在
+   * `[currentIndex, isCurrentGif, currentPath]` 变化时复位 —— 再点同一张（索引没变）
+   * 不会触发复位，于是永远停在错误态。现在：错误位独立 + 提供显式重试按钮。
+   */
+  const [tileError, setTileError] = useState(false);
+  /** 重试计数：进 TileImage 的 key ⇒ 整块重挂并重新发请求 */
+  const [tileRetry, setTileRetry] = useState(0);
+  /**
    * **渲染引擎开关**（便于对照/兜底，不是给日常使用选的）：
    *   localStorage['image.engine'] = 'raw'  → 原图直出（8192² 会一直转圈，已知不可用）
    *   默认 / 'tiles'                        → canvas 瓦片
@@ -1714,6 +1759,7 @@ function FullView({
 
   useEffect(() => {
     setImgError(false);
+    setTileError(false);
     setTilesReady(false);
     setSmallImage(false);
     setGifDataUrl(null);
@@ -1773,8 +1819,23 @@ function FullView({
         />
       )}
 
-      {imgError ? (
-        <div className="text-neutral-300 dark:text-stone-600 text-sm">{T('image.viewer.loadFailed')}</div>
+      {imgError || tileError ? (
+        <div className="flex flex-col items-center gap-3 text-neutral-300 dark:text-stone-600 text-sm">
+          <span>{T('image.viewer.loadFailed')}</span>
+          <button
+            type="button"
+            className="px-3 py-1 rounded border border-current/30 hover:bg-current/10 transition-colors"
+            onClick={() => {
+              // 重试：清错误位 + 让 TileImage 重挂（key 里带 tileRetry）⇒ 重新请求瓦片
+              console.info('[莲花/tiles] 用户点重试:', currentPath);
+              setTileError(false);
+              setImgError(false);
+              setTileRetry((n) => n + 1);
+            }}
+          >
+            {T('image.viewer.retry')}
+          </button>
+        </div>
       ) : useWebgl ? (
         <canvas
           ref={canvasRef}
@@ -1837,38 +1898,17 @@ function FullView({
             // **按图片路径重建**：TileImage 内部有 info（dir/levels）与已解码瓦片缓存，
             // 换图时若复用同一实例，新图请求还在路上时它会继续用上一张的 info 画，
             // 这正是「翻页后画面不变」的直接原因。key 一变就整块重挂，状态干净。
-            key={currentPath}
+            key={`${currentPath}#${tileRetry}`}
             imagePath={currentPath}
+            retryToken={tileRetry}
             onReady={() => setTilesReady(true)}
             onSmall={() => setSmallImage(true)}
             onFallback={() => {
-              // **先查尺寸**：小图直接用原图（秒开、清晰），不要走 200px 兜底
-              // （否则小图也变成模糊缩略图，用户明确要求排除）。
-              void hostApi
-                .invoke<{ width?: number; height?: number }>('get_image_metadata', {
-                  // 参数名必须是 filePath：Rust 侧签名是 `file_path: String`，
-                  // Tauri 默认 rename_all = "camelCase" ⇒ 只认 filePath。
-                  // 之前写成 imagePath，这条兜底路径会一直 "invalid args" 静默失败
-                  // （表现：小图也走 200px 缩略图）。由 tauriCommands 契约测试逮到。
-                  filePath: currentPath,
-                })
-                .then((m) => {
-                  const w = m?.width ?? 0;
-                  const h = m?.height ?? 0;
-                  if (w > 0 && h > 0 && w <= 2560 && h <= 2560) {
-                    setSmallImage(true); // 小图走原图
-                    return;
-                  }
-                  // **不再回退 200px 缩略图**（2026-11-09 删）：它尺寸只有 200px、
-                  // 被 flex 居中后与瓦片坐标系完全错位、放大后极糊 —— 用户明确了不可用。
-                  // 瓦片真失败就显式报错，别给一张"看起来像图但位置尺寸全错"的东西。
-                  console.warn('[莲花/tiles] 瓦片不可用且无兜底图（缩略图兜底已删除）:', currentPath);
-                  setImgError(true);
-                })
-                .catch((e) => {
-                  console.warn('[莲花/tiles] 兜底判定失败:', e);
-                  setImgError(true);
-                });
+              // 瓦片真的失败了（生成报错 / 多次重试仍失败）。
+              // 这里只置**独立的 tileError**，并且界面上给"重试"按钮——
+              // 以前置 imgError，而 imgError 只在换图时复位，再点同一张就永远卡在错误态。
+              console.warn('[莲花/tiles] 瓦片不可用，已提示重试:', currentPath);
+              setTileError(true);
             }}
             // **必须回填尺寸**：瓦片启用时底层 <img> 不渲染，getBaseRect 拿不到
             // naturalWidth ⇒ base.width = 0 ⇒ 瓦片层把 8192 当成适配尺寸 ⇒

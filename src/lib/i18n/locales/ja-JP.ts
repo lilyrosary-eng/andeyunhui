@@ -448,8 +448,8 @@ export const jaJP: Record<string, string> = {
   'niaoluo.moduleTitle': '拡張機能',
   'settings.niaoluo.showRag': 'RAG ナレッジモジュールを表示',
   'settings.niaoluo.showRagDesc': 'RAG は組み込み機能です。オフにすると「茑蘿」サイドバーリストから隠れます。必要になったら再度有効にできます。',
-  'settings.niaoluo.showCapsule': '黄金チェス盤を表示',
-  'settings.niaoluo.showCapsuleDesc': '画面上部中央に浮かぶ黄金チェス盤。オフにすると画面上部から消えます。',
+  'settings.niaoluo.showCapsule': '紫陽花を表示',
+  'settings.niaoluo.showCapsuleDesc': '画面上部中央に浮かぶ紫陽花のフローティングアイランド。オフにすると画面上部から消えます。',
   'settings.niaoluo.showDeskpet': 'デスクトップペットを表示',
   'settings.niaoluo.showDeskpetDesc': 'デスクトップを歩き回るペット。オフにするとプラグインがアンロードされます。拡大縮小、透明度、クリック透過、素材、プリセットは「茑蘿」サイドバー下のペットパネルで調整します。',
   'settings.niaoluo.destroyModule': 'モジュールを完全削除（ファイルごと）',
@@ -475,8 +475,8 @@ export const jaJP: Record<string, string> = {
   'transferReceive.decline': '拒否',
   'transferReceive.accept': '受信',
 
-  // 黄金チェス盤・モジュール設定
-  'capsule.settings.title': '黄金チェス盤・モジュール設定',
+  // 紫陽花・モジュール設定
+  'capsule.settings.title': '紫陽花・モジュール設定',
   'capsule.settings.subtitle': 'LAN 転送（LocalSend 互換）',
   'capsule.settings.deviceName': 'このデバイスの名前',
   'capsule.settings.deviceNameDesc': '同じネットワーク上の他のデバイスに表示される名前（設定に保存）',
@@ -602,7 +602,7 @@ export const jaJP: Record<string, string> = {
   'persona.custom.desc': '下の「カスタムスタイル」の説明で完全に決まります。',
   'persona.noPreset': 'プリセット未選択：下の「カスタムスタイル」で決定',
 
-  // 黄金チェス盤 UI
+  // 紫陽花 UI
   'capsule.mediaSource': 'メディアソース',
   'capsule.mediaAuto': '自動（現在再生中）',
   'capsule.mediaNone': '再生中なし',
@@ -1338,6 +1338,7 @@ export const jaJP: Record<string, string> = {
   // ビューア
   'image.viewer.loading': '読み込み中...',
   'image.viewer.noImages': 'このフォルダには画像がありません',
+  'image.viewer.retry': '再試行',
   'image.viewer.loadFailed': '画像の読み込みに失敗しました',
   'image.viewer.full': '全体',
   'image.viewer.jumpHint': 'クリックでページ番号を入力して移動',
@@ -1757,4 +1758,26 @@ export const jaJP: Record<string, string> = {
   'translate.aiModelStale': '前回選んだモデルはアーカイブにありません。今回は既定で実行します',
   'translate.aiModelPick': 'モデルを選択',
   'translate.aiModelLoading': 'モデル読み込み中…',
+  'updater.title': 'ソフトウェア更新',
+  'updater.currentVersion': '現在のバージョン {v}',
+  'updater.autoHint': '起動後に自動確認します。ダウンロードは確認後に行います',
+  'updater.check': '更新を確認',
+  'updater.checking': '更新を確認中…',
+  'updater.latest': '最新バージョンです',
+  'updater.available': '新しいバージョン v{v} があります',
+  'updater.download': '今すぐ更新',
+  'updater.later': 'あとで',
+  'updater.downloading': '更新をダウンロード中',
+  'updater.downloaded': '{done} / {total} をダウンロード済み',
+  'updater.installing': '更新をインストール中です。アプリは自動的に再起動します…',
+  'updater.installHint': '電源を切らないでください。完了後にアプリが自動で開きます。',
+  'updater.failed': '更新に失敗しました',
+  'updater.retry': '再試行',
+  'updater.updated': 'v{v} に更新しました',
+  'updater.failedKept': '更新に失敗しました。現在のバージョンは保持されています',
+  'updater.close': '閉じる',
+  'updater.openReleases': 'リリースページを開く',
+  'updater.cancel': 'キャンセル',
+  'updater.openLogs': 'ログを開く',
+  'updater.installStuckHint': '自動で再起動しない場合は、アプリを手動で開いてください。詳細は「ログを開く」を参照。',
 };

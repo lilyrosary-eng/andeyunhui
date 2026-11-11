@@ -445,8 +445,8 @@ export const zhCN: Record<string, string> = {
   'niaoluo.moduleTitle': '茑萝',
   'settings.niaoluo.showRag': '显示 RAG 知识库模块',
   'settings.niaoluo.showRagDesc': 'RAG 是内置功能。关闭后将从「茑萝」侧边栏列表隐藏，需要时可重新开启。',
-  'settings.niaoluo.showCapsule': '显示黄金棋盘',
-  'settings.niaoluo.showCapsuleDesc': '悬浮于屏幕顶部居中的黄金棋盘；关闭后从屏幕顶部移除。',
+  'settings.niaoluo.showCapsule': '显示绣球',
+  'settings.niaoluo.showCapsuleDesc': '悬浮于屏幕顶部居中的绣球浮岛；关闭后从屏幕顶部移除。',
   'settings.niaoluo.showDeskpet': '显示桌宠',
   'settings.niaoluo.showDeskpetDesc': '在桌面上游走的桌宠；关闭后卸载该插件。缩放、透明度、点击穿透、素材与方案在「茑萝」侧边栏下的桌宠面板中调节。',
   'settings.niaoluo.destroyModule': '永久删除模块（含文件）',
@@ -473,8 +473,8 @@ export const zhCN: Record<string, string> = {
   'transferReceive.decline': '拒绝',
   'transferReceive.accept': '接收',
 
-  // 黄金棋盘 · 模块设置
-  'capsule.settings.title': '黄金棋盘 · 模块设置',
+  // 绣球 · 模块设置
+  'capsule.settings.title': '绣球 · 模块设置',
   'capsule.settings.subtitle': '局域网传输（兼容 LocalSend）',
   'capsule.settings.deviceName': '本机设备名称',
   'capsule.settings.deviceNameDesc': '同一网络下其他设备看到的名字（持久化到配置）',
@@ -600,7 +600,7 @@ export const zhCN: Record<string, string> = {
   'persona.custom.desc': '完全由下方的「自定义风格」描述决定。',
   'persona.noPreset': '未选择预设：由下方「自定义风格」决定',
 
-  // 黄金棋盘 UI
+  // 绣球 UI
   'capsule.mediaSource': '媒体来源',
   'capsule.mediaAuto': '自动（当前正在播放）',
   'capsule.mediaNone': '未在播放',
@@ -1355,6 +1355,7 @@ export const zhCN: Record<string, string> = {
   // 查看器
   'image.viewer.loading': '加载中...',
   'image.viewer.noImages': '该文件夹没有图片',
+  'image.viewer.retry': '重试',
   'image.viewer.loadFailed': '图片加载失败',
   'image.viewer.full': '完整',
   'image.viewer.jumpHint': '点击输入页码跳转',
@@ -1771,4 +1772,26 @@ export const zhCN: Record<string, string> = {
   'translate.aiModelStale': '上次选的模型已不在档案里，这次按默认走',
   'translate.aiModelPick': '选择模型',
   'translate.aiModelLoading': '读取模型列表中…',
+  'updater.title': '软件更新',
+  'updater.currentVersion': '当前版本 {v}',
+  'updater.autoHint': '启动后自动检查，下载前会询问',
+  'updater.check': '检查更新',
+  'updater.checking': '正在检查更新…',
+  'updater.latest': '已是最新版本',
+  'updater.available': '发现新版本 v{v}',
+  'updater.download': '立即更新',
+  'updater.later': '稍后',
+  'updater.downloading': '正在下载更新',
+  'updater.downloaded': '已下载 {done} / {total}',
+  'updater.installing': '正在安装更新，应用将自动重启…',
+  'updater.installHint': '请勿关闭电脑，更新完成后会自动打开应用。',
+  'updater.failed': '更新失败',
+  'updater.retry': '重试',
+  'updater.updated': '已更新到 v{v}',
+  'updater.failedKept': '更新失败，已保留当前版本',
+  'updater.close': '关闭',
+  'updater.openReleases': '打开发布页',
+  'updater.cancel': '取消',
+  'updater.openLogs': '查看日志',
+  'updater.installStuckHint': '若长时间未自动重启，请手动重新打开应用；详细日志见“查看日志”。',
 };

@@ -447,8 +447,8 @@ export const frFR: Record<string, string> = {
   'niaoluo.moduleTitle': 'Extensions',
   'settings.niaoluo.showRag': 'Afficher le module de connaissances RAG',
   'settings.niaoluo.showRagDesc': 'RAG est une fonctionnalité intégrée. Désactivé, il est masqué de la liste de la barre latérale « niaoluo » et peut être réactivé à tout moment.',
-  'settings.niaoluo.showCapsule': 'Afficher l\'échiquier d\'or',
-  'settings.niaoluo.showCapsuleDesc': 'Échiquier d\'or flottant en haut au centre de l\'écran ; désactivé, il est retiré du haut de l\'écran.',
+  'settings.niaoluo.showCapsule': 'Afficher l\'hortensia',
+  'settings.niaoluo.showCapsuleDesc': 'Îlot d\'hortensias flottant en haut au centre de l\'écran ; désactivé, il est retiré du haut de l\'écran.',
   'settings.niaoluo.showDeskpet': 'Afficher l\'animal de bureau',
   'settings.niaoluo.showDeskpetDesc': 'Un animal qui se promène sur le bureau ; désactivé, le plugin est déchargé. Échelle, opacité, clic traversant, matériaux et préréglages se règlent dans le panneau Animal sous la barre latérale « niaoluo ».',
   'settings.niaoluo.destroyModule': 'Supprimer définitivement le module (avec les fichiers)',
@@ -474,8 +474,8 @@ export const frFR: Record<string, string> = {
   'transferReceive.decline': 'Refuser',
   'transferReceive.accept': 'Accepter',
 
-  // Échiquier d\'or · Paramètres du module
-  'capsule.settings.title': 'Échiquier d\'or · Paramètres du module',
+  // Hortensia · Paramètres du module
+  'capsule.settings.title': 'Hortensia · Paramètres du module',
   'capsule.settings.subtitle': 'Transfert LAN (compatible LocalSend)',
   'capsule.settings.deviceName': 'Nom de cet appareil',
   'capsule.settings.deviceNameDesc': 'Nom visible par les autres appareils du même réseau (persistant)',
@@ -601,7 +601,7 @@ export const frFR: Record<string, string> = {
   'persona.custom.desc': 'Entièrement déterminé par la description sous « Style personnalisé » ci-dessous.',
   'persona.noPreset': 'Aucun préréglage sélectionné : déterminé par « Style personnalisé » ci-dessous',
 
-  // UI Échiquier d\'or
+  // UI Hortensia
   'capsule.mediaSource': 'Source du média',
   'capsule.mediaAuto': 'Automatique (en cours de lecture)',
   'capsule.mediaNone': 'Rien en lecture',
@@ -1337,6 +1337,7 @@ export const frFR: Record<string, string> = {
   // Visionneuse
   'image.viewer.loading': 'Chargement...',
   'image.viewer.noImages': 'Ce dossier ne contient aucune image',
+  'image.viewer.retry': 'Réessayer',
   'image.viewer.loadFailed': 'Échec du chargement de l\'image',
   'image.viewer.full': 'Complet',
   'image.viewer.jumpHint': 'Cliquez pour saisir un numéro de page',
@@ -1756,4 +1757,26 @@ export const frFR: Record<string, string> = {
   'translate.aiModelStale': 'Le modèle choisi a disparu — cette fois on prend le défaut',
   'translate.aiModelPick': 'Choisir un modèle',
   'translate.aiModelLoading': 'Chargement des modèles…',
+  'updater.title': 'Mise à jour logicielle',
+  'updater.currentVersion': 'Version actuelle {v}',
+  'updater.autoHint': 'Vérification automatique au démarrage ; le téléchargement démarre après confirmation',
+  'updater.check': 'Vérifier les mises à jour',
+  'updater.checking': 'Vérification des mises à jour…',
+  'updater.latest': 'Vous êtes à jour',
+  'updater.available': 'Nouvelle version v{v} disponible',
+  'updater.download': 'Mettre à jour maintenant',
+  'updater.later': 'Plus tard',
+  'updater.downloading': 'Téléchargement de la mise à jour',
+  'updater.downloaded': '{done} / {total} téléchargés',
+  'updater.installing': 'Installation de la mise à jour — l\'application va redémarrer automatiquement…',
+  'updater.installHint': 'Ne mettez pas l\'ordinateur hors tension ; l\'application se rouvrira à la fin.',
+  'updater.failed': 'Échec de la mise à jour',
+  'updater.retry': 'Réessayer',
+  'updater.updated': 'Mis à jour vers v{v}',
+  'updater.failedKept': 'Échec de la mise à jour — version actuelle conservée',
+  'updater.close': 'Fermer',
+  'updater.openReleases': 'Ouvrir la page des versions',
+  'updater.cancel': 'Annuler',
+  'updater.openLogs': 'Ouvrir les journaux',
+  'updater.installStuckHint': 'Si l’application ne redémarre pas automatiquement, ouvrez-la manuellement ; voir « Ouvrir les journaux ».',
 };

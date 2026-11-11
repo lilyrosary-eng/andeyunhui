@@ -448,8 +448,8 @@ export const zhTW: Record<string, string> = {
   'niaoluo.moduleTitle': '茑蘿',
   'settings.niaoluo.showRag': '顯示 RAG 知識庫模組',
   'settings.niaoluo.showRagDesc': 'RAG 是內建功能。關閉後將從「茑蘿」側邊欄列表隱藏，需要時可重新開啟。',
-  'settings.niaoluo.showCapsule': '顯示黃金棋盤',
-  'settings.niaoluo.showCapsuleDesc': '懸浮於螢幕頂部居中的黃金棋盤；關閉後從螢幕頂部移除。',
+  'settings.niaoluo.showCapsule': '顯示繡球',
+  'settings.niaoluo.showCapsuleDesc': '懸浮於螢幕頂部居中的繡球浮島；關閉後從螢幕頂部移除。',
   'settings.niaoluo.showDeskpet': '顯示桌寵',
   'settings.niaoluo.showDeskpetDesc': '在桌面上遊走的桌寵；關閉後卸載該外掛。縮放、透明度、點擊穿透、素材與方案在「茑蘿」側邊欄下的桌寵面板中調整。',
   'settings.niaoluo.destroyModule': '永久刪除模組（含檔案）',
@@ -475,8 +475,8 @@ export const zhTW: Record<string, string> = {
   'transferReceive.decline': '拒絕',
   'transferReceive.accept': '接收',
 
-  // 黃金棋盤 · 模組設定
-  'capsule.settings.title': '黃金棋盤 · 模組設定',
+  // 繡球 · 模組設定
+  'capsule.settings.title': '繡球 · 模組設定',
   'capsule.settings.subtitle': '區域網路傳輸（相容 LocalSend）',
   'capsule.settings.deviceName': '本機裝置名稱',
   'capsule.settings.deviceNameDesc': '同一網路下其他裝置看到的名稱（持久化到設定）',
@@ -602,7 +602,7 @@ export const zhTW: Record<string, string> = {
   'persona.custom.desc': '完全由下方的「自訂風格」描述決定。',
   'persona.noPreset': '未選擇預設：由下方「自訂風格」決定',
 
-  // 黃金棋盤 UI
+  // 繡球 UI
   'capsule.mediaSource': '媒體來源',
   'capsule.mediaAuto': '自動（目前正在播放）',
   'capsule.mediaNone': '未在播放',
@@ -1338,6 +1338,7 @@ export const zhTW: Record<string, string> = {
   // 檢視器
   'image.viewer.loading': '載入中...',
   'image.viewer.noImages': '該資料夾沒有圖片',
+  'image.viewer.retry': '重試',
   'image.viewer.loadFailed': '圖片載入失敗',
   'image.viewer.full': '完整',
   'image.viewer.jumpHint': '點擊輸入頁碼跳轉',
@@ -1759,4 +1760,26 @@ export const zhTW: Record<string, string> = {
   'translate.aiModelStale': '上次選的模型已不在檔案裡，這次按預設走',
   'translate.aiModelPick': '選擇模型',
   'translate.aiModelLoading': '讀取模型清單中…',
+  'updater.title': '軟體更新',
+  'updater.currentVersion': '目前版本 {v}',
+  'updater.autoHint': '啟動後自動檢查，下載前會詢問',
+  'updater.check': '檢查更新',
+  'updater.checking': '正在檢查更新…',
+  'updater.latest': '已是最新版本',
+  'updater.available': '發現新版本 v{v}',
+  'updater.download': '立即更新',
+  'updater.later': '稍後',
+  'updater.downloading': '正在下載更新',
+  'updater.downloaded': '已下載 {done} / {total}',
+  'updater.installing': '正在安裝更新，應用程式將自動重新啟動…',
+  'updater.installHint': '請勿關閉電腦，更新完成後會自動開啟應用程式。',
+  'updater.failed': '更新失敗',
+  'updater.retry': '重試',
+  'updater.updated': '已更新至 v{v}',
+  'updater.failedKept': '更新失敗，已保留目前版本',
+  'updater.close': '關閉',
+  'updater.openReleases': '開啟發佈頁',
+  'updater.cancel': '取消',
+  'updater.openLogs': '檢視記錄',
+  'updater.installStuckHint': '若長時間未自動重新啟動，請手動重新開啟應用程式；詳細記錄請見「檢視記錄」。',
 };

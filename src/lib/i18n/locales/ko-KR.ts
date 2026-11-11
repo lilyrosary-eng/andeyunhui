@@ -448,8 +448,8 @@ export const koKR: Record<string, string> = {
   'niaoluo.moduleTitle': '확장 기능',
   'settings.niaoluo.showRag': 'RAG 지식 모듈 표시',
   'settings.niaoluo.showRagDesc': 'RAG는 내장 기능입니다. 끄면 「냐오뤄」 사이드바 목록에서 숨겨지며, 필요할 때 다시 켤 수 있습니다.',
-  'settings.niaoluo.showCapsule': '황금 체스판 표시',
-  'settings.niaoluo.showCapsuleDesc': '화면 상단 중앙에 떠 있는 황금 체스판. 끄면 화면 상단에서 제거됩니다.',
+  'settings.niaoluo.showCapsule': '수국 표시',
+  'settings.niaoluo.showCapsuleDesc': '화면 상단 중앙에 떠 있는 수국 플로팅 아일랜드. 끄면 화면 상단에서 제거됩니다.',
   'settings.niaoluo.showDeskpet': '데스크톱 펫 표시',
   'settings.niaoluo.showDeskpetDesc': '바탕화면을 돌아다니는 펫. 끄면 해당 플러그인이 언로드됩니다. 확대/축소, 투명도, 클릭 통과, 소재와 프리셋은 「냐오뤄」 사이드바 아래의 펫 패널에서 조정합니다.',
   'settings.niaoluo.destroyModule': '모듈 영구 삭제 (파일 포함)',
@@ -475,8 +475,8 @@ export const koKR: Record<string, string> = {
   'transferReceive.decline': '거부',
   'transferReceive.accept': '수락',
 
-  // 황금 체스판 · 모듈 설정
-  'capsule.settings.title': '황금 체스판 · 모듈 설정',
+  // 수국 · 모듈 설정
+  'capsule.settings.title': '수국 · 모듈 설정',
   'capsule.settings.subtitle': 'LAN 전송 (LocalSend 호환)',
   'capsule.settings.deviceName': '이 기기의 이름',
   'capsule.settings.deviceNameDesc': '같은 네트워크의 다른 기기에 표시되는 이름 (설정에 저장)',
@@ -602,7 +602,7 @@ export const koKR: Record<string, string> = {
   'persona.custom.desc': '아래의 「사용자 정의 스타일」 설명으로 완전히 결정됩니다.',
   'persona.noPreset': '프리셋 미선택: 아래의 「사용자 정의 스타일」로 결정',
 
-  // 황금 체스판 UI
+  // 수국 UI
   'capsule.mediaSource': '미디어 소스',
   'capsule.mediaAuto': '자동 (현재 재생 중)',
   'capsule.mediaNone': '재생 중 없음',
@@ -1338,6 +1338,7 @@ export const koKR: Record<string, string> = {
   // 뷰어
   'image.viewer.loading': '로드 중...',
   'image.viewer.noImages': '이 폴더에 이미지가 없습니다',
+  'image.viewer.retry': '다시 시도',
   'image.viewer.loadFailed': '이미지 로드 실패',
   'image.viewer.full': '전체',
   'image.viewer.jumpHint': '클릭하여 페이지 번호 입력 후 이동',
@@ -1757,4 +1758,26 @@ export const koKR: Record<string, string> = {
   'translate.aiModelStale': '이전에 선택한 모델이 목록에 없어 이번엔 기본값을 씁니다',
   'translate.aiModelPick': '모델 선택',
   'translate.aiModelLoading': '모델 불러오는 중…',
+  'updater.title': '소프트웨어 업데이트',
+  'updater.currentVersion': '현재 버전 {v}',
+  'updater.autoHint': '실행 후 자동으로 확인하며, 다운로드는 확인 후 시작됩니다',
+  'updater.check': '업데이트 확인',
+  'updater.checking': '업데이트 확인 중…',
+  'updater.latest': '최신 버전입니다',
+  'updater.available': '새 버전 v{v} 사용 가능',
+  'updater.download': '지금 업데이트',
+  'updater.later': '나중에',
+  'updater.downloading': '업데이트 다운로드 중',
+  'updater.downloaded': '{done} / {total} 다운로드됨',
+  'updater.installing': '업데이트 설치 중입니다. 앱이 자동으로 다시 시작됩니다…',
+  'updater.installHint': '전원을 끄지 마세요. 완료되면 앱이 자동으로 열립니다.',
+  'updater.failed': '업데이트 실패',
+  'updater.retry': '다시 시도',
+  'updater.updated': 'v{v} 버전으로 업데이트됨',
+  'updater.failedKept': '업데이트 실패 — 현재 버전을 유지합니다',
+  'updater.close': '닫기',
+  'updater.openReleases': '릴리스 페이지 열기',
+  'updater.cancel': '취소',
+  'updater.openLogs': '로그 열기',
+  'updater.installStuckHint': '자동으로 다시 시작되지 않으면 앱을 직접 실행하세요. 자세한 내용은 "로그 열기"를 참조하세요.',
 };

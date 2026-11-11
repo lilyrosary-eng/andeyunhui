@@ -446,8 +446,8 @@ export const enUS: Record<string, string> = {
   'niaoluo.moduleTitle': 'Extensions',
   'settings.niaoluo.showRag': 'Show RAG knowledge module',
   'settings.niaoluo.showRagDesc': 'RAG is a built-in feature. When off, it is hidden from the "Niaoluo" sidebar list and can be re-enabled when needed.',
-  'settings.niaoluo.showCapsule': 'Show Golden Chessboard',
-  'settings.niaoluo.showCapsuleDesc': 'A golden chessboard floating at top-center; removed from the top of the screen when off.',
+  'settings.niaoluo.showCapsule': 'Show Hydrangea',
+  'settings.niaoluo.showCapsuleDesc': 'A hydrangea island floating at top-center; removed from the top of the screen when off.',
   'settings.niaoluo.showDeskpet': 'Show Desktop Pet',
   'settings.niaoluo.showDeskpetDesc': 'A desktop pet that wanders on the desktop; turning off unloads the plugin. Scaling, opacity, click-through, assets and presets are adjusted in the pet panel under the "Niaoluo" sidebar.',
   'settings.niaoluo.destroyModule': 'Permanently delete module (with files)',
@@ -473,8 +473,8 @@ export const enUS: Record<string, string> = {
   'transferReceive.decline': 'Decline',
   'transferReceive.accept': 'Receive',
 
-  // Capsule (Golden Chessboard) settings
-  'capsule.settings.title': 'Golden Chessboard · Module Settings',
+  // Hydrangea settings
+  'capsule.settings.title': 'Hydrangea · Module Settings',
   'capsule.settings.subtitle': 'LAN transfer (LocalSend compatible)',
   'capsule.settings.deviceName': 'This device name',
   'capsule.settings.deviceNameDesc': 'Name shown to other devices on the same network (persisted to config)',
@@ -600,7 +600,7 @@ export const enUS: Record<string, string> = {
   'persona.custom.desc': 'Fully decided by the "Custom style" description below.',
   'persona.noPreset': 'No preset selected: decided by the "Custom style" below',
 
-  // Capsule (Golden Chessboard) UI
+  // Capsule (Hydrangea) UI
   'capsule.mediaSource': 'Media source',
   'capsule.mediaAuto': 'Auto (currently playing)',
   'capsule.mediaNone': 'Not playing',
@@ -1351,6 +1351,7 @@ export const enUS: Record<string, string> = {
   // Viewer
   'image.viewer.loading': 'Loading...',
   'image.viewer.noImages': 'This folder has no images',
+  'image.viewer.retry': 'Retry',
   'image.viewer.loadFailed': 'Failed to load image',
   'image.viewer.full': 'Full',
   'image.viewer.jumpHint': 'Click to enter a page number',
@@ -1767,4 +1768,26 @@ export const enUS: Record<string, string> = {
   'translate.aiModelStale': 'The previously chosen model is gone — using the default this time',
   'translate.aiModelPick': 'Pick a model',
   'translate.aiModelLoading': 'Loading models…',
+  'updater.title': 'Software update',
+  'updater.currentVersion': 'Current version {v}',
+  'updater.autoHint': 'Checked automatically after launch; download starts after you confirm',
+  'updater.check': 'Check for updates',
+  'updater.checking': 'Checking for updates…',
+  'updater.latest': 'You are up to date',
+  'updater.available': 'New version v{v} available',
+  'updater.download': 'Update now',
+  'updater.later': 'Later',
+  'updater.downloading': 'Downloading update',
+  'updater.downloaded': 'Downloaded {done} / {total}',
+  'updater.installing': 'Installing update — the app will restart automatically…',
+  'updater.installHint': 'Do not power off; the app will reopen when finished.',
+  'updater.failed': 'Update failed',
+  'updater.retry': 'Retry',
+  'updater.updated': 'Updated to v{v}',
+  'updater.failedKept': 'Update failed — current version kept',
+  'updater.close': 'Close',
+  'updater.openReleases': 'Open releases page',
+  'updater.cancel': 'Cancel',
+  'updater.openLogs': 'Open logs',
+  'updater.installStuckHint': 'If the app does not restart automatically, open it manually; see "Open logs" for details.',
 };

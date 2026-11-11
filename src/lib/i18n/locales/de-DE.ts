@@ -448,8 +448,8 @@ export const deDE: Record<string, string> = {
   'niaoluo.moduleTitle': 'Erweiterungen',
   'settings.niaoluo.showRag': 'RAG-Wissensmodul anzeigen',
   'settings.niaoluo.showRagDesc': 'RAG ist eine integrierte Funktion. Wenn deaktiviert, wird es in der „niaoluo"-Sidebar ausgeblendet und kann bei Bedarf wieder aktiviert werden.',
-  'settings.niaoluo.showCapsule': 'Goldenes Schachbrett anzeigen',
-  'settings.niaoluo.showCapsuleDesc': 'Über der oberen Bildschirmmitte schwebendes goldenes Schachbrett; bei Deaktivierung von der oberen Bildschirmkante entfernt.',
+  'settings.niaoluo.showCapsule': 'Hortensie anzeigen',
+  'settings.niaoluo.showCapsuleDesc': 'Über der oberen Bildschirmmitte schwebende Hortensien-Insel; bei Deaktivierung von der oberen Bildschirmkante entfernt.',
   'settings.niaoluo.showDeskpet': 'Desktop-Haustier anzeigen',
   'settings.niaoluo.showDeskpetDesc': 'Ein Haustier, das auf dem Desktop umherläuft; bei Deaktivierung wird das Plugin entladen. Skalierung, Transparenz, Klickdurchlass, Materialien und Presets werden im Haustier-Panel unter der „niaoluo"-Sidebar eingestellt.',
   'settings.niaoluo.destroyModule': 'Modul endgültig löschen (inkl. Dateien)',
@@ -475,8 +475,8 @@ export const deDE: Record<string, string> = {
   'transferReceive.decline': 'Ablehnen',
   'transferReceive.accept': 'Annehmen',
 
-  // Goldenes Schachbrett · Moduleinstellungen
-  'capsule.settings.title': 'Goldenes Schachbrett · Moduleinstellungen',
+  // Hortensie · Moduleinstellungen
+  'capsule.settings.title': 'Hortensie · Moduleinstellungen',
   'capsule.settings.subtitle': 'LAN-Übertragung (LocalSend-kompatibel)',
   'capsule.settings.deviceName': 'Name dieses Geräts',
   'capsule.settings.deviceNameDesc': 'Name, den andere Geräte im selben Netzwerk sehen (in der Konfiguration gespeichert)',
@@ -602,7 +602,7 @@ export const deDE: Record<string, string> = {
   'persona.custom.desc': 'Vollständig durch die Beschreibung unten unter „Benutzerdefinierter Stil" bestimmt.',
   'persona.noPreset': 'Kein Preset ausgewählt: durch „Benutzerdefinierter Stil" unten bestimmt',
 
-  // Goldenes Schachbrett UI
+  // Hortensie UI
   'capsule.mediaSource': 'Medienquelle',
   'capsule.mediaAuto': 'Automatisch (aktuell wiedergegeben)',
   'capsule.mediaNone': 'Nichts wird wiedergegeben',
@@ -1338,6 +1338,7 @@ export const deDE: Record<string, string> = {
   // Viewer
   'image.viewer.loading': 'Lade...',
   'image.viewer.noImages': 'Dieser Ordner enthält keine Bilder',
+  'image.viewer.retry': 'Erneut versuchen',
   'image.viewer.loadFailed': 'Bild konnte nicht geladen werden',
   'image.viewer.full': 'Voll',
   'image.viewer.jumpHint': 'Klicken, um eine Seitenzahl einzugeben',
@@ -1757,4 +1758,26 @@ export const deDE: Record<string, string> = {
   'translate.aiModelStale': 'Zuletzt gewähltes Modell fehlt – diesmal wird der Standard benutzt',
   'translate.aiModelPick': 'Modell wählen',
   'translate.aiModelLoading': 'Modelle werden geladen…',
+  'updater.title': 'Softwareupdate',
+  'updater.currentVersion': 'Aktuelle Version {v}',
+  'updater.autoHint': 'Prüft nach dem Start automatisch; Download erst nach Bestätigung',
+  'updater.check': 'Nach Updates suchen',
+  'updater.checking': 'Suche nach Updates…',
+  'updater.latest': 'Sie sind auf dem neuesten Stand',
+  'updater.available': 'Neue Version v{v} verfügbar',
+  'updater.download': 'Jetzt aktualisieren',
+  'updater.later': 'Später',
+  'updater.downloading': 'Update wird heruntergeladen',
+  'updater.downloaded': '{done} / {total} heruntergeladen',
+  'updater.installing': 'Update wird installiert – die App startet automatisch neu…',
+  'updater.installHint': 'Bitte nicht ausschalten; die App öffnet sich nach Abschluss automatisch.',
+  'updater.failed': 'Update fehlgeschlagen',
+  'updater.retry': 'Erneut versuchen',
+  'updater.updated': 'Auf v{v} aktualisiert',
+  'updater.failedKept': 'Update fehlgeschlagen – aktuelle Version bleibt erhalten',
+  'updater.close': 'Schließen',
+  'updater.openReleases': 'Release-Seite öffnen',
+  'updater.cancel': 'Abbrechen',
+  'updater.openLogs': 'Logs öffnen',
+  'updater.installStuckHint': 'Wenn die App nicht automatisch neu startet, öffnen Sie sie bitte manuell; Details unter „Logs öffnen“.',
 };
