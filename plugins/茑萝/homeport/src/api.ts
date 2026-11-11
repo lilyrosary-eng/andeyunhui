@@ -142,6 +142,14 @@ export interface DownloadSpec {
   priority: number;
 }
 
+export interface HlsVariant {
+  url: string;
+  bandwidth: number;
+  resolution?: string | null;
+  codecs?: string | null;
+  name: string;
+}
+
 export interface ProbeRequest {
   url: string;
   referer?: string | null;
@@ -168,6 +176,8 @@ export const dl = {
   configSet: (config: EngineConfig) => invoke<EngineConfig>('dl_config_set', { config }),
   engines: () => invoke<EngineStatus>('dl_engines'),
   probe: (request: ProbeRequest) => invoke<ProbeResult>('dl_probe', { request }),
+  hlsVariants: (request: ProbeRequest) =>
+    invoke<HlsVariant[]>('dl_hls_variants', { request }),
   readClipboard: () => invoke<string>('clipboard_read'),
   openPath: (path: string) => invoke<void>('fs_open_path', { path }),
   pickDirectory: () => invoke<string | null>('pick_directory', {}),

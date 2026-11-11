@@ -91,6 +91,7 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("dl_engines", "fs.read"),
     ("dl_config_get", "fs.read"),
     ("dl_probe", "net"),
+    ("dl_hls_variants", "net"),
     ("dl_config_set", "system"),
     ("import_to_openwith_dir", "fs.write"),
     ("add_bytes_to_dropzone", "fs.write"),

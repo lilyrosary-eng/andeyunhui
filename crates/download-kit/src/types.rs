@@ -387,6 +387,21 @@ pub struct ProbeRequest {
     pub headers: BTreeMap<String, String>,
 }
 
+/// HLS 主播放列表里的一个清晰度变体。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HlsVariant {
+    /// 已解析成绝对地址的变体清单。
+    pub url: String,
+    pub bandwidth: u64,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub codecs: Option<String>,
+    /// 展示名：优先分辨率，其次带宽。
+    pub name: String,
+}
+
 /// 探测结果。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

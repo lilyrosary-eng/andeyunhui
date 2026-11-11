@@ -16,7 +16,7 @@ use reqwest::header::{
 };
 use reqwest::RequestBuilder;
 
-use crate::types::{DownloadTask, EngineConfig, ProbeRequest, ProbeResult};
+use crate::types::{DownloadTask, EngineConfig, HlsVariant, ProbeRequest, ProbeResult};
 use crate::util::{filename_from_url, percent_decode, DEFAULT_UA};
 
 /// 与任务解耦的请求上下文（命令层探测也复用）。
@@ -113,6 +113,114 @@ pub async fn select_source(
         }
     }
     (primary.to_string(), ProbeResult::default())
+}
+
+/// 拉取 HLS 主播放列表并解析清晰度变体；媒体播放列表或非 m3u8 返回空列表。
+pub async fn hls_variants(
+    client: &reqwest::Client,
+    url: &str,
+    meta: &HttpMeta,
+    default_ua: &str,
+) -> Result<Vec<HlsVariant>, String> {
+    let resp = apply_headers(client.get(url), meta, default_ua)
+        .send()
+        .await
+        .map_err(|e| format!("获取 HLS 播放列表失败: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("获取 HLS 播放列表失败: HTTP {}", resp.status()));
+    }
+    let final_url = resp.url().clone();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取 HLS 播放列表失败: {e}"))?;
+    if text.len() > 4 * 1024 * 1024 {
+        return Err("HLS 播放列表过大，已跳过清晰度解析".to_string());
+    }
+    Ok(parse_master_playlist(&text, &final_url))
+}
+
+/// 解析 `#EXT-X-STREAM-INF` 变体。相对地址按清单最终 URL 解析，
+/// 并在变体自身没有 query 时继承主清单的 query（签名参数通常在主清单上）。
+fn parse_master_playlist(text: &str, base: &reqwest::Url) -> Vec<HlsVariant> {
+    let mut variants = Vec::new();
+    let mut pending: Option<&str> = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if let Some(attrs) = line.strip_prefix("#EXT-X-STREAM-INF:") {
+            pending = Some(attrs);
+            continue;
+        }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(attrs) = pending.take() else {
+            continue;
+        };
+        let Ok(mut resolved) = base.join(line) else {
+            continue;
+        };
+        if resolved.query().is_none() {
+            if let Some(query) = base.query() {
+                resolved.set_query(Some(query));
+            }
+        }
+        let attrs = parse_attrs(attrs);
+        let bandwidth = attrs
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("BANDWIDTH"))
+            .and_then(|(_, value)| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let resolution = attrs
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("RESOLUTION"))
+            .map(|(_, value)| (*value).to_string());
+        let codecs = attrs
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("CODECS"))
+            .map(|(_, value)| (*value).to_string());
+        let name = resolution.clone().unwrap_or_else(|| {
+            if bandwidth > 0 {
+                format!("{} kbps", bandwidth / 1000)
+            } else {
+                "默认".to_string()
+            }
+        });
+        variants.push(HlsVariant {
+            url: resolved.to_string(),
+            bandwidth,
+            resolution,
+            codecs,
+            name,
+        });
+    }
+    variants.sort_by(|a, b| b.bandwidth.cmp(&a.bandwidth));
+    let mut seen = std::collections::HashSet::new();
+    variants.retain(|variant| seen.insert(variant.url.clone()));
+    variants
+}
+
+/// 按逗号切分属性，引号内的逗号不切（`CODECS="avc1.4d401f,mp4a.40.2"`）。
+fn parse_attrs(attrs: &str) -> Vec<(&str, &str)> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    for (index, ch) in attrs.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                parts.push(&attrs[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&attrs[start..]);
+    parts
+        .into_iter()
+        .filter_map(|part| part.split_once('='))
+        .map(|(key, value)| (key.trim(), value.trim().trim_matches('"')))
+        .collect()
 }
 
 /// 探测 URL。先 HEAD，再用 Range 复核（部分服务器 HEAD 不给全信息）。
@@ -276,5 +384,32 @@ mod tests {
             ..Default::default()
         };
         assert!(build_client(&config).is_err());
+    }
+
+    #[test]
+    fn parses_hls_master_variants() {
+        let base =
+            reqwest::Url::parse("https://cdn.test/hls/master.m3u8?token=abc").unwrap();
+        let text = concat!(
+            "#EXTM3U\n",
+            "#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,",
+            "CODECS=\"avc1.4d401e,mp4a.40.2\"\n",
+            "low/index.m3u8\n",
+            "#EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1920x1080\n",
+            "high.m3u8\n",
+        );
+        let list = parse_master_playlist(text, &base);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "1920x1080");
+        assert_eq!(list[0].url, "https://cdn.test/hls/high.m3u8?token=abc");
+        assert_eq!(list[1].url, "https://cdn.test/hls/low/index.m3u8?token=abc");
+        assert_eq!(list[1].codecs.as_deref(), Some("avc1.4d401e,mp4a.40.2"));
+    }
+
+    #[test]
+    fn media_playlist_has_no_variants() {
+        let base = reqwest::Url::parse("https://cdn.test/a.m3u8").unwrap();
+        let text = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nseg1.ts\n";
+        assert!(parse_master_playlist(text, &base).is_empty());
     }
 }

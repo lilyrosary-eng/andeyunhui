@@ -2189,6 +2189,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             dl_config_set,
             dl_engines,
             dl_probe,
+            dl_hls_variants,
             // ========== 内嵌浏览器（网络视频·面板区当浏览器）：子 webview + 资源嗅探 ==========
             andeyunhui_lib::embedded_browser::browser_open,
             andeyunhui_lib::embedded_browser::browser_set_bounds,

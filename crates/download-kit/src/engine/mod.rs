@@ -123,6 +123,12 @@ impl EngineCtx {
         self.inner.set_live_progress(&self.task_id, downloaded, total);
     }
 
+    /// 带速度的外置进度（轮询/解析 `-progress` 的引擎自己算差分）。
+    pub fn set_progress_speed(&self, downloaded: u64, total: u64, speed: f64) {
+        self.inner
+            .set_live_progress_speed(&self.task_id, downloaded, total, speed);
+    }
+
     /// 内部分片引擎的节流上报；返回 true 表示本次真的落了库/发了事件。
     pub(crate) fn tick(&self, progress: &TaskProgress) -> bool {
         self.inner.tick(&self.task_id, progress)

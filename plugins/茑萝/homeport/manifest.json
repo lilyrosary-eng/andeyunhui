@@ -24,6 +24,7 @@
       "dl_config_set",
       "dl_engines",
       "dl_probe",
+      "dl_hls_variants",
       "clipboard_read",
       "pick_directory",
       "fs_open_path"

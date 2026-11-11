@@ -7,7 +7,7 @@
 //! 进度用 `-progress pipe:1` 的 `total_size=` 行，比解析 stderr 的 `size=` 稳定。
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -165,6 +165,9 @@ impl DownloadEngine for FfmpegEngine {
         let mut ticker = tokio::time::interval(Duration::from_millis(250));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_size = 0u64;
+        let mut last_progress_at = Instant::now();
+        let mut last_progress_size = 0u64;
+        let mut speed = 0.0f64;
 
         if let Some(stdout) = stdout {
             let mut lines = BufReader::new(stdout).lines();
@@ -193,8 +196,16 @@ impl DownloadEngine for FfmpegEngine {
                         match line {
                             Ok(Some(line)) => {
                                 if let Some(size) = parse_ffmpeg_total_size(&line) {
+                                    let now = Instant::now();
+                                    let elapsed = now.duration_since(last_progress_at).as_secs_f64();
+                                    if elapsed >= 0.2 {
+                                        speed = size.saturating_sub(last_progress_size) as f64
+                                            / elapsed;
+                                        last_progress_at = now;
+                                        last_progress_size = size;
+                                    }
                                     last_size = size;
-                                    ctx.set_progress(size, total);
+                                    ctx.set_progress_speed(size, total, speed);
                                 }
                             }
                             Ok(None) | Err(_) => break,

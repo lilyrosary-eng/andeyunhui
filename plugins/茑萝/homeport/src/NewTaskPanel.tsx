@@ -1,7 +1,7 @@
 /// <reference path="../../../global.d.ts" />
 // 凌霄 · 新建下载抽屉：地址 / 目录 / 引擎 / 优先级 / 限速 / 镜像 / SHA-256。
 
-import type { EngineKind, EngineConfig, EngineStatus, ProbeResult } from './api';
+import type { EngineKind, EngineConfig, EngineStatus, HlsVariant, ProbeResult } from './api';
 import { dl, ensureDirPath, formatBytes, splitLines } from './api';
 import {
   ChevronDownIcon,
@@ -43,6 +43,9 @@ export function NewTaskPanel({
   const [advanced, setAdvanced] = useState(false);
   const [probing, setProbing] = useState(false);
   const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
+  const [variants, setVariants] = useState<HlsVariant[]>([]);
+  const [variantUrl, setVariantUrl] = useState('');
+  const [loadingVariants, setLoadingVariants] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -55,6 +58,26 @@ export function NewTaskPanel({
       if (dir) setSavePath(ensureDirPath(dir));
     } catch (err) {
       setError(String(err));
+    }
+  };
+
+  const loadVariants = async (url: string) => {
+    setLoadingVariants(true);
+    try {
+      const list = await dl.hlsVariants({
+        url,
+        referer: referer.trim() || null,
+        cookie: cookie.trim() || null,
+        userAgent: userAgent.trim() || null,
+      });
+      setVariants(list);
+      setVariantUrl(list[0]?.url ?? '');
+    } catch {
+      // 清晰度解析失败不影响普通下载：退回主播放列表，由 ffmpeg 自己选流。
+      setVariants([]);
+      setVariantUrl('');
+    } finally {
+      setLoadingVariants(false);
     }
   };
 
@@ -74,8 +97,19 @@ export function NewTaskPanel({
         userAgent: userAgent.trim() || null,
       });
       setProbeResult(result);
+      const contentType = (result.contentType ?? '').toLowerCase();
+      const looksHls =
+        first.toLowerCase().split('?')[0].endsWith('.m3u8') || contentType.includes('mpegurl');
+      if (looksHls && urls.length === 1) {
+        await loadVariants(first);
+      } else {
+        setVariants([]);
+        setVariantUrl('');
+      }
     } catch (err) {
       setProbeResult(null);
+      setVariants([]);
+      setVariantUrl('');
       setError(String(err));
     } finally {
       setProbing(false);
@@ -94,6 +128,8 @@ export function NewTaskPanel({
       }
       setUrlText((prev) => `${prev.trimEnd()}${prev.trim() ? '\n' : ''}${lines.join('\n')}`);
       setProbeResult(null);
+      setVariants([]);
+      setVariantUrl('');
     } catch (err) {
       setError(String(err));
     } finally {
@@ -163,7 +199,7 @@ export function NewTaskPanel({
       }
       const id = await dl.enqueue({
         ...base,
-        urls,
+        urls: variantUrl && urls.length === 1 ? [variantUrl] : urls,
         filename: probeResult?.filename ?? null,
         mirrors: splitLines(mirrorText),
         sha256: sha256.trim() || null,
@@ -216,6 +252,8 @@ export function NewTaskPanel({
               onChange={(event) => {
                 setUrlText(event.target.value);
                 setProbeResult(null);
+                setVariants([]);
+                setVariantUrl('');
               }}
               rows={4}
               spellCheck={false}
@@ -232,6 +270,8 @@ export function NewTaskPanel({
                 onClick={() => {
                   setMode('concat');
                   setProbeResult(null);
+                  setVariants([]);
+                  setVariantUrl('');
                 }}
                 className={`px-2.5 py-1 transition-colors ${
                   mode === 'concat'
@@ -246,6 +286,8 @@ export function NewTaskPanel({
                 onClick={() => {
                   setMode('batch');
                   setProbeResult(null);
+                  setVariants([]);
+                  setVariantUrl('');
                 }}
                 className={`px-2.5 py-1 transition-colors ${
                   mode === 'batch'
@@ -291,6 +333,27 @@ export function NewTaskPanel({
               </div>
             ) : null}
           </div>
+
+          {variants.length > 0 && urls.length === 1 && mode === 'concat' ? (
+            <Field
+              label="清晰度"
+              hint={loadingVariants ? '解析中…' : '来自 HLS 主播放列表'}
+            >
+              <select
+                value={variantUrl}
+                onChange={(event) => setVariantUrl(event.target.value)}
+                className={inputClass}
+              >
+                {variants.map((variant, index) => (
+                  <option key={variant.url} value={variant.url}>
+                    {variant.name}
+                    {variant.bandwidth > 0 ? ` · ${Math.round(variant.bandwidth / 1000)} kbps` : ''}
+                    {index === 0 ? '（最高）' : ''}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          ) : null}
 
           <Field label="保存目录" hint="文件名由地址或探测结果决定">
             <div className="flex gap-2">

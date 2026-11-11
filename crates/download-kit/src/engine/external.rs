@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, Command};
@@ -28,6 +28,9 @@ pub(crate) async fn wait_with_progress(
     ctx: &EngineCtx,
 ) -> Result<CliWait, String> {
     let mut last_size = u64::MAX;
+    let mut last_speed_size = u64::MAX;
+    let mut last_speed_at = Instant::now();
+    let mut speed = 0.0f64;
     loop {
         if let Some(status) = child
             .try_wait()
@@ -60,7 +63,18 @@ pub(crate) async fn wait_with_progress(
             let size = meta.len();
             if size != last_size {
                 last_size = size;
-                ctx.set_progress(size, if total > 0 { total } else { size });
+                if last_speed_size == u64::MAX {
+                    last_speed_size = size;
+                    last_speed_at = Instant::now();
+                } else {
+                    let elapsed = last_speed_at.elapsed().as_secs_f64();
+                    if elapsed >= 0.1 {
+                        speed = size.saturating_sub(last_speed_size) as f64 / elapsed;
+                        last_speed_at = Instant::now();
+                        last_speed_size = size;
+                    }
+                }
+                ctx.set_progress_speed(size, if total > 0 { total } else { size }, speed);
             }
         }
         tokio::time::sleep(Duration::from_millis(300)).await;

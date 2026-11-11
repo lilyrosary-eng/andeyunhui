@@ -9,8 +9,8 @@ use tauri::AppHandle;
 
 use crate::manager::DownloadManager;
 use crate::types::{
-    DownloadSpec, DownloadTask, EngineConfig, EngineStatus, ProbeRequest, ProbeResult, TaskDetail,
-    TaskStatus,
+    DownloadSpec, DownloadTask, EngineConfig, EngineStatus, HlsVariant, ProbeRequest, ProbeResult,
+    TaskDetail, TaskStatus,
 };
 use crate::util::{filename_from_url, is_metalink_url, is_p2p_url};
 
@@ -227,4 +227,13 @@ pub async fn dl_probe(
     request: ProbeRequest,
 ) -> Result<ProbeResult, String> {
     manager(&app)?.probe(request).await
+}
+
+/// 解析 HLS 主播放列表，返回可选清晰度列表（媒体播放列表为空）。
+#[tauri::command]
+pub async fn dl_hls_variants(
+    app: AppHandle,
+    request: ProbeRequest,
+) -> Result<Vec<HlsVariant>, String> {
+    manager(&app)?.hls_variants(request).await
 }

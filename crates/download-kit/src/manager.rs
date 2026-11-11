@@ -20,7 +20,7 @@ use crate::probe;
 use crate::store::Store;
 use crate::types::{
     DownloadPart, DownloadSpec, DownloadTask, EngineConfig, EngineInfo, EngineKind, EngineStatus,
-    PartState, ProbeRequest, ProbeResult, ProgressPayload, TaskDetail, TaskStatus,
+    HlsVariant, PartState, ProbeRequest, ProbeResult, ProgressPayload, TaskDetail, TaskStatus,
 };
 use crate::util::{
     dir_size, filename_from_url, is_dash_url, is_ftp_url, is_hls_url, is_metalink_url,
@@ -139,6 +139,16 @@ impl Inner {
     }
 
     pub(crate) fn set_live_progress(&self, id: &str, downloaded: u64, total: u64) {
+        self.set_live_progress_speed(id, downloaded, total, 0.0);
+    }
+
+    pub(crate) fn set_live_progress_speed(
+        &self,
+        id: &str,
+        downloaded: u64,
+        total: u64,
+        speed: f64,
+    ) {
         let _ = self.store.update_progress(id, downloaded, total);
         let (status, connections) = self
             .store
@@ -158,7 +168,7 @@ impl Inner {
                 status,
                 downloaded,
                 total,
-                speed: 0.0,
+                speed,
                 connections,
                 parts_total: 0,
                 parts_done: 0,
@@ -803,6 +813,14 @@ impl DownloadManager {
         let client = probe::build_client(&config)?;
         let meta = probe::HttpMeta::from_request(&request);
         probe::probe(&client, &request.url, &meta).await
+    }
+
+    /// 解析 HLS 主播放列表的清晰度变体；媒体播放列表返回空列表。
+    pub async fn hls_variants(&self, request: ProbeRequest) -> Result<Vec<HlsVariant>, String> {
+        let config = self.inner.config();
+        let client = probe::build_client(&config)?;
+        let meta = probe::HttpMeta::from_request(&request);
+        probe::hls_variants(&client, &request.url, &meta, &config.user_agent).await
     }
 }
 
