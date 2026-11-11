@@ -1136,9 +1136,16 @@ class MusicPlayer {
         this.pseudoAnimFrame = null;
         return;
       }
-      // 非 Windows 兜底：用 Web Audio AnalyserNode 取真实频域数据。
-      // 仅在「从未收到过 Rust 事件」时才建源 ⇒ Windows 走原路径、行为完全不变。
-      if (!this.rustSpectrumSeen && this.ensureWebAnalyser()) {
+      // **仅 Linux 走 Web Audio 兜底**（2026-11-11 修）。
+      //
+      // 原来判据是「还没收到过 Rust 事件」，而 Windows 上 Rust 事件要等
+      // 采集线程初始化 + 100ms 轮询，这中间伪律动的 60fps tick 早就把
+      // `createMediaElementSource(this.audio)` 建出来了 —— 那是**改道**：
+      // audio 输出被接进 WebAudio 图，频谱数据来自一个几乎没有信号的源，
+      // 表现就是「Windows 频谱用不了」（条是平的/不跟音乐）。而且这条一旦建过
+      // 就永久留着（mediaSourceEl 绑死），后面 Rust 真实数据来了也只能混着用。
+      // Windows 的真实频谱只认 Rust 的 audio-spectrum 事件，不该有 WebAudio 这条支路。
+      if (isLinux() && !this.rustSpectrumSeen && this.ensureWebAnalyser()) {
         this.pullWebSpectrum();
         this.pseudoAnimFrame = requestAnimationFrame(tick);
         return;
@@ -1282,8 +1289,26 @@ class MusicPlayer {
     this.spectrumWanted = Math.max(0, this.spectrumWanted - 1);
     this.syncSpectrum();
   }
+  /** 上次发给后端的 active 值；null = 还没发过 */
+  private spectrumSentActive: boolean | null = null;
+  /**
+   * 只在**状态翻转**时通知后端。
+   *
+   * 后端 `set_listener` 是**计数**（true +1 / false -1，saturating），
+   * 而这里原本每次都把 `wanted > 0` 这个**布尔**发过去 —— 计数与布尔混用会漂移：
+   * 两个消费者各 request 一次 → 后端变 2；只 release 一次 → 仍为 1，
+   * 线程永远不睡（白烧 CPU）。反过来，销毁路径再无条件发一个 false，
+   * 又可能把计数减到 0 而消费方还在。
+   * 改成边沿触发后，计数器只会是 0 / 1，语义清楚。
+   */
   private syncSpectrum(): void {
-    window.__HOST_API__?.invoke('spectrum_set_listener', { active: this.spectrumWanted > 0 }).catch(() => {});
+    const want = this.spectrumWanted > 0;
+    if (want === this.spectrumSentActive) return;
+    this.spectrumSentActive = want;
+    window.__HOST_API__?.invoke('spectrum_set_listener', { active: want }).catch(() => {
+      // 发失败就把状态回退，下次还能重试（否则会一直以为已经同步过）
+      this.spectrumSentActive = null;
+    });
   }
   private setupSpectrumListener(): void {
     const api = window.__HOST_API__;
@@ -1307,18 +1332,26 @@ class MusicPlayer {
     }).catch(() => {});
   }
 
-  // 获取频谱数据供 EQ 动画使用
-  // 优先返回 Rust WASAPI Loopback 真实频谱，降级到伪律动
+  // 获取频谱数据供 EQ 动画使用（Rust 事件或 WebAudio 都会写进 spectrumData）
+  //
+  // **缓存同一个 wrapper**：旧实现每次调用都 new 一个对象 + 一个闭包，
+  // 而调用点是 rAF 的每帧一次 ⇒ 60 个闭包/秒的纯垃圾，GC 抖动直接表现为动画不匀。
+  private analyserFacade: {
+    getByteFrequencyData: (arr: Uint8Array) => void;
+    frequencyBinCount: number;
+  } | null = null;
   getAnalyser(): { getByteFrequencyData: (arr: Uint8Array) => void; frequencyBinCount: number } | null {
-    const data = this.spectrumData;
-    return {
-      frequencyBinCount: data.length,
-      getByteFrequencyData: (arr: Uint8Array) => {
-        for (let i = 0; i < Math.min(arr.length, data.length); i++) {
-          arr[i] = data[i];
-        }
-      },
-    } as any;
+    if (!this.analyserFacade) {
+      const data = this.spectrumData;
+      this.analyserFacade = {
+        frequencyBinCount: data.length,
+        getByteFrequencyData: (arr: Uint8Array) => {
+          const n = Math.min(arr.length, this.spectrumData.length);
+          for (let i = 0; i < n; i++) arr[i] = this.spectrumData[i];
+        },
+      };
+    }
+    return this.analyserFacade;
   }
 
   pause(): void {
@@ -1438,8 +1471,10 @@ class MusicPlayer {
         this.webBins = null;
         debugLog('music: Web Audio 频谱已关闭');
       }
-      // 通知 Rust：已退订频谱 → 无监听时采集线程休眠（省 CPU）
-      window.__HOST_API__?.invoke('spectrum_set_listener', { active: false }).catch(() => {});
+      // 通知 Rust：已退订频谱 → 无监听时采集线程休眠（省 CPU）。
+      // **走 syncSpectrum**：直接发 false 会绕过计数，可能把别的消费方的订阅一起减掉。
+      this.spectrumWanted = 0;
+      this.syncSpectrum();
       debugLog('music: spectrum listener removed');
     } catch {
       /* 忽略 */

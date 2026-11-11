@@ -123,11 +123,15 @@ fn spectrum_loop(app: tauri::AppHandle) {
     let (client, capture, rate, channels, bytes_per_sample) = match init_wasapi() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("[Spectrum] WASAPI 初始化失败: {}，频谱功能不可用", e);
+            log::error!("[Spectrum] WASAPI 初始化失败: {e}，频谱功能不可用");
+            eprintln!("[Spectrum] WASAPI 初始化失败: {e}，频谱功能不可用");
             return;
         }
     };
 
+    log::info!(
+        "[Spectrum] WASAPI 回环就绪: {rate}Hz, {channels}ch, {bytes_per_sample}bytes/sample"
+    );
     eprintln!(
         "[Spectrum] WASAPI 回环就绪: {}Hz, {}ch, {}bytes/sample",
         rate, channels, bytes_per_sample
@@ -149,13 +153,28 @@ fn spectrum_loop(app: tauri::AppHandle) {
     let block_align = (channels as usize * bytes_per_sample as usize).max(1);
 
     let mut last_push = Instant::now();
+    // 休眠/唤醒/首帧 各打一次（边沿触发）：没有这三行，
+    // "频谱用不了"到底是"线程没起"、"一直休眠"还是"采集到静音"根本分不清。
+    let mut logged_sleep = false;
+    let mut logged_wake = false;
+    let mut logged_first_emit = false;
 
     while !CAPTURE_STOP.load(Ordering::SeqCst) {
         // 无前端监听 → 退化为轻负载休眠，跳过 WASAPI 轮询 / FFT / 推送。
         // 仅保持 IAudioClient 运行；恢复监听后一次性排空累积缓冲即可，无需重新初始化。
         if !has_listener() {
+            if !logged_sleep {
+                logged_sleep = true;
+                logged_wake = false;
+                log::info!("[Spectrum] 无监听者，采集线程进入休眠（等 spectrum_set_listener(true) 唤醒）");
+            }
             thread::sleep(Duration::from_millis(100));
             continue;
+        }
+        if !logged_wake {
+            logged_wake = true;
+            logged_sleep = false;
+            log::info!("[Spectrum] 检测到监听者，恢复采集");
         }
 
         // 排空 WASAPI 缓冲
@@ -219,6 +238,13 @@ fn spectrum_loop(app: tauri::AppHandle) {
 
             // 推送给前端（30fps）
             if last_push.elapsed().as_millis() as u64 >= PUSH_INTERVAL_MS {
+                if !logged_first_emit {
+                    logged_first_emit = true;
+                    let peak = bars.iter().copied().max().unwrap_or(0);
+                    log::info!(
+                        "[Spectrum] 首帧推送（64 桶，峰值 {peak}，rate={rate}Hz ch={channels}）"
+                    );
+                }
                 let _ = tauri::Emitter::emit(&app, "audio-spectrum", bars);
                 last_push = Instant::now();
             }

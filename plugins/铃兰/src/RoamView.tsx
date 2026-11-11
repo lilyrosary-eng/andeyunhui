@@ -150,28 +150,39 @@ const EqBars = memo(function EqBars({
   useEffect(() => {
     if (!active) return;
     const freqData = new Uint8Array(64);
+    // 对数映射表：每帧 32 次 Math.pow 不算贵，但没必要——帧预算是共享的。
+    const idxMap = new Uint16Array(EQ_BARS);
+    for (let i = 0; i < EQ_BARS; i++) {
+      idxMap[i] = Math.floor(Math.pow(i / EQ_BARS, 1.5) * (freqData.length - 1));
+    }
+    // 平滑状态：**快起慢落**（attack 0.55 / decay 0.16）。
+    // 之前靠 CSS `transition: transform .05s` 做平滑，而 transform 每帧都在改 ⇒
+    // 每帧都重新起一段 50ms 补间、下一帧又被改写，等于一个固定滞后的低通 + 抖动，
+    // 观感就是用户说的"粘滞"。补间必须自己做在 JS 里，CSS 只负责最终值。
+    const disp = new Float32Array(EQ_BARS);
     let raf = 0;
-    const animate = () => {
+    let last = 0;
+    const animate = (ts: number) => {
+      raf = requestAnimationFrame(animate);
+      // 60fps 上限：某些环境下 rAF 会跑 120/144Hz，动画更快但白烧 CPU
+      if (ts - last < 15) return;
+      last = ts;
       const analyser = musicPlayer.getAnalyser();
       const bars = barsRef.current;
-      if (analyser && isPlaying) {
+      if (analyser) {
         analyser.getByteFrequencyData(freqData);
-        const bins = freqData.length;
         for (let i = 0; i < EQ_BARS; i++) {
-          // 对数映射，让低频在中间，高频在两端（更自然）
-          const ratio = i / EQ_BARS;
-          const dataIdx = Math.floor(Math.pow(ratio, 1.5) * (bins - 1));
-          let v = freqData[dataIdx] / 255;
-          // 易驱性增强：非线性增益（平方根拉伸低幅度 + 1.8x 增益 + 偏移）
-          v = Math.sqrt(v) * 1.8 + 0.03;
+          const v = freqData[idxMap[i]] / 255;
+          // 非线性增益：平方根拉伸低幅度 + 1.8x + 底噪
+          const target = Math.min(1, Math.sqrt(v) * 1.8 + 0.03);
+          const cur = disp[i];
+          disp[i] = cur + (target - cur) * (target > cur ? 0.55 : 0.16);
           const el = bars[i];
-          // 只改 transform：改 height 会每帧触发重栅格化 → 每帧新建 GPU 纹理
-          // → Intel 核显 GEM 缓冲被撑爆（2026-06 OOM 现场，见 render 处的注释）
-          if (el) el.style.transform = `scaleY(${0.05 + Math.min(1, v) * 0.92})`;
+          if (el) el.style.transform = `scaleY(${0.05 + disp[i] * 0.92})`;
         }
       } else {
-        // 降级：伪律动
-        const t = performance.now() / 240;
+        // 降级：伪律动（没有数据源时才有意义）
+        const t = ts / 240;
         const amp = isPlaying ? 0.9 : 0.2;
         for (let i = 0; i < EQ_BARS; i++) {
           const v = (Math.sin(t + i * 0.6) * 0.5 + 0.5) * amp;
@@ -179,7 +190,6 @@ const EqBars = memo(function EqBars({
           if (el) el.style.transform = `scaleY(${0.08 + v * 0.82})`;
         }
       }
-      raf = requestAnimationFrame(animate);
     };
     raf = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(raf);
@@ -210,8 +220,9 @@ const EqBars = memo(function EqBars({
             willChange: 'transform',
             background: `linear-gradient(180deg, ${ink}, ${inkLine})`,
             borderRadius: 2, opacity: 0.85,
-            // 过渡也必须是 transform，改 height 同样会每帧触发重栅格化
-            transition: 'transform 0.05s linear',
+            // **不要加 transition**：这个 transform 每帧都会被重写，
+            // CSS 补间每帧重启 ⇒ 固定滞后 + 抖动（用户反馈的"粘滞感"）。
+            // 平滑改由 JS 的 attack/decay 完成（见 animate）。
           }}
         />
       ))}

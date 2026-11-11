@@ -1333,6 +1333,24 @@ pub fn generate_tiles(
         .and_then(|r| r.with_guessed_format().ok())
         .and_then(|r| r.into_dimensions().ok())
         .ok_or("读不出图片尺寸")?;
+    // **小图结构性拦截**（2026-11-11）：≤2560 的图完全不需要金字塔。
+    // 前端已经先查尺寸再决定是否请求（省一次解码），这里是**后端兜底**：
+    // 万一有别的调用方（插件/旧版本前端）直接请求，也不要白解码一次。
+    // 返回空 levels + complete=false —— 前端据此走 onSmall() 用原图，
+    // 不是"失败"，所以不能用 Err（那会被当成错误弹重试）。
+    const SMALL_MAX: u32 = 2560;
+    if w0 <= SMALL_MAX && h0 <= SMALL_MAX {
+        log::info!("[tiles] 小图跳过（{w0}x{h0} ≤ {SMALL_MAX}），不生成金字塔: {image_path}");
+        return Ok(TilesInfo {
+            width: w0,
+            height: h0,
+            tile_size: TILE_SIZE,
+            levels: Vec::new(),
+            complete: false,
+            dir: String::new(),
+        });
+    }
+
     let levels = tile_levels(w0, h0, TILE_SIZE);
     let dir = tiles_dir(app, image_path)?;
     let done_marker = dir.join("done.json");
