@@ -79,6 +79,18 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("download_file", "fs.write"),
     ("download_hls", "fs.write"),
     ("download_video", "fs.write"),
+    // ---- 下载内核（download-kit）----
+    ("dl_enqueue", "fs.write"),
+    ("dl_pause", "fs.write"),
+    ("dl_resume", "fs.write"),
+    ("dl_retry", "fs.write"),
+    ("dl_cancel", "fs.write"),
+    ("dl_list", "fs.read"),
+    ("dl_get", "fs.read"),
+    ("dl_engines", "fs.read"),
+    ("dl_config_get", "fs.read"),
+    ("dl_probe", "net"),
+    ("dl_config_set", "system"),
     ("import_to_openwith_dir", "fs.write"),
     ("add_bytes_to_dropzone", "fs.write"),
     // ---- 中转站索引（全部只收 id，路径由后端查表得出）----
@@ -169,6 +181,7 @@ const EXACT_RULES: &[(&str, &str)] = &[
     ("debug_flags", "system"),
     ("check_ffmpeg", "system"),
     ("run_shell_command", "system"),
+    ("fs_open_path", "system"),
     // ---- 数据 / 配置 ----
     ("get_blacklist_paths", "data"),
     ("add_to_blacklist", "data"),

@@ -67,8 +67,12 @@ export function HostSidebar() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return children;
+    // 双轨检索：花名（displayName）与功能名（name）都要能搜到
     return children.filter(
-      (p) => p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q),
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        (p.displayName?.toLowerCase().includes(q) ?? false) ||
+        p.id.toLowerCase().includes(q),
     );
   }, [children, search]);
 
@@ -82,15 +86,15 @@ export function HostSidebar() {
     return Array.from(map.entries());
   }, [filtered]);
 
-  // 只在茑萝模式、子插件模式，或黄金棋盘·模块设置页显示侧栏
+  // 只在茑萝模式、子插件模式，或绣球·模块设置页显示侧栏
   // （capsule-settings 既不是 extensions 也无 parent，需显式纳入，否则进入设置时侧栏整体消失）
   const showSidebar =
     activeModule === 'extensions' ||
     activeModule === 'capsule-settings' ||
     !!(pluginRegistry?.get(activeModule)?.parent);
 
-  // 子插件模式（如绘画/IDE）：在「茑萝」标题下提供返回按钮（不改动图标栏逻辑）
-  // 黄金棋盘·模块设置页同样视为茑萝子模块（返回 茑萝 列表，维持层级归属，不脱离母模块）
+  // 子插件模式（如绘画/IDE）：在子模块标题下提供返回按钮（不改动图标栏逻辑）
+  // 绣球·模块设置页同样视为茑萝子模块（返回 茑萝 列表，维持层级归属，不脱离母模块）
   const isChild =
     (activeModule !== 'extensions' && !!pluginRegistry?.get(activeModule)?.parent) ||
     activeModule === 'capsule-settings';
@@ -102,7 +106,7 @@ export function HostSidebar() {
     if (activeModule === 'extensions') {
       toggleExtensionSettings();
     } else if (activeModule === 'capsule-settings') {
-      // 设置页再点齿轮 → 返回黄金棋盘主面板
+      // 设置页再点齿轮 → 返回绣球主面板
       setActiveModule('capsule');
     } else if (isChild) {
       window.dispatchEvent(new CustomEvent('module-settings-toggle', { detail: { moduleId: activeModule } }));
@@ -121,7 +125,7 @@ export function HostSidebar() {
   let content: React.ReactNode = null;
 
   if (activeModule === 'extensions') {
-    // 黄金棋盘：先确保插件已加载（被用户在设置里关掉时不随启动加载），再切换到主窗口搜索面板。
+    // 绣球：先确保插件已加载（被用户在设置里关掉时不随启动加载），再切换到主窗口搜索面板。
     // 浮岛胶囊仍由光标靠近顶部监视（capsule_start_monitor）自动弹出，不受此影响。
     const handlePluginClick = async (plugin: PluginDef) => {
       if (plugin.id !== 'capsule') {
@@ -141,12 +145,14 @@ export function HostSidebar() {
         }
         setActiveModule('capsule');
       } catch (e) {
-        console.error('[HostSidebar] 打开黄金棋盘失败', e);
+        console.error('[HostSidebar] 打开绣球失败', e);
       }
     };
 
     // 茑萝：子插件列表（母目录）
-    const renderBtn = (plugin: PluginDef) => (
+    const renderBtn = (plugin: PluginDef) => {
+      const label = plugin.displayName ?? plugin.name;
+      return (
       <button
         key={plugin.id}
         onClick={() => handlePluginClick(plugin)}
@@ -157,16 +163,19 @@ export function HostSidebar() {
         }`}
       >
         <span className={`flex-shrink-0 ${activeModule === plugin.id ? '' : 'opacity-70'}`}>
-          <PluginIcon name={plugin.iconName} size={18} fallback={<span className="text-xs font-bold">{plugin.name[0]}</span>} />
+          <PluginIcon name={plugin.iconName} size={18} fallback={<span className="text-xs font-bold">{label[0]}</span>} />
         </span>
         <span className="flex-1 min-w-0">
           <span className={`block text-sm font-medium truncate ${activeModule === plugin.id ? '' : 'text-neutral-700 dark:text-stone-200'}`}>
-            {plugin.name}
+            {label}
           </span>
-          <span className="block text-[11px] text-neutral-400 dark:text-stone-500 truncate">{plugin.id}</span>
+          <span className="block text-[11px] text-neutral-400 dark:text-stone-500 truncate">
+            {plugin.displayName && plugin.displayName !== plugin.name ? plugin.name : plugin.id}
+          </span>
         </span>
       </button>
-    );
+      );
+    };
 
     if (filtered.length === 0) {
       content = (
@@ -191,7 +200,7 @@ export function HostSidebar() {
       );
     }
   } else if (activeModule === 'capsule' || activeModule === 'capsule-settings') {
-    // 黄金棋盘 / 黄金棋盘·设置：侧栏显示搜索 / 传输双 Tab（复用茑萝侧栏，不另建）
+    // 绣球 / 绣球·设置：侧栏显示搜索 / 传输双 Tab（复用茑萝侧栏，不另建）
     const capsuleTab = storage.getString(KEYS.niaoluo.capsuleTab.key, 'search');
     const setCapsuleTab = (tab: string) => {
       storage.setString(KEYS.niaoluo.capsuleTab.key, tab);
@@ -259,11 +268,27 @@ export function HostSidebar() {
     ? (showExtensionSettings ? t('sidebar.backToList') : t('sidebar.manageExtSettings'))
     : t('sidebar.moduleSettings');
 
+  // 子模块页的侧栏标题随当前子模块变化（花名优先），与设置页 / 命令面板保持同一名字；
+  // 茑萝列表页仍用容器标题「茑萝」——容器本身的命名不动。
+  const activeDef = pluginRegistry?.get(activeModule);
+  const titleDef = isChild
+    ? (activeDef ?? (activeModule === 'capsule-settings' ? pluginRegistry?.get('capsule') : undefined))
+    : undefined;
+  const sidebarTitle = titleDef ? (titleDef.displayName ?? titleDef.name) : t('sidebar.niaoluo');
+  // 悬停文案：显式声明优先，否则「花名 · 功能名」；两者相同时不重复提示。
+  const sidebarTitleTooltip = !titleDef
+    ? undefined
+    : (titleDef.displayTooltip
+        ?? (titleDef.displayName && titleDef.displayName !== titleDef.name
+          ? `${titleDef.displayName} · ${titleDef.name}`
+          : undefined));
+
   return (
     <ModuleSidebarShell
       moduleId="niaoluo"
       icon={<Puzzle size={20} className="text-[var(--element-bg)]" />}
-      title={t('sidebar.niaoluo')}
+      title={sidebarTitle}
+      titleTooltip={sidebarTitleTooltip}
       onOpenModuleSettings={onOpenModuleSettings}
       moduleSettingsLabel={moduleSettingsLabel}
       backAction={isChild ? { onClick: () => setActiveModule('extensions'), label: t('sidebar.back') } : undefined}

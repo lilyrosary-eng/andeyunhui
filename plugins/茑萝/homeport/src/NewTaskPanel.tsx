@@ -1,0 +1,338 @@
+/// <reference path="../../../global.d.ts" />
+// 凌霄 · 新建下载抽屉：地址 / 目录 / 引擎 / 优先级 / 限速 / 镜像 / SHA-256。
+
+import type { EngineKind, EngineConfig, EngineStatus, ProbeResult } from './api';
+import { dl, ensureDirPath, formatBytes, splitLines } from './api';
+import {
+  ChevronDownIcon,
+  DownloadIcon,
+  Field,
+  FolderIcon,
+  LinkIcon,
+  XIcon,
+  inputClass,
+} from './ui';
+
+const React = window.__HOST_REACT__;
+const { useState } = React;
+
+export function NewTaskPanel({
+  engines,
+  config,
+  onClose,
+  onCreated,
+}: {
+  engines: EngineStatus | null;
+  config: EngineConfig | null;
+  onClose: () => void;
+  onCreated: (id: string) => void;
+}) {
+  const [urlText, setUrlText] = useState('');
+  const [mirrorText, setMirrorText] = useState('');
+  const [savePath, setSavePath] = useState('');
+  const [engine, setEngine] = useState('auto');
+  const [connections, setConnections] = useState(String(config?.connections ?? 8));
+  const [priority, setPriority] = useState('0');
+  const [speedKb, setSpeedKb] = useState('');
+  const [sha256, setSha256] = useState('');
+  const [referer, setReferer] = useState('');
+  const [cookie, setCookie] = useState('');
+  const [userAgent, setUserAgent] = useState('');
+  const [advanced, setAdvanced] = useState(false);
+  const [probing, setProbing] = useState(false);
+  const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const urls = splitLines(urlText);
+  const selected = engines?.engines.find((item) => item.kind === engine);
+
+  const pickDirectory = async () => {
+    try {
+      const dir = await dl.pickDirectory();
+      if (dir) setSavePath(ensureDirPath(dir));
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const probe = async () => {
+    const first = urls[0];
+    if (!first) {
+      setError('请先填写下载地址');
+      return;
+    }
+    setProbing(true);
+    setError(null);
+    try {
+      const result = await dl.probe({
+        url: first,
+        referer: referer.trim() || null,
+        cookie: cookie.trim() || null,
+        userAgent: userAgent.trim() || null,
+      });
+      setProbeResult(result);
+    } catch (err) {
+      setProbeResult(null);
+      setError(String(err));
+    } finally {
+      setProbing(false);
+    }
+  };
+
+  const submit = async () => {
+    if (urls.length === 0) {
+      setError('至少填写一个下载地址');
+      return;
+    }
+    if (!savePath.trim()) {
+      setError('请选择保存目录');
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const speed = Number(speedKb);
+      const id = await dl.enqueue({
+        urls,
+        savePath: ensureDirPath(savePath),
+        engine: engine as EngineKind,
+        connections: Math.min(32, Math.max(1, Number(connections) || 8)),
+        priority: Number.isFinite(Number(priority)) ? Math.trunc(Number(priority)) : 0,
+        maxSpeed: Number.isFinite(speed) && speed > 0 ? Math.round(speed * 1024) : null,
+        mirrors: splitLines(mirrorText),
+        sha256: sha256.trim() || null,
+        referer: referer.trim() || null,
+        cookie: cookie.trim() || null,
+        userAgent: userAgent.trim() || null,
+      });
+      onCreated(id);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="absolute inset-0 z-30 flex justify-end bg-black/20 backdrop-blur-[2px]"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="flex h-full w-[470px] max-w-full flex-col border-l border-black/10 bg-[#fbfaf7] shadow-2xl dark:border-white/10 dark:bg-[#211e1b]">
+        <div className="flex items-center gap-3 border-b border-black/10 px-5 py-4 dark:border-white/10">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--element-bg)]/10 text-[var(--element-color-raw)]">
+            <DownloadIcon size={18} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold text-neutral-800 dark:text-stone-100">新建下载</div>
+            <div className="text-[11px] text-neutral-400 dark:text-stone-500">地址交给引擎，进度交给凌霄</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-neutral-400 transition-colors hover:bg-black/5 hover:text-neutral-700 dark:hover:bg-white/10 dark:hover:text-stone-200"
+            aria-label="关闭"
+          >
+            <XIcon size={16} />
+          </button>
+        </div>
+
+        <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
+          <Field label="下载地址" hint="每行一个；多行会按顺序拼接（HLS / 分段视频）">
+            <textarea
+              value={urlText}
+              onChange={(event) => {
+                setUrlText(event.target.value);
+                setProbeResult(null);
+              }}
+              rows={4}
+              spellCheck={false}
+              placeholder={'https://example.com/file.zip\nmagnet:?xt=urn:btih:...'}
+              className={`${inputClass} resize-y font-mono text-xs leading-relaxed`}
+            />
+          </Field>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={probe}
+              disabled={probing || urls.length === 0}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-black/5 px-3 py-1.5 text-xs font-medium text-neutral-600 transition-colors hover:bg-black/10 disabled:opacity-40 dark:bg-white/10 dark:text-stone-300 dark:hover:bg-white/15"
+            >
+              <LinkIcon size={13} />
+              {probing ? '解析中…' : '解析地址'}
+            </button>
+            {probeResult ? (
+              <div className="min-w-0 text-[11px] text-neutral-500 dark:text-stone-400">
+                <span className="font-medium text-neutral-700 dark:text-stone-200">
+                  {probeResult.filename || '未命名'}
+                </span>
+                <span className="ml-1.5">{probeResult.totalBytes > 0 ? formatBytes(probeResult.totalBytes) : '大小未知'}</span>
+                <span className="ml-1.5">{probeResult.acceptRanges ? '· 支持分段' : '· 单连接'}</span>
+              </div>
+            ) : null}
+          </div>
+
+          <Field label="保存目录" hint="文件名由地址或探测结果决定">
+            <div className="flex gap-2">
+              <input
+                value={savePath}
+                onChange={(event) => setSavePath(event.target.value)}
+                spellCheck={false}
+                placeholder="选择或输入目录，例如 D:\\Downloads"
+                className={inputClass}
+              />
+              <button
+                type="button"
+                onClick={pickDirectory}
+                className="inline-flex flex-shrink-0 items-center gap-1.5 rounded-xl border border-black/10 px-3 text-xs font-medium text-neutral-600 transition-colors hover:bg-black/5 dark:border-white/10 dark:text-stone-300 dark:hover:bg-white/10"
+              >
+                <FolderIcon size={14} />
+                选择
+              </button>
+            </div>
+          </Field>
+
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="连接数">
+              <input
+                type="number"
+                min={1}
+                max={32}
+                value={connections}
+                onChange={(event) => setConnections(event.target.value)}
+                className={inputClass}
+              />
+            </Field>
+            <Field label="优先级" hint="越大越先">
+              <input
+                type="number"
+                value={priority}
+                onChange={(event) => setPriority(event.target.value)}
+                className={inputClass}
+              />
+            </Field>
+            <Field label="限速" hint="KB/s">
+              <input
+                type="number"
+                min={0}
+                value={speedKb}
+                onChange={(event) => setSpeedKb(event.target.value)}
+                placeholder="不限"
+                className={inputClass}
+              />
+            </Field>
+          </div>
+
+          <Field label="引擎">
+            <select
+              value={engine}
+              onChange={(event) => setEngine(event.target.value)}
+              className={inputClass}
+            >
+              <option value="auto">自动（按任务形态选择）</option>
+              {engines?.engines.map((item) => (
+                <option key={item.kind} value={item.kind} disabled={!item.available}>
+                  {item.name}
+                  {item.available ? '' : '（未安装）'}
+                </option>
+              ))}
+            </select>
+            <div className="mt-1 text-[10px] leading-relaxed text-neutral-400 dark:text-stone-500">
+              {selected
+                ? `${selected.description}${selected.available ? '' : ' · 当前不可用'}`
+                : '磁力/BT 自动走 Gopeed；HLS 走 ffmpeg；其余按默认引擎。'}
+            </div>
+          </Field>
+
+          <Field label="镜像地址" hint="可选；主源失败时按顺序尝试">
+            <textarea
+              value={mirrorText}
+              onChange={(event) => setMirrorText(event.target.value)}
+              rows={2}
+              spellCheck={false}
+              placeholder={'https://mirror-1.example.com/file.zip\nhttps://mirror-2.example.com/file.zip'}
+              className={`${inputClass} resize-y font-mono text-xs leading-relaxed`}
+            />
+          </Field>
+
+          <Field label="SHA-256" hint="可选；完成后校验，不匹配不会标记完成">
+            <input
+              value={sha256}
+              onChange={(event) => setSha256(event.target.value)}
+              spellCheck={false}
+              placeholder="64 位十六进制，可带 sha256: 前缀"
+              className={`${inputClass} font-mono text-xs`}
+            />
+          </Field>
+
+          <button
+            type="button"
+            onClick={() => setAdvanced((value) => !value)}
+            className="flex items-center gap-1.5 text-xs font-medium text-neutral-500 transition-colors hover:text-neutral-700 dark:text-stone-400 dark:hover:text-stone-200"
+          >
+            <ChevronDownIcon size={13} className={advanced ? 'rotate-180 transition-transform' : 'transition-transform'} />
+            高级请求头
+          </button>
+
+          {advanced ? (
+            <div className="space-y-3 rounded-2xl border border-black/5 bg-black/[0.02] p-3 dark:border-white/5 dark:bg-white/[0.02]">
+              <Field label="Referer">
+                <input
+                  value={referer}
+                  onChange={(event) => setReferer(event.target.value)}
+                  spellCheck={false}
+                  className={`${inputClass} font-mono text-xs`}
+                />
+              </Field>
+              <Field label="Cookie">
+                <input
+                  value={cookie}
+                  onChange={(event) => setCookie(event.target.value)}
+                  spellCheck={false}
+                  className={`${inputClass} font-mono text-xs`}
+                />
+              </Field>
+              <Field label="User-Agent" hint="留空使用全局设置">
+                <input
+                  value={userAgent}
+                  onChange={(event) => setUserAgent(event.target.value)}
+                  spellCheck={false}
+                  className={`${inputClass} font-mono text-xs`}
+                />
+              </Field>
+            </div>
+          ) : null}
+
+          {error ? (
+            <div className="rounded-xl bg-red-500/10 px-3 py-2 text-xs leading-relaxed text-red-600 dark:text-red-400">
+              {error}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-black/10 px-5 py-3 dark:border-white/10">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-xl px-4 py-2 text-xs font-medium text-neutral-500 transition-colors hover:bg-black/5 dark:text-stone-400 dark:hover:bg-white/10"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={submitting}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--element-bg)] px-4 py-2 text-xs font-semibold text-white shadow-sm transition-opacity hover:opacity-90 disabled:opacity-50"
+          >
+            <DownloadIcon size={14} />
+            {submitting ? '入队中…' : '开始下载'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

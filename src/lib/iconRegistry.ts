@@ -7,6 +7,8 @@ import {
   Maximize, Minimize, ArrowLeft, ChevronLeft, ChevronRight, Search, Plus, Check, MoreHorizontal, File, RefreshCw,
   // Web 接口模块（第四个模块）
   Globe,
+  // 茑萝 · 下载中心（归舟）
+  Download,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -77,6 +79,8 @@ const iconMap: Record<string, LucideIcon> = {
   RefreshCw,
   // Web 接口模块
   Globe,
+  // 茑萝 · 下载中心（归舟）
+  Download,
 };
 
 /** 根据插件声明的 iconName 获取对应的 lucide 图标组件，找不到返回 null */

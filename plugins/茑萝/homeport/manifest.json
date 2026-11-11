@@ -1,0 +1,37 @@
+{
+  "id": "homeport",
+  "name": "下载中心",
+  "version": "1.0.0",
+  "kind": "module",
+  "visible": true,
+  "entry": "index.js",
+  "iconName": "Download",
+  "hostApiVersion": 1,
+  "parent": "niaoluo",
+  "codename": "茑萝",
+  "desc": "凌霄：多引擎下载中心。HTTP / HLS / BT / 磁力 / ed2k，分片续传、限速、代理、镜像与 SHA-256 校验",
+  "permissions": {
+    "commands": [
+      "dl_enqueue",
+      "dl_list",
+      "dl_get",
+      "dl_pause",
+      "dl_resume",
+      "dl_retry",
+      "dl_cancel",
+      "dl_config_get",
+      "dl_config_set",
+      "dl_engines",
+      "dl_probe",
+      "pick_directory",
+      "fs_open_path"
+    ],
+    "capabilities": [
+      "fs.read",
+      "fs.write",
+      "fs.pick",
+      "net",
+      "system"
+    ]
+  }
+}
