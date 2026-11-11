@@ -67,6 +67,24 @@ pub async fn station_list(app: tauri::AppHandle) -> Result<StationList, String> 
     .map_err(|e| format!("station_list 任务失败: {e}"))?
 }
 
+/// 在资源管理器里打开中转站根目录。
+///
+/// 为什么不做成前端直接调 `opener.openPath`：那要求给 `opener:allow-open-path`
+/// 开 `path: "**"` 的 scope —— 等于把「打开任意路径」的能力交给整个 webview
+/// （含所有插件）。前端调用会直接报
+/// `Command plugin:opener|open_path not allowed by ACL`。
+/// 后端命令只能打开这一个固定目录，作用面最小。
+#[tauri::command]
+pub fn open_station_dir(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let app_data = app_data_of(&app)?;
+    let root = app_data.join("transfer_station");
+    std::fs::create_dir_all(&root).map_err(|e| format!("创建中转站目录失败: {e}"))?;
+    app.opener()
+        .open_path(root.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| format!("打开中转站目录失败: {e}"))
+}
+
 /// 中转站存储概况：根目录、各分项占用。设置页显示 + 「打开文件夹」的落点。
 #[tauri::command]
 pub async fn station_storage_info(app: tauri::AppHandle) -> Result<station::StorageInfo, String> {

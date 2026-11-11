@@ -505,6 +505,13 @@ export const api = {
   /** 中转站存储概况：根目录与各分项占用。 */
   stationStorageInfo: () => invoke<StationStorageInfo>('station_storage_info'),
   /**
+   * 在资源管理器里打开中转站根目录。
+   *
+   * 必须走后端命令：前端直接调 `opener.openPath` 会因缺 `opener:allow-open-path`
+   * 的 scope 报 `not allowed by ACL`，而放开 `**` 等于让 webview 能打开任意路径。
+   */
+  openStationDir: () => invoke<void>('open_station_dir'),
+  /**
    * 移除一条记录。**默认动作，不删用户的文件。**
    * 托管条目会先进回收站；引用条目只忘掉记录，磁盘文件一动不动。
    */

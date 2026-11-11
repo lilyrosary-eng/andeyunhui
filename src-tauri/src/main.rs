@@ -50,6 +50,8 @@ use andeyunhui_lib::transfer;
 use andeyunhui_lib::services::window_manager::overlay_window_destroy;
 mod filesearch;
 mod system_fonts;
+// Windows 应用内更新：检查/下载（官方 updater）+ SYSTEM helper 静默安装；非 Windows 仅返回不支持。
+mod updater_service;
 // AI 协作 native harness：把宿主 AI 配置注入 ai-collab-kit（桌面版专属）。
 mod collab_native;
 use filesearch::*;
@@ -739,8 +741,64 @@ fn marker_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn main() {
-    // **崩溃取证最先装**（2026-11-09）：`0xc000001d` 这类非法指令崩溃不经过 panic，
+#[cfg(windows)]
+fn add_updater_plugin(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    // 只注册插件（提供 UpdaterState / 配置）；安装走我们自己的 SYSTEM helper，不调用官方 install。
+    builder.plugin(tauri_plugin_updater::Builder::new().build())
+}
+
+#[cfg(not(windows))]
+fn add_updater_plugin(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    builder
+}
+
+/// 已有主实例在跑时：把待打开的文件转发过去并返回 `true`（调用方直接返回，不创建任何窗口）。
+///
+/// 判定方式与 setup 里的重复实例检测一致：向 `INSTANCE_PORT` 发探活包，**收到回执**
+/// 才认为「本应用的另一个实例在跑」。端口被无关进程占用时必须继续启动，
+/// 否则应用会永远起不来（这是原逻辑里已经踩过并修过的坑，这里保持一致）。
+///
+/// 为什么要有这个函数：原逻辑在 `setup` 里探活，而那时 `tauri::Builder::run()`
+/// 已经把主窗口和 WebView2 环境都建出来了，于是"用安得云荟打开文件"会**先闪出一个
+/// 窗口再消失**。挪到 Builder 之前后，重复实例连 Tauri runtime 都不初始化。
+fn forward_to_running_instance() -> bool {
+    let Ok(probe) = UdpSocket::bind(("127.0.0.1", 0)) else {
+        return false;
+    };
+    probe
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .ok();
+    if probe
+        .send_to(br#"{"probe":true}"#, ("127.0.0.1", INSTANCE_PORT))
+        .is_err()
+    {
+        return false;
+    }
+    let mut ack = [0u8; 128];
+    if probe.recv_from(&mut ack).is_err() {
+        // 没有回执：主实例还没起（首次启动），或正忙着没应答 —— 交给正常启动流程
+        return false;
+    }
+
+    let paths: Vec<String> = std::env::args()
+        .skip(1)
+        .filter_map(|a| is_supported_file_assoc(&a))
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    if let Ok(s) = UdpSocket::bind(("127.0.0.1", 0)) {
+        let msg = serde_json::json!({ "focus": true, "paths": paths });
+        if let Ok(bytes) = serde_json::to_vec(&msg) {
+            let _ = s.send_to(&bytes, ("127.0.0.1", INSTANCE_PORT));
+        }
+    }
+    eprintln!(
+        "[Instance] 已有主实例：已转发 {} 个文件并退出（未创建窗口）",
+        paths.len()
+    );
+    true
+}
+
+fn main() {    // **崩溃取证最先装**（2026-11-09）：`0xc000001d` 这类非法指令崩溃不经过 panic，
     // 只能靠首轮异常处理器拿"异常码 + 出错模块 + 偏移"。必须早于任何线程创建。
     andeyunhui_lib::services::crash_guard::install();
 
@@ -948,7 +1006,24 @@ fn main() {
     // 日志系统在 setup 阶段初始化（需要 app_data 路径），此处仅用 eprintln 兜底早期日志。
     // setup 之前的少量 eprintln 输出到 stderr，setup 之后所有 log:: 宏自动写入会话日志文件。
 
-    let app = tauri::Builder::default()
+    // ============ 重复实例：在创建任何窗口之前转发并退出 ============
+    //
+    // 「用安得云荟打开文件」= shell 启动一个新进程，这是 Windows 的固有行为，改不了；
+    // 但**能改的是这个新进程做多少事**。原来探活在 setup 里，那时主窗口和 WebView2
+    // 环境已经建好，用户会看到闪一个窗口再消失。现在一律在建 Builder 之前判断，
+    // 重复实例只做一次 UDP 往返就退出。
+    //
+    // 只在**带文件参数**时走这条捷径：无参数重复双击图标仍由 setup 里的原逻辑处理，
+    // 这样正常冷启动不会平白多等 300 ms 探活超时。
+    if std::env::args()
+        .skip(1)
+        .any(|a| is_supported_file_assoc(&a).is_some())
+        && forward_to_running_instance()
+    {
+        return;
+    }
+
+    let builder = tauri::Builder::default()
         .manage(Mutex::new(TrayModeState { enabled: false }))
         // 注册 plugin:// 自定义协议，用于前端动态加载插件
         .register_uri_scheme_protocol("plugin", |ctx, request| {
@@ -1769,7 +1844,9 @@ fn main() {
                     let _ = overlay_window_destroy(app.clone(), "capsule".into());
                 }
             }
-        })
+        });
+    let builder = add_updater_plugin(builder);
+    let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -1957,6 +2034,7 @@ fn main() {
             station_list,
             station_ingest_paths,
             station_storage_info,
+            open_station_dir,
             station_remove_record,
             station_delete_file,
             station_relocate,
@@ -2541,6 +2619,12 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             andeyunhui_lib::data_location::needs_data_root_setup,
             andeyunhui_lib::data_location::mark_data_root_guided,
             andeyunhui_lib::data_location::is_migration_pending,
+            // ========== Windows 应用内更新 ==========
+            updater_service::update_check,
+            updater_service::update_download_and_apply,
+            updater_service::update_cancel,
+            updater_service::update_open_logs,
+            updater_service::update_take_status,
             // ========== WASAPI Loopback 频谱分析 ==========
             spectrum_start,
             spectrum_stop,

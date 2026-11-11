@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type Event } from '@tauri-apps/api/event';
 import { message } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '@/stores/appStore';
+import { useNotesStore } from '@/stores/notesStore';
 import { dispatchOpenWith } from '../../plugins/_shared/openWithFiles';
 import { EVENTS } from '@/core/events/schema';
 
@@ -25,10 +26,24 @@ export function detectModule(s: string): string | null {
   return MODULE_BY_EXT[ext] || null;
 }
 
+/** 后端 `reading_service::parse_book` 真正支持的格式。其余会返回「不支持的格式」。 */
+const BOOK_EXTS = new Set(['txt', 'epub', 'pdf', 'docx']);
+
+/**
+ * 走**笔记模块**的格式。
+ *
+ * md 不是"书"，它是笔记 —— 项目里「拖入主窗口」的 md/txt 就是进笔记模块
+ * （`openExternalContent`）。之前这里按扩展名把 md 派给了三色堇，而三色堇的
+ * `open_book` 只认 txt/epub/pdf/docx，于是 md 必然走 `Err("不支持的格式: .md")`，
+ * 被 catch 到 console.error —— 表现就是"跳到三色堇但一片空白"。两条路不一致才是 bug。
+ */
+const NOTE_EXTS = new Set(['md', 'markdown']);
+
 function route(files: string[]) {
-  const moduleId = detectModule(files[0]);
+  const first = files[0];
+  const ext = (first.split('.').pop() || '').toLowerCase();
+  const moduleId = detectModule(first);
   if (!moduleId) {
-    const ext = (files[0].split('.').pop() || '').toLowerCase();
     message(`暂不支持以安得云荟打开该类型文件（.${ext}）`, { title: '安得云荟' });
     return;
   }
@@ -41,6 +56,31 @@ function route(files: string[]) {
     });
     return;
   }
+
+  // md：读文本 → 丢给笔记模块，和「拖入主窗口」完全同一条路
+  if (NOTE_EXTS.has(ext)) {
+    invoke<string>('read_text_file', { path: first })
+      .then((content) => {
+        const title = (first.split(/[\\/]/).pop() || first).replace(/\.\w+$/, '');
+        useNotesStore.getState().openExternalContent(title, content);
+        useAppStore.getState().setActiveModule('notes');
+      })
+      .catch((err) => {
+        console.error('[OpenWith] 以笔记打开 md 失败:', err);
+        message(`打开 md 失败：${String(err)}`, { title: '安得云荟' });
+      });
+    return;
+  }
+
+  // 三色堇只认 BOOK_EXTS。别的格式直接说清楚，不要让它跳进一个空白页
+  if (moduleId === 'reading' && !BOOK_EXTS.has(ext)) {
+    message(
+      `「${MODULE_NAME.reading}」暂不支持 .${ext}（当前支持 txt / epub / pdf / docx）`,
+      { title: '安得云荟' },
+    );
+    return;
+  }
+
   // 跳转到对应模块工作，并将真实文件路径交给统一处理流程（复制进固定临时目录）
   useAppStore.getState().setActiveModule(moduleId);
   dispatchOpenWith(moduleId, files.map((p) => ({ path: p })));

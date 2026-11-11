@@ -68,6 +68,8 @@ const EXACT_RULES: &[(&str, &str)] = &[
     // 中转站列表 / 回收站用量：只读（路径来自索引，不接受前端给路径）
     ("station_list", "fs.read"),
     ("station_storage_info", "fs.read"),
+    // 只打开固定目录，不碰文件内容；归读权限就够
+    ("open_station_dir", "fs.read"),
     ("archives_usage", "fs.read"),
     // ---- 文件写入 ----
     ("write_file_bytes", "fs.write"),

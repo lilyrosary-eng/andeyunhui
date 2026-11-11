@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Switch } from "@/components/ui/switch"
 import { Slider } from "@/components/ui/slider"
-import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, ExternalLink, Database, Archive, FileText, File, Undo2, Trash2, ChevronDown, ChevronUp, RotateCcw, Search, Ban, Eye, FolderOpen, Cpu, Languages, UserRound } from 'lucide-react'
+import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, ExternalLink, Database, Archive, FileText, File, Undo2, Trash2, ChevronDown, ChevronUp, RotateCcw, Search, Ban, Eye, FolderOpen, Cpu, Languages, UserRound, RefreshCw, Download, CheckCircle2, AlertTriangle, Loader2, Sparkles } from 'lucide-react'
 import { ExtensionManagerPanel } from '@/core/settings/ExtensionManagerPanel'
 import { NetworkSitesPanel } from '@/core/settings/NetworkSitesPanel'
 import { BackgroundImageEditor } from '@/core/settings/BackgroundImageEditor'
@@ -11,8 +11,10 @@ import { DevConsole } from '@/core/settings/DevConsole'
 import { UserAvatarSettings } from '@/components/bricks/UserAvatarSettings'
 import { setDisplayName, useDisplayName } from '@/core/profile/userProfile'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
-import { openUrl, openPath } from '@tauri-apps/plugin-opener';
+import { getVersion } from '@tauri-apps/api/app';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { isWindowsDesktop, useUpdaterStore } from '@/core/updater/updaterStore';
 
 import { logger } from '@/lib/logger';
 import { api, type ArchiveEntry, type ArchiveUsage, type PluginManifest, type StationStorageInfo } from '@/lib/api';
@@ -27,7 +29,7 @@ import { KEYS } from '@/core/storage/keys';
 // 茑萝子模块列表：供「彻底删除模块（连同文件）」按钮选择目标（id 与插件 manifest 一致）。
 // 注意：ai 是全局 AI 核心（parent: global），不属于茑萝，故不在此列；其能力经「全局设置 → 模型」管理。
 const NIAOLUO_MODULES: Array<{ id: string; name: string }> = [
-  { id: 'capsule', name: '黄金棋盘' },
+  { id: 'capsule', name: '绣球' },
   { id: 'crypto', name: '加密' },
   { id: 'deskpet', name: '桌宠' },
   { id: 'gongfang', name: '攻防' },
@@ -205,6 +207,31 @@ export function GlobalSettingsPanel() {
   // 数据根（可配置存放位置）
   const [dataRoot, setDataRoot] = useState('');
   const [dataRootMsg, setDataRootMsg] = useState('');
+
+  // 关于页：版本以 tauri.conf.json 为唯一来源，不再手写
+  const [appVersion, setAppVersion] = useState('');
+  useEffect(() => {
+    void getVersion()
+      .then((v) => setAppVersion(v || ''))
+      .catch(() => setAppVersion(''));
+  }, []);
+
+  // 更新中心
+  const updaterPhase = useUpdaterStore((s) => s.phase);
+  const updaterInfo = useUpdaterStore((s) => s.info);
+  const updaterDownloaded = useUpdaterStore((s) => s.downloaded);
+  const updaterTotal = useUpdaterStore((s) => s.total);
+  const updaterSpeed = useUpdaterStore((s) => s.speed);
+  const updaterError = useUpdaterStore((s) => s.error);
+  const updaterCheck = useUpdaterStore((s) => s.check);
+  const updaterStart = useUpdaterStore((s) => s.startUpdate);
+  const updaterCancel = useUpdaterStore((s) => s.cancel);
+  const updaterBusy =
+    updaterPhase === 'checking' ||
+    updaterPhase === 'downloading' ||
+    updaterPhase === 'installing';
+  const updaterPercent =
+    updaterTotal > 0 ? Math.min(100, Math.round((updaterDownloaded / updaterTotal) * 100)) : 0;
 
   // 系统字体
   const { fonts, loading: fontsLoading } = useSystemFonts();
@@ -440,7 +467,7 @@ export function GlobalSettingsPanel() {
     if (!val && activeModule === 'rag') setActiveModule('extensions');
   };
 
-  // ---- 黄金棋盘（原灵动岛）：与「管理拓展」共享单一可见性状态（单一事实源，避免两处开关脱节）----
+  // ---- 绣球（原灵动岛）：与「管理拓展」共享单一可见性状态（单一事实源，避免两处开关脱节）----
   // 完全复用桌宠的插件热插拔机制：开关 → setPluginVisibility + pluginHot.load/unload + 派发
   // plugin-visibility-changed；真正建/销窗在插件自身（加载即建窗、监听可见性事件热插拔）。
   const [capsuleVisible, setCapsuleVisible] = useState<boolean | null>(null);
@@ -1114,16 +1141,42 @@ export function GlobalSettingsPanel() {
                     </code>
                     <button
                       onClick={() => {
-                        if (!storageInfo?.root) return;
-                        void openPath(storageInfo.root).catch((err) =>
+                        // 走后端命令：前端 openPath 会被 ACL 拦（not allowed by ACL），
+                        // 而放开 open-path 的 "**" scope 等于让 webview 能打开任意路径。
+                        api.openStationDir().catch((err) =>
                           alert(`${t('settings.transfer.openFolderFailed')}: ${String(err)}`),
                         );
                       }}
-                      disabled={!storageInfo?.root}
-                      className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-neutral-600 dark:text-stone-300 bg-neutral-100 dark:bg-stone-700/60 hover:bg-neutral-200 dark:hover:bg-stone-700 transition-colors disabled:opacity-40 flex-shrink-0"
+                      className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-neutral-600 dark:text-stone-300 bg-neutral-100 dark:bg-stone-700/60 hover:bg-neutral-200 dark:hover:bg-stone-700 transition-colors flex-shrink-0"
                     >
                       <FolderOpen size={13} />
                       {t('settings.transfer.openFolder')}
+                    </button>
+                    {/* 中转站没有独立的"迁移"——它跟着「数据位置」走（这里是唯一的真源头）。
+                        放一个入口在这，省得用户以为没做过这件事。 */}
+                    <button
+                      onClick={async () => {
+                        try {
+                          const selected = await openDialog({
+                            directory: true,
+                            multiple: false,
+                            title: t('settings.transfer.changeLocationPick'),
+                          });
+                          if (typeof selected !== 'string' || !selected) return;
+                          await invoke('set_data_root', { path: selected });
+                          if (
+                            window.confirm(t('settings.transfer.changeLocationConfirm', { path: selected }))
+                          ) {
+                            invoke('restart_app').catch(() => {});
+                          }
+                        } catch (e) {
+                          alert(`${t('settings.transfer.changeLocationFailed')}: ${String(e)}`);
+                        }
+                      }}
+                      className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-neutral-600 dark:text-stone-300 bg-neutral-100 dark:bg-stone-700/60 hover:bg-neutral-200 dark:hover:bg-stone-700 transition-colors flex-shrink-0"
+                      title={t('settings.transfer.changeLocationHint')}
+                    >
+                      {t('settings.transfer.changeLocation')}
                     </button>
                   </div>
                   {storageInfo && (
@@ -1308,10 +1361,152 @@ export function GlobalSettingsPanel() {
                 </div>
                 <div className="space-y-2 text-sm">
                   <p className="text-neutral-600 dark:text-stone-300">安得云荟</p>
-                  <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.version', { v: '2.4.3' })}</p>
+                  <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.version', { v: appVersion || '—' })}</p>
                   <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.author')}</p>
                 </div>
               </section>
+
+              {isWindowsDesktop && (
+                <section className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 p-6">
+                  <div className="flex items-center justify-between gap-3 mb-4">
+                    <div className="flex items-center gap-3">
+                      <RefreshCw size={20} className="text-[var(--element-bg)]" />
+                      <h2 className="text-lg font-bold text-neutral-800 dark:text-stone-100">{t('updater.title')}</h2>
+                    </div>
+                    <button
+                      onClick={() => void updaterCheck(true)}
+                      disabled={updaterBusy}
+                      className="btn-press flex items-center gap-1.5 rounded-lg bg-neutral-100 px-3 py-1.5 text-sm text-neutral-600 transition-colors hover:bg-neutral-200 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-stone-700 dark:text-stone-300 dark:hover:bg-stone-600"
+                    >
+                      {updaterPhase === 'checking' ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                      {updaterPhase === 'checking' ? t('updater.checking') : t('updater.check')}
+                    </button>
+                  </div>
+                  <div className="space-y-3 text-sm">
+                    <div className="flex items-center justify-between gap-3 text-neutral-500 dark:text-stone-400">
+                      <span>{t('updater.currentVersion', { v: appVersion || '—' })}</span>
+                      <span className="text-xs">{t('updater.autoHint')}</span>
+                    </div>
+
+                    {updaterPhase === 'latest' && (
+                      <div className="flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400">
+                        <CheckCircle2 size={16} />
+                        {t('updater.latest')}
+                      </div>
+                    )}
+
+                    {updaterPhase === 'available' && updaterInfo && (
+                      <div className="rounded-xl border border-neutral-200/70 p-4 dark:border-stone-700/60">
+                        <div className="flex items-center gap-2 font-medium text-neutral-800 dark:text-stone-100">
+                          <Sparkles size={16} className="text-[var(--element-bg)]" />
+                          {t('updater.available', { v: updaterInfo.version || '' })}
+                        </div>
+                        {updaterInfo.body && (
+                          <div className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-neutral-50 px-3 py-2 text-xs leading-relaxed text-neutral-500 dark:bg-stone-900/40 dark:text-stone-400">
+                            {updaterInfo.body}
+                          </div>
+                        )}
+                        <div className="mt-3 flex items-center justify-end">
+                          <button
+                            onClick={() => void updaterStart()}
+                            className="btn-press element-primary flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white hover:bg-[var(--element-hover)]"
+                          >
+                            <Download size={15} />
+                            {t('updater.download')}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {updaterPhase === 'downloading' && (
+                      <div className="rounded-xl border border-neutral-200/70 p-4 dark:border-stone-700/60">
+                        <div className="flex items-center gap-2 text-neutral-700 dark:text-stone-200">
+                          <Loader2 size={15} className="animate-spin text-[var(--element-bg)]" />
+                          {t('updater.downloading')}
+                        </div>
+                        <div className="mt-3 h-2 overflow-hidden rounded-full bg-neutral-200 dark:bg-stone-700">
+                          <div
+                            className={`h-full rounded-full bg-[var(--element-bg)] transition-all duration-200 ${updaterTotal > 0 ? '' : 'w-1/3 animate-pulse'}`}
+                            style={updaterTotal > 0 ? { width: `${updaterPercent}%` } : undefined}
+                          />
+                        </div>
+                        <div className="mt-2 flex justify-between text-xs text-neutral-400 dark:text-stone-500">
+                          <span>
+                            {updaterTotal > 0
+                              ? t('updater.downloaded', {
+                                  done: fmtSize(updaterDownloaded),
+                                  total: fmtSize(updaterTotal),
+                                })
+                              : fmtSize(updaterDownloaded)}
+                            {updaterSpeed > 0 ? ` · ${fmtSize(updaterSpeed)}/s` : ''}
+                          </span>
+                          <span className="flex items-center gap-2">
+                            {updaterTotal > 0 && <span>{updaterPercent}%</span>}
+                            <button
+                              onClick={() => void updaterCancel()}
+                              className="btn-press rounded-md px-1.5 py-0.5 text-[11px] text-neutral-500 hover:bg-neutral-100 hover:text-neutral-700 dark:text-stone-400 dark:hover:bg-stone-700 dark:hover:text-stone-200"
+                            >
+                              {t('updater.cancel')}
+                            </button>
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                    {updaterPhase === 'installing' && (
+                      <div className="flex items-center gap-2 rounded-lg bg-[var(--element-muted)] px-3 py-2 text-sm text-neutral-700 dark:text-stone-200">
+                        <Loader2 size={16} className="animate-spin text-[var(--element-bg)]" />
+                        <div>
+                          <div>{t('updater.installing')}</div>
+                          <div className="mt-0.5 text-[11px] text-neutral-400 dark:text-stone-500">
+                            {t('updater.installStuckHint')}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {updaterPhase === 'error' && (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700 dark:border-amber-900/40 dark:bg-amber-900/15 dark:text-amber-400">
+                        <div className="flex items-center gap-2 font-medium">
+                          <AlertTriangle size={16} />
+                          {t('updater.failed')}
+                        </div>
+                        {updaterError && (
+                          <div className="mt-1.5 break-all text-xs leading-relaxed">{updaterError}</div>
+                        )}
+                        <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+                          <button
+                            onClick={() => {
+                              void openUrl('https://github.com/lilyrosary-eng/andeyunhui/releases').catch(() => {});
+                            }}
+                            className="btn-press rounded-lg px-2.5 py-1.5 text-xs text-neutral-500 hover:bg-neutral-100 dark:text-stone-400 dark:hover:bg-stone-700"
+                          >
+                            {t('updater.openReleases')}
+                          </button>
+                          <button
+                            onClick={() => {
+                              void invoke('update_open_logs').catch(() => {});
+                            }}
+                            className="btn-press rounded-lg px-2.5 py-1.5 text-xs text-neutral-500 hover:bg-neutral-100 dark:text-stone-400 dark:hover:bg-stone-700"
+                          >
+                            {t('updater.openLogs')}
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (updaterInfo?.available) void updaterStart();
+                              else void updaterCheck(true);
+                            }}
+                            className="btn-press flex items-center gap-1.5 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700"
+                          >
+                            <RefreshCw size={13} />
+                            {t('updater.retry')}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )}
 
               <section className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 p-6">
                 <div className="flex items-center gap-3 mb-3">
@@ -1349,7 +1544,7 @@ export function GlobalSettingsPanel() {
                     className="px-3 py-1.5 rounded-lg bg-neutral-800 text-white text-sm hover:bg-neutral-700 transition-colors"
                     onClick={() => { openUrl('https://github.com/lilyrosary-eng/andeyunhui').catch(() => {}); }}
                   >
-                    {t('settings.about.checkUpdate')}
+                    {t('updater.openReleases')}
                   </button>
                 </div>
                 <div className="flex justify-between items-center p-4">

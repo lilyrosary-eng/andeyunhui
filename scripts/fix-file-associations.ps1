@@ -66,6 +66,7 @@ $entries = @(
 
 $fixed = 0
 $skipped = 0
+$failed = 0
 
 foreach ($item in $entries) {
     $progid = $item[0]
@@ -81,11 +82,33 @@ foreach ($item in $entries) {
 
     Write-Host ('.{0,-5} default was [{1}] -> restore + register to OpenWith' -f $ext, $cur)
     if (-not $Preview) {
-        # 删掉抢占的默认值。之后双击由用户自己选的程序（UserChoice）决定；
-        # 没有 UserChoice 时 Windows 会正常弹出「选择打开方式」。
-        Remove-ItemProperty -Path $clsPath -Name '(default)' -ErrorAction SilentlyContinue
+        # 删掉抢占的默认值。
+        #
+        # ⚠ 不能用 `Remove-ItemProperty -Name '(default)'` —— PowerShell 对默认值
+        #   （名字为空字符串的那个）不认这个写法，会静默失败。上一版就是这么"看起来
+        #   跑完了但什么都没改的"。必须用 .NET 的 DeleteValue('')。
+        $subKey = 'Software\Classes\.' + $ext
+        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey, $true)
+        if ($null -eq $key) {
+            Write-Host ('.' + $ext + ' cannot open key for writing (permission?)') -ForegroundColor Red
+            $failed++
+            continue
+        }
+        try {
+            $key.DeleteValue('', $false)
+        } finally {
+            $key.Close()
+        }
         New-Item -Path ($clsPath + '\OpenWithProgids') -Force | Out-Null
         New-ItemProperty -Path ($clsPath + '\OpenWithProgids') -Name $progid -Value '' -PropertyType String -Force | Out-Null
+
+        # 有界检查：改完必须真的读回空，否则这次修复是假成功
+        $after = (Get-ItemProperty $clsPath -ErrorAction SilentlyContinue).'(default)'
+        if ($ours -contains $after) {
+            Write-Host ('.' + $ext + ' STILL ' + $after + ' (fix did not take effect)') -ForegroundColor Red
+            $failed++
+            continue
+        }
     }
     $fixed++
 }
@@ -95,7 +118,11 @@ if ($Preview) {
     Write-Host ('DRY RUN: would fix ' + $fixed + ' extensions, skip ' + $skipped + ' (not ours).')
     Write-Host 'Run without -Preview as Administrator to apply.'
 } else {
-    Write-Host ('DONE: fixed ' + $fixed + ' extensions, skipped ' + $skipped + '.') -ForegroundColor Green
+    Write-Host ('DONE: fixed ' + $fixed + ' extensions, skipped ' + $skipped + ', failed ' + $failed + '.') -ForegroundColor Green
+    if ($failed -gt 0) {
+        Write-Host 'Some entries could NOT be fixed. Make sure this ran as Administrator.' -ForegroundColor Red
+        exit 1
+    }
     if ($fixed -gt 0) {
         Write-Host 'Explorer may cache old icons. Restart explorer or sign out/in to refresh.'
     }
