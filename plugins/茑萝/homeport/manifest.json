@@ -24,6 +24,7 @@
       "dl_config_set",
       "dl_engines",
       "dl_probe",
+      "clipboard_read",
       "pick_directory",
       "fs_open_path"
     ],
@@ -31,6 +32,7 @@
       "fs.read",
       "fs.write",
       "fs.pick",
+      "clipboard.read",
       "net",
       "system"
     ]

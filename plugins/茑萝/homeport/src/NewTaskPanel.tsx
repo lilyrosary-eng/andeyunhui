@@ -28,6 +28,8 @@ export function NewTaskPanel({
   onCreated: (id: string) => void;
 }) {
   const [urlText, setUrlText] = useState('');
+  const [mode, setMode] = useState<'concat' | 'batch'>('concat');
+  const [pasting, setPasting] = useState(false);
   const [mirrorText, setMirrorText] = useState('');
   const [savePath, setSavePath] = useState('');
   const [engine, setEngine] = useState('auto');
@@ -80,9 +82,32 @@ export function NewTaskPanel({
     }
   };
 
+  const pasteFromClipboard = async () => {
+    setPasting(true);
+    setError(null);
+    try {
+      const text = await dl.readClipboard();
+      const lines = splitLines(text);
+      if (lines.length === 0) {
+        setError('剪贴板里没有可用地址');
+        return;
+      }
+      setUrlText((prev) => `${prev.trimEnd()}${prev.trim() ? '\n' : ''}${lines.join('\n')}`);
+      setProbeResult(null);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setPasting(false);
+    }
+  };
+
   const submit = async () => {
     if (urls.length === 0) {
       setError('至少填写一个下载地址');
+      return;
+    }
+    if (mode === 'batch' && urls.length < 2) {
+      setError('批量模式至少需要两个地址');
       return;
     }
     if (!savePath.trim()) {
@@ -93,19 +118,55 @@ export function NewTaskPanel({
     setError(null);
     try {
       const speed = Number(speedKb);
-      const id = await dl.enqueue({
-        urls,
+      const base = {
         savePath: ensureDirPath(savePath),
-        filename: probeResult?.filename ?? null,
         engine: engine as EngineKind,
         connections: Math.min(32, Math.max(1, Number(connections) || 8)),
         priority: Number.isFinite(Number(priority)) ? Math.trunc(Number(priority)) : 0,
         maxSpeed: Number.isFinite(speed) && speed > 0 ? Math.round(speed * 1024) : null,
-        mirrors: splitLines(mirrorText),
-        sha256: sha256.trim() || null,
         referer: referer.trim() || null,
         cookie: cookie.trim() || null,
         userAgent: userAgent.trim() || null,
+      };
+      if (mode === 'batch') {
+        const failures: string[] = [];
+        let firstId: string | null = null;
+        for (const url of urls) {
+          try {
+            const id = await dl.enqueue({
+              ...base,
+              urls: [url],
+              filename: null,
+              mirrors: [],
+              sha256: null,
+            });
+            if (!firstId) firstId = id;
+          } catch (err) {
+            failures.push(`${url} → ${String(err)}`);
+          }
+        }
+        if (!firstId) {
+          setError(`创建失败：\n${failures.slice(0, 4).join('\n')}`);
+          return;
+        }
+        if (failures.length > 0) {
+          // 部分成功时保持面板打开，把失败的行留给用户处理；已建任务会通过状态事件出现在列表里。
+          setError(
+            `已创建 ${urls.length - failures.length} 条，失败 ${failures.length} 条：\n${failures
+              .slice(0, 3)
+              .join('\n')}`,
+          );
+          return;
+        }
+        onCreated(firstId);
+        return;
+      }
+      const id = await dl.enqueue({
+        ...base,
+        urls,
+        filename: probeResult?.filename ?? null,
+        mirrors: splitLines(mirrorText),
+        sha256: sha256.trim() || null,
       });
       onCreated(id);
     } catch (err) {
@@ -142,7 +203,14 @@ export function NewTaskPanel({
         </div>
 
         <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
-          <Field label="下载地址" hint="每行一个；多行会按顺序拼接（HLS / 分段视频）">
+          <Field
+            label="下载地址"
+            hint={
+              mode === 'batch'
+                ? '每行一个地址，逐条创建任务'
+                : '每行一个；多行会按顺序拼接（HLS / 分段视频）'
+            }
+          >
             <textarea
               value={urlText}
               onChange={(event) => {
@@ -156,17 +224,64 @@ export function NewTaskPanel({
             />
           </Field>
 
+          <div className="flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="text-neutral-400 dark:text-stone-500">多行地址</span>
+            <div className="inline-flex overflow-hidden rounded-lg border border-black/10 dark:border-white/10">
+              <button
+                type="button"
+                onClick={() => {
+                  setMode('concat');
+                  setProbeResult(null);
+                }}
+                className={`px-2.5 py-1 transition-colors ${
+                  mode === 'concat'
+                    ? 'bg-black/10 font-medium text-neutral-700 dark:bg-white/15 dark:text-stone-100'
+                    : 'text-neutral-500 hover:bg-black/5 dark:text-stone-400 dark:hover:bg-white/10'
+                }`}
+              >
+                拼接为一条
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setMode('batch');
+                  setProbeResult(null);
+                }}
+                className={`px-2.5 py-1 transition-colors ${
+                  mode === 'batch'
+                    ? 'bg-black/10 font-medium text-neutral-700 dark:bg-white/15 dark:text-stone-100'
+                    : 'text-neutral-500 hover:bg-black/5 dark:text-stone-400 dark:hover:bg-white/10'
+                }`}
+              >
+                批量创建{urls.length > 1 ? ` (${urls.length})` : ''}
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={pasteFromClipboard}
+              disabled={pasting}
+              className="inline-flex items-center gap-1 rounded-lg bg-black/5 px-2.5 py-1 font-medium text-neutral-600 transition-colors hover:bg-black/10 disabled:opacity-40 dark:bg-white/10 dark:text-stone-300 dark:hover:bg-white/15"
+            >
+              <LinkIcon size={12} />
+              {pasting ? '读取中…' : '粘贴剪贴板'}
+            </button>
+          </div>
+
           <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={probe}
-              disabled={probing || urls.length === 0}
+              disabled={probing || urls.length === 0 || mode === 'batch'}
               className="inline-flex items-center gap-1.5 rounded-lg bg-black/5 px-3 py-1.5 text-xs font-medium text-neutral-600 transition-colors hover:bg-black/10 disabled:opacity-40 dark:bg-white/10 dark:text-stone-300 dark:hover:bg-white/15"
             >
               <LinkIcon size={13} />
               {probing ? '解析中…' : '解析地址'}
             </button>
-            {probeResult ? (
+            {mode === 'batch' ? (
+              <div className="text-[11px] text-neutral-400 dark:text-stone-500">
+                批量模式会为每条地址自动解析文件名
+              </div>
+            ) : probeResult ? (
               <div className="min-w-0 text-[11px] text-neutral-500 dark:text-stone-400">
                 <span className="font-medium text-neutral-700 dark:text-stone-200">
                   {probeResult.filename || '未命名'}
@@ -249,24 +364,32 @@ export function NewTaskPanel({
             </div>
           </Field>
 
-          <Field label="镜像地址" hint="可选；主源失败时按顺序尝试">
+          <Field
+            label="镜像地址"
+            hint={mode === 'batch' ? '批量模式不支持镜像' : '可选；主源失败时按顺序尝试'}
+          >
             <textarea
               value={mirrorText}
               onChange={(event) => setMirrorText(event.target.value)}
               rows={2}
               spellCheck={false}
+              disabled={mode === 'batch'}
               placeholder={'https://mirror-1.example.com/file.zip\nhttps://mirror-2.example.com/file.zip'}
-              className={`${inputClass} resize-y font-mono text-xs leading-relaxed`}
+              className={`${inputClass} resize-y font-mono text-xs leading-relaxed disabled:opacity-40`}
             />
           </Field>
 
-          <Field label="SHA-256" hint="可选；完成后校验，不匹配不会标记完成">
+          <Field
+            label="SHA-256"
+            hint={mode === 'batch' ? '批量模式不支持单文件校验' : '可选；完成后校验，不匹配不会标记完成'}
+          >
             <input
               value={sha256}
               onChange={(event) => setSha256(event.target.value)}
               spellCheck={false}
+              disabled={mode === 'batch'}
               placeholder="64 位十六进制，可带 sha256: 前缀"
-              className={`${inputClass} font-mono text-xs`}
+              className={`${inputClass} font-mono text-xs disabled:opacity-40`}
             />
           </Field>
 
@@ -330,7 +453,13 @@ export function NewTaskPanel({
             className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--element-bg)] px-4 py-2 text-xs font-semibold text-white shadow-sm transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             <DownloadIcon size={14} />
-            {submitting ? '入队中…' : '开始下载'}
+            {submitting
+              ? mode === 'batch'
+                ? '创建中…'
+                : '入队中…'
+              : mode === 'batch'
+                ? `批量创建 ${urls.length} 条`
+                : '开始下载'}
           </button>
         </div>
       </div>

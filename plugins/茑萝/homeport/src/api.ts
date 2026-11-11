@@ -166,6 +166,7 @@ export const dl = {
   configSet: (config: EngineConfig) => invoke<EngineConfig>('dl_config_set', { config }),
   engines: () => invoke<EngineStatus>('dl_engines'),
   probe: (request: ProbeRequest) => invoke<ProbeResult>('dl_probe', { request }),
+  readClipboard: () => invoke<string>('clipboard_read'),
   openPath: (path: string) => invoke<void>('fs_open_path', { path }),
   pickDirectory: () => invoke<string | null>('pick_directory', {}),
 };
