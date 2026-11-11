@@ -118,6 +118,15 @@ impl EngineCtx {
         }
     }
 
+    /// 自适应连接数解析后回写实际值并刷新 UI。
+    pub fn set_connections(&self, connections: u32) -> Result<(), String> {
+        self.inner
+            .store
+            .update_connections(&self.task_id, connections)?;
+        self.emit_state();
+        Ok(())
+    }
+
     /// 外部引擎（aria2/ffmpeg）自己解析进度时用。
     pub fn set_progress(&self, downloaded: u64, total: u64) {
         self.inner.set_live_progress(&self.task_id, downloaded, total);

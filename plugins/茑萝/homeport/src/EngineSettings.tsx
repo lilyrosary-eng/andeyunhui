@@ -32,6 +32,7 @@ export function EngineSettings({
 }) {
   const [defaultEngine, setDefaultEngine] = useState(config.defaultEngine);
   const [connections, setConnections] = useState(String(config.connections));
+  const [smartConnections, setSmartConnections] = useState(config.smartConnections);
   const [maxTasks, setMaxTasks] = useState(String(config.maxConcurrentTasks));
   const [maxPerHost, setMaxPerHost] = useState(String(config.maxPerHost));
   const [taskRetries, setTaskRetries] = useState(String(config.taskRetries));
@@ -60,6 +61,7 @@ export function EngineSettings({
         ...config,
         defaultEngine: defaultEngine as never,
         connections: Math.min(32, Math.max(1, Number(connections) || 8)),
+        smartConnections,
         maxConcurrentTasks: Math.min(8, Math.max(1, Number(maxTasks) || 2)),
         maxPerHost: Math.min(8, Math.max(0, Number(maxPerHost) || 0)),
         taskRetries: Math.min(5, Math.max(0, Number(taskRetries) || 0)),
@@ -146,8 +148,17 @@ export function EngineSettings({
                   ))}
                 </select>
               </Field>
+              <label className="flex items-center gap-2 text-xs text-neutral-600 dark:text-stone-300">
+                <input
+                  type="checkbox"
+                  checked={smartConnections}
+                  onChange={(event) => setSmartConnections(event.target.checked)}
+                  className="h-3.5 w-3.5 accent-[var(--element-bg)]"
+                />
+                自适应连接数（按文件大小 1–16）
+              </label>
               <div className="grid grid-cols-3 gap-3">
-                <Field label="默认连接数" hint="1–32">
+                <Field label="默认连接数" hint="自适应关闭时生效">
                   <input
                     type="number"
                     min={1}

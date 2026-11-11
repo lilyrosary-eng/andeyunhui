@@ -401,6 +401,17 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// 自适应连接数解析后回写实际值（0 表示尚未解析）。
+    pub fn update_connections(&self, id: &str, connections: u32) -> Result<(), String> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE tasks SET connections = ?1, updated_at = ?2 WHERE id = ?3",
+            params![connections as i64, now_ms(), id],
+        )
+        .map_err(|e| format!("更新连接数失败: {e}"))?;
+        Ok(())
+    }
+
     /// 改写任务的落盘路径（文件被移动/重命名后必须调用）。
     pub fn update_options(
         &self,

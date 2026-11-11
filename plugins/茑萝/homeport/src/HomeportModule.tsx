@@ -399,7 +399,9 @@ export function HomeportModule() {
                     {task.totalBytes > 0 ? ` · ${percent.toFixed(1)}%` : ''}
                   </span>
                   {active ? <span>{formatSpeed(task.speed ?? 0)}</span> : null}
-                  {active ? <span>{task.connections} 连接</span> : null}
+                  {active ? (
+                    <span>{task.connections > 0 ? `${task.connections} 连接` : '自动连接'}</span>
+                  ) : null}
                   {task.partsTotal ? (
                     <span>
                       分片 {task.partsDone ?? 0}/{task.partsTotal}

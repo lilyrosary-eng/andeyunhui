@@ -140,7 +140,14 @@ impl DownloadEngine for Aria2Engine {
                 .unwrap_or_else(|| task.filename.clone());
             (dir, Some(name))
         };
-        let split = task.connections.clamp(1, 16);
+        let split = if task.connections == 0 {
+            self.config.connections.clamp(1, 16)
+        } else {
+            task.connections.clamp(1, 16)
+        };
+        if task.connections == 0 {
+            ctx.set_connections(split)?;
+        }
         let user_agent = task
             .user_agent
             .as_deref()

@@ -82,6 +82,7 @@ export interface EngineStatus {
 export interface EngineConfig {
   defaultEngine: EngineKind;
   connections: number;
+  smartConnections: boolean;
   maxConcurrentTasks: number;
   maxPerHost: number;
   retries: number;

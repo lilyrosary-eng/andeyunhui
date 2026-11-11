@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
+use futures_util::{future::join_all, StreamExt};
 use reqwest::header::RANGE;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -26,7 +26,7 @@ use crate::engine::{
 use crate::manager::{Control, TaskProgress};
 use crate::probe::{self, HttpMeta};
 use crate::types::{
-    DownloadPart, DownloadTask, EngineConfig, EngineKind, PartState, TaskStatus,
+    DownloadPart, DownloadTask, EngineConfig, EngineKind, PartState, ProbeResult, TaskStatus,
 };
 use crate::util::{tail_text, DEFAULT_UA};
 
@@ -79,6 +79,7 @@ impl NativeEngine {
         let mut task = ctx.task()?;
         if single_connection {
             task.connections = 1;
+            ctx.set_connections(1)?;
         }
         if task.urls.is_empty() {
             return Err("缺少下载地址".to_string());
@@ -124,6 +125,37 @@ impl NativeEngine {
             }
         };
         task.urls[0] = source_url;
+        // 主源可用且支持 Range 时，探测镜像是否与主源字节一致；一致才并行分担分片。
+        // 校验器（ETag / Last-Modified）必须至少有一项相同，避免把不同版本的文件拼在一起。
+        let mut sources = vec![task.urls[0].clone()];
+        if !has_progress && !task.mirrors.is_empty() && probe.accept_ranges && probe.total_bytes > 0
+        {
+            // 并发探测镜像，最多等 8 秒，避免一个坏镜像把任务启动拖住。
+            let probes = task
+                .mirrors
+                .iter()
+                .take(4)
+                .cloned()
+                .map(|mirror| {
+                    let client = &self.client;
+                    let meta = &meta;
+                    async move {
+                        let candidate = tokio::time::timeout(
+                            Duration::from_secs(8),
+                            probe::probe(client, &mirror, meta),
+                        )
+                        .await
+                        .ok()
+                        .and_then(|result| result.ok());
+                        candidate.map(|candidate| (mirror, candidate))
+                    }
+                });
+            for (mirror, candidate) in join_all(probes).await.into_iter().flatten() {
+                if mirror_compatible(&probe, &candidate) && !sources.contains(&mirror) {
+                    sources.push(mirror);
+                }
+            }
+        }
         // 续传前比对远端版本：文件已变化就丢弃旧分片，从 0 重新规划。
         if has_progress && validators_conflict(&task, &probe) {
             ctx.delete_parts()?;
@@ -142,6 +174,10 @@ impl NativeEngine {
         enforce_max_bytes(&task)?;
         crate::util::ensure_disk_space(&ctx.save_path(), task.total_bytes)?;
         ctx.update_meta(kind, &task.filename, task.total_bytes)?;
+        if task.connections == 0 {
+            task.connections = recommended_connections(task.total_bytes);
+            ctx.set_connections(task.connections)?;
+        }
 
         if let Some(outcome) = check_control(&ctx) {
             return Ok(outcome);
@@ -159,7 +195,7 @@ impl NativeEngine {
             .await
             .map_err(|e| format!("创建分片目录失败 {}: {e}", temp_dir.display()))?;
 
-        let plan = plan_single(&task, &temp_dir);
+        let plan = plan_single_sources(&task, &temp_dir, &sources);
         if needs_replan(&parts, &plan, task.total_bytes) {
             ctx.replace_parts(&plan)?;
             parts = plan;
@@ -380,8 +416,42 @@ impl NativeEngine {
     }
 }
 
-/// 单地址分片计划。
+/// 单地址分片计划（测试用；生产走 `plan_single_sources`）。
+#[cfg(test)]
 fn plan_single(task: &DownloadTask, dir: &Path) -> Vec<DownloadPart> {
+    plan_single_sources(task, dir, &[])
+}
+
+/// 自适应连接数：每 4MB 一个连接，最多 16；未知长度只开 1 个。
+fn recommended_connections(total: u64) -> u32 {
+    if total == 0 {
+        return 1;
+    }
+    ((total / (4 * 1024 * 1024)).clamp(1, 16)) as u32
+}
+
+/// 镜像是否可与主源一起并行分片：大小一致、支持 Range，
+/// 且 ETag 或 Last-Modified 至少有一项相同（全都没有时不冒险）。
+fn mirror_compatible(primary: &ProbeResult, candidate: &ProbeResult) -> bool {
+    if primary.total_bytes == 0
+        || candidate.total_bytes != primary.total_bytes
+        || !candidate.accept_ranges
+    {
+        return false;
+    }
+    let etag_match = matches!(
+        (&primary.etag, &candidate.etag),
+        (Some(left), Some(right)) if left == right
+    );
+    let modified_match = matches!(
+        (&primary.last_modified, &candidate.last_modified),
+        (Some(left), Some(right)) if left == right
+    );
+    etag_match || modified_match
+}
+
+/// 单地址分片计划；`sources` 多于一个时按分片轮转，让镜像一起分担。
+fn plan_single_sources(task: &DownloadTask, dir: &Path, sources: &[String]) -> Vec<DownloadPart> {
     let total = task.total_bytes;
     let connections = task.connections.clamp(1, 32);
     let max_parts = if total == 0 {
@@ -390,12 +460,20 @@ fn plan_single(task: &DownloadTask, dir: &Path) -> Vec<DownloadPart> {
         (total / MIN_PART_BYTES).max(1).min(32) as u32
     };
     let count = connections.min(max_parts).max(1);
+    let fallback = task.urls[0].clone();
+    let source = |index: usize| -> String {
+        if sources.is_empty() {
+            fallback.clone()
+        } else {
+            sources[index % sources.len()].clone()
+        }
+    };
 
     let mut parts = Vec::with_capacity(count as usize);
     if count == 1 || total == 0 {
         parts.push(DownloadPart {
             index: 0,
-            url: task.urls[0].clone(),
+            url: source(0),
             start: 0,
             end: total,
             downloaded: 0,
@@ -415,7 +493,7 @@ fn plan_single(task: &DownloadTask, dir: &Path) -> Vec<DownloadPart> {
         };
         parts.push(DownloadPart {
             index,
-            url: task.urls[0].clone(),
+            url: source(index as usize),
             start,
             end,
             downloaded: 0,
@@ -1093,6 +1171,52 @@ mod tests {
         // 服务器不再提供 ETag 时不判定变化，避免误删进度。
         task.etag = None;
         assert!(!validators_conflict(&task, &probe));
+    }
+
+    #[test]
+    fn smart_connection_count_scales_with_size() {
+        assert_eq!(recommended_connections(0), 1);
+        assert_eq!(recommended_connections(1 << 20), 1);
+        assert_eq!(recommended_connections(8 << 20), 2);
+        assert_eq!(recommended_connections(90 << 20), 16);
+        assert_eq!(recommended_connections(1 << 30), 16);
+    }
+
+    #[test]
+    fn mirror_parallel_requires_matching_size_and_validator() {
+        let mut primary = ProbeResult {
+            total_bytes: 100,
+            accept_ranges: true,
+            etag: Some("\"v1\"".into()),
+            ..Default::default()
+        };
+        let mut candidate = primary.clone();
+        assert!(mirror_compatible(&primary, &candidate));
+
+        candidate.total_bytes = 101;
+        assert!(!mirror_compatible(&primary, &candidate));
+
+        candidate.total_bytes = 100;
+        candidate.etag = Some("\"v2\"".into());
+        assert!(!mirror_compatible(&primary, &candidate));
+
+        candidate.etag = None;
+        candidate.last_modified = Some("Wed, 01 Jan 2025 00:00:00 GMT".into());
+        primary.last_modified = candidate.last_modified.clone();
+        assert!(mirror_compatible(&primary, &candidate));
+    }
+
+    #[test]
+    fn plan_rotates_mirror_sources() {
+        let task = task(8 << 20, 2);
+        let sources = vec![
+            "https://a.test/file.bin".to_string(),
+            "https://b.test/file.bin".to_string(),
+        ];
+        let parts = plan_single_sources(&task, Path::new("C:/tmp/file.bin.parts"), &sources);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].url, "https://a.test/file.bin");
+        assert_eq!(parts[1].url, "https://b.test/file.bin");
     }
 }
 

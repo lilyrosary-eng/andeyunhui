@@ -35,7 +35,9 @@ export function NewTaskPanel({
   const [mirrorText, setMirrorText] = useState('');
   const [savePath, setSavePath] = useState('');
   const [engine, setEngine] = useState('auto');
-  const [connections, setConnections] = useState(String(config?.connections ?? 8));
+  const [connections, setConnections] = useState(
+    config?.smartConnections ? '' : String(config?.connections ?? 8),
+  );
   const [priority, setPriority] = useState('0');
   const [speedKb, setSpeedKb] = useState('');
   const [sha256, setSha256] = useState('');
@@ -159,7 +161,9 @@ export function NewTaskPanel({
       const base = {
         savePath: ensureDirPath(savePath),
         engine: engine as EngineKind,
-        connections: Math.min(32, Math.max(1, Number(connections) || 8)),
+        connections: connections.trim()
+          ? Math.min(32, Math.max(1, Number(connections) || 8))
+          : null,
         priority: Number.isFinite(Number(priority)) ? Math.trunc(Number(priority)) : 0,
         maxSpeed: Number.isFinite(speed) && speed > 0 ? Math.round(speed * 1024) : null,
         referer: referer.trim() || null,
@@ -378,13 +382,14 @@ export function NewTaskPanel({
           </Field>
 
           <div className="grid grid-cols-3 gap-3">
-            <Field label="连接数">
+            <Field label="连接数" hint={config?.smartConnections ? '留空 = 自适应' : undefined}>
               <input
                 type="number"
                 min={1}
                 max={32}
                 value={connections}
                 onChange={(event) => setConnections(event.target.value)}
+                placeholder={config?.smartConnections ? '自动' : undefined}
                 className={inputClass}
               />
             </Field>

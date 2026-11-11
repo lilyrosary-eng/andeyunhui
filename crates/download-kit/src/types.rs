@@ -271,6 +271,8 @@ pub struct EngineConfig {
     pub default_engine: EngineKind,
     /// 单任务默认连接数（默认 8、上限 32）。
     pub connections: u32,
+    /// 自适应连接数：按文件大小决定分片数，忽略默认连接数。
+    pub smart_connections: bool,
     /// 同时运行的下载任务数。
     pub max_concurrent_tasks: u32,
     /// 同一站点同时运行的任务数上限（0 = 不限）。
@@ -323,6 +325,7 @@ impl Default for EngineConfig {
         Self {
             default_engine: EngineKind::Auto,
             connections: 8,
+            smart_connections: true,
             max_concurrent_tasks: 3,
             max_per_host: 0,
             retries: 4,

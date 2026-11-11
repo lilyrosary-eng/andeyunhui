@@ -559,7 +559,12 @@ impl DownloadManager {
         }
 
         let config = self.inner.config();
-        let connections = spec.connections.unwrap_or(config.connections).clamp(1, 32);
+        let connections = match spec.connections {
+            Some(value) => value.clamp(1, 32),
+            // 0 = 交给引擎按文件大小自适应（native 解析后再落库）。
+            None if config.smart_connections => 0,
+            None => config.connections,
+        };
         let speed = spec.max_speed.unwrap_or(config.speed_limit);
         let max_speed = (speed > 0).then_some(speed);
         let now = now_ms();
@@ -796,7 +801,11 @@ impl DownloadManager {
         if matches!(task.status, TaskStatus::Completed | TaskStatus::Canceled) {
             return Err("已完成/已取消的任务不能调整参数".to_string());
         }
-        let connections = connections.clamp(1, 32);
+        let connections = if connections == 0 {
+            0
+        } else {
+            connections.clamp(1, 32)
+        };
         let max_speed = (max_speed > 0).then_some(max_speed);
         self.inner
             .store

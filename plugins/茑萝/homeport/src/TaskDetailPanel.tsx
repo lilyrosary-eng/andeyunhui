@@ -27,7 +27,9 @@ export function TaskDetailPanel({
 }) {
   const editable = detail.status !== 'completed' && detail.status !== 'canceled';
   const [priority, setPriority] = useState(String(detail.priority));
-  const [connections, setConnections] = useState(String(detail.connections));
+  const [connections, setConnections] = useState(
+    detail.connections > 0 ? String(detail.connections) : '',
+  );
   const [speedKb, setSpeedKb] = useState(
     detail.maxSpeed && detail.maxSpeed > 0 ? String(Math.round(detail.maxSpeed / 1024)) : '',
   );
@@ -36,7 +38,7 @@ export function TaskDetailPanel({
 
   useEffect(() => {
     setPriority(String(detail.priority));
-    setConnections(String(detail.connections));
+    setConnections(detail.connections > 0 ? String(detail.connections) : '');
     setSpeedKb(
       detail.maxSpeed && detail.maxSpeed > 0 ? String(Math.round(detail.maxSpeed / 1024)) : '',
     );
@@ -51,7 +53,7 @@ export function TaskDetailPanel({
       await dl.updateOptions(
         detail.id,
         Number.isFinite(Number(priority)) ? Math.trunc(Number(priority)) : 0,
-        Math.min(32, Math.max(1, Number(connections) || 8)),
+        connections.trim() ? Math.min(32, Math.max(1, Number(connections) || 8)) : 0,
         Number.isFinite(speed) && speed > 0 ? Math.round(speed * 1024) : 0,
       );
       onChanged();
@@ -114,7 +116,7 @@ export function TaskDetailPanel({
             />
             <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-[11px]">
               <Info label="引擎" value={engineName} />
-              <Info label="连接数" value={String(detail.connections)} />
+              <Info label="连接数" value={detail.connections > 0 ? String(detail.connections) : '自动'} />
               <Info label="分片" value={`${detail.parts.length} 片`} />
               <Info label="优先级" value={String(detail.priority)} />
               <Info
@@ -185,6 +187,7 @@ export function TaskDetailPanel({
                     max={32}
                     value={connections}
                     onChange={(event) => setConnections(event.target.value)}
+                    placeholder="自动"
                     className="mt-1 w-full rounded-lg border border-black/10 bg-white/70 px-2 py-1.5 text-[11px] text-neutral-700 outline-none dark:border-white/10 dark:bg-stone-900/60 dark:text-stone-200"
                   />
                 </label>

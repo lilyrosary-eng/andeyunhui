@@ -72,7 +72,14 @@ impl DownloadEngine for GopeedEngine {
         ctx.transition(TaskStatus::Downloading)?;
         ctx.emit_state();
 
-        let connections = task.connections.clamp(1, 32);
+        let connections = if task.connections == 0 {
+            self.config.connections.clamp(1, 32)
+        } else {
+            task.connections.clamp(1, 32)
+        };
+        if task.connections == 0 {
+            ctx.set_connections(connections)?;
+        }
         let mut command = Command::new(gopeed);
         // Go flag 解析遇到第一个位置参数就停止，因此选项必须放在 URL 前面。
         command
