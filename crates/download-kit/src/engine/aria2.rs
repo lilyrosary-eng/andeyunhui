@@ -116,6 +116,7 @@ impl DownloadEngine for Aria2Engine {
                 ));
             }
         }
+        crate::util::ensure_disk_space(&save_path, total)?;
         ctx.update_meta(EngineKind::Aria2, &task.filename, total)?;
         if let Some(outcome) = check_control(&ctx) {
             return Ok(outcome);
@@ -153,6 +154,7 @@ impl DownloadEngine for Aria2Engine {
         }
         command
             .arg("--continue=true")
+            .arg("--conditional-get=true")
             .arg("--allow-overwrite=true")
             .arg("--auto-file-renaming=false")
             .arg("--file-allocation=none")

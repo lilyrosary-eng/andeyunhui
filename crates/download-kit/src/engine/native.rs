@@ -19,7 +19,7 @@ use reqwest::header::RANGE;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::process::Command;
 
-use crate::engine::limiter::SpeedLimiter;
+use crate::engine::limiter::{Limiters, SpeedLimiter};
 use crate::engine::{DownloadEngine, EngineCtx, EngineOutcome, PartResult};
 use crate::manager::{Control, TaskProgress};
 use crate::probe::{self, HttpMeta};
@@ -122,6 +122,13 @@ impl NativeEngine {
             }
         };
         task.urls[0] = source_url;
+        // 续传前比对远端版本：文件已变化就丢弃旧分片，从 0 重新规划。
+        if has_progress && validators_conflict(&task, &probe) {
+            ctx.delete_parts()?;
+            let _ = tokio::fs::remove_dir_all(ctx.temp_dir()).await;
+            parts.clear();
+        }
+        ctx.update_validators(probe.etag.as_deref(), probe.last_modified.as_deref())?;
         if probe.total_bytes > 0 {
             task.total_bytes = probe.total_bytes;
         }
@@ -131,6 +138,7 @@ impl NativeEngine {
             }
         }
         enforce_max_bytes(&task)?;
+        crate::util::ensure_disk_space(&ctx.save_path(), task.total_bytes)?;
         ctx.update_meta(kind, &task.filename, task.total_bytes)?;
 
         if let Some(outcome) = check_control(&ctx) {
@@ -167,10 +175,10 @@ impl NativeEngine {
         for part in &parts {
             final_progress.seed(part);
         }
-        let limiter = task
-            .max_speed
-            .and_then(SpeedLimiter::new)
-            .map(Arc::new);
+        let limiters = Limiters::new(
+            task.max_speed.and_then(SpeedLimiter::new).map(Arc::new),
+            ctx.inner.global_limiter(),
+        );
 
         let mut attempt = self
             .download_parts(
@@ -180,7 +188,7 @@ impl NativeEngine {
                 &final_progress,
                 task.connections as usize,
                 multipart,
-                limiter.clone(),
+                limiters.clone(),
             )
             .await;
 
@@ -205,7 +213,7 @@ impl NativeEngine {
                         &retry_progress,
                         1,
                         multipart,
-                        limiter.clone(),
+                        limiters.clone(),
                     )
                     .await;
                 if attempt.is_ok() {
@@ -227,7 +235,7 @@ impl NativeEngine {
                     &retry_progress,
                     1,
                     false,
-                    limiter.clone(),
+                    limiters.clone(),
                 )
                 .await;
             if attempt.is_ok() {
@@ -288,6 +296,8 @@ impl NativeEngine {
             task.total_bytes = total;
         }
         enforce_max_bytes(&task)?;
+        let planned_total: u64 = parts.iter().map(|part| part.expected()).sum();
+        crate::util::ensure_disk_space(&ctx.save_path(), planned_total)?;
         ctx.update_meta(kind, &task.filename, task.total_bytes)?;
 
         if let Some(outcome) = check_control(&ctx) {
@@ -318,10 +328,10 @@ impl NativeEngine {
         for part in &parts {
             progress.seed(part);
         }
-        let limiter = task
-            .max_speed
-            .and_then(SpeedLimiter::new)
-            .map(Arc::new);
+        let limiters = Limiters::new(
+            task.max_speed.and_then(SpeedLimiter::new).map(Arc::new),
+            ctx.inner.global_limiter(),
+        );
 
         ctx.transition(TaskStatus::Downloading)?;
         ctx.emit_state();
@@ -339,7 +349,7 @@ impl NativeEngine {
                 &mut owned,
                 &progress,
                 false,
-                limiter.clone(),
+                limiters.clone(),
             )
             .await
             .map_err(|error| error.message)?;
@@ -447,6 +457,20 @@ fn plan_single_stream(task: &DownloadTask, dir: &Path) -> DownloadPart {
     }
 }
 
+/// 远端文件的 ETag / Last-Modified 是否与首次下载时不同。
+/// 两边都有值才比较；服务器不提供校验器时无法判断，保持原进度。
+fn validators_conflict(task: &DownloadTask, probe: &crate::types::ProbeResult) -> bool {
+    let etag_changed = matches!(
+        (&task.etag, &probe.etag),
+        (Some(old), Some(new)) if old != new
+    );
+    let modified_changed = matches!(
+        (&task.last_modified, &probe.last_modified),
+        (Some(old), Some(new)) if old != new
+    );
+    etag_changed || modified_changed
+}
+
 fn temp_file(dir: &Path, prefix: &str, index: usize) -> String {
     dir.join(format!("{prefix}-{index:03}.bin"))
         .to_string_lossy()
@@ -541,7 +565,7 @@ impl NativeEngine {
         progress: &Arc<TaskProgress>,
         connections: usize,
         multipart: bool,
-        limiter: Option<Arc<SpeedLimiter>>,
+        limiters: Limiters,
     ) -> Result<PartsOutcome, PartsError> {
     let pending: Vec<DownloadPart> = parts
         .iter()
@@ -563,7 +587,7 @@ impl NativeEngine {
                 &mut part,
                 progress,
                 multipart,
-                limiter.clone(),
+                limiters.clone(),
             )
             .await
             {
@@ -584,7 +608,7 @@ impl NativeEngine {
         let client = self.client.clone();
         let config = self.config.clone();
         let progress = progress.clone();
-        let limiter = limiter.clone();
+        let limiters = limiters.clone();
         set.spawn(async move {
             let mut part = part;
             download_part(
@@ -595,7 +619,7 @@ impl NativeEngine {
                 &mut part,
                 &progress,
                 multipart,
-                limiter,
+                limiters,
             )
             .await
         });
@@ -639,7 +663,7 @@ async fn download_part(
     part: &mut DownloadPart,
     progress: &Arc<TaskProgress>,
     multipart: bool,
-    limiter: Option<Arc<SpeedLimiter>>,
+    limiters: Limiters,
 ) -> Result<PartResult, PartsError> {
     let mut attempt = 0u32;
     loop {
@@ -656,7 +680,7 @@ async fn download_part(
             part,
             progress,
             multipart,
-            limiter.as_deref(),
+            &limiters,
         )
         .await
         {
@@ -710,7 +734,7 @@ async fn download_once(
     part: &mut DownloadPart,
     progress: &Arc<TaskProgress>,
     multipart: bool,
-    limiter: Option<&SpeedLimiter>,
+    limiters: &Limiters,
 ) -> Result<(), PartFailure> {
     let expected = part.expected();
     if expected > 0 && part.downloaded >= expected {
@@ -813,8 +837,8 @@ async fn download_once(
             .map_err(|e| PartFailure::Fatal(format!("写入分片失败: {e}")))?;
         part.downloaded += length;
         progress.downloaded.fetch_add(length, Ordering::Relaxed);
-        if let Some(limiter) = limiter {
-            if let Some(failure) = throttle(limiter, length, ctx).await {
+        if !limiters.is_empty() {
+            if let Some(failure) = throttle(limiters, length, ctx).await {
                 let _ = file.flush().await;
                 let _ = ctx.update_part(part);
                 return Err(failure);
@@ -841,9 +865,9 @@ async fn download_once(
 }
 
 /// 限速等待：每 200ms 检查一次控制信号，低速限速下暂停也能及时生效。
-async fn throttle(limiter: &SpeedLimiter, bytes: u64, ctx: &EngineCtx) -> Option<PartFailure> {
+async fn throttle(limiters: &Limiters, bytes: u64, ctx: &EngineCtx) -> Option<PartFailure> {
     loop {
-        match limiter.reserve(bytes) {
+        match limiters.reserve(bytes) {
             None => return None,
             Some(wait) => {
                 tokio::time::sleep(wait.min(Duration::from_millis(200))).await;
@@ -1025,6 +1049,9 @@ mod tests {
             mirrors: Vec::new(),
             sha256: None,
             max_speed: None,
+            priority: 0,
+            etag: None,
+            last_modified: None,
             connections,
             error: None,
             created_at: 0,
@@ -1062,6 +1089,22 @@ mod tests {
         let parts = plan_single(&task, Path::new("C:/tmp/file.bin.parts"));
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].end, 0);
+    }
+
+    #[test]
+    fn detects_changed_validators() {
+        let mut task = task(100, 2);
+        task.etag = Some("\"v1\"".to_string());
+        let mut probe = crate::types::ProbeResult::default();
+        probe.etag = Some("\"v1\"".to_string());
+        assert!(!validators_conflict(&task, &probe));
+
+        probe.etag = Some("\"v2\"".to_string());
+        assert!(validators_conflict(&task, &probe));
+
+        // 服务器不再提供 ETag 时不判定变化，避免误删进度。
+        task.etag = None;
+        assert!(!validators_conflict(&task, &probe));
     }
 }
 

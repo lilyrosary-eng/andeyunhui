@@ -89,6 +89,7 @@ impl DownloadEngine for WgetEngine {
             }
         }
         ctx.update_meta(EngineKind::Wget, &task.filename, total)?;
+        crate::util::ensure_disk_space(&save_path, total)?;
         if let Some(outcome) = check_control(&ctx) {
             return Ok(outcome);
         }

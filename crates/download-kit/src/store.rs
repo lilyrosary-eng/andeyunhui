@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   mirrors         TEXT NOT NULL DEFAULT '[]',
   sha256          TEXT,
   max_speed       INTEGER,
+  priority        INTEGER NOT NULL DEFAULT 0,
+  etag            TEXT,
+  last_modified   TEXT,
   connections     INTEGER NOT NULL DEFAULT 1,
   error           TEXT,
   created_at      INTEGER NOT NULL,
@@ -95,8 +98,9 @@ impl Store {
             "INSERT INTO tasks (
                 id, urls, save_path, filename, referer, cookie, user_agent, headers,
                 engine, resolved_engine, status, total_bytes, downloaded_bytes, max_bytes,
-                mirrors, sha256, max_speed, connections, error, created_at, updated_at, completed_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+                mirrors, sha256, max_speed, priority, etag, last_modified, connections, error,
+                created_at, updated_at, completed_at
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
             params![
                 task.id,
                 urls,
@@ -115,6 +119,9 @@ impl Store {
                 mirrors,
                 task.sha256,
                 task.max_speed.map(|v| v as i64),
+                task.priority as i64,
+                task.etag,
+                task.last_modified,
                 task.connections as i64,
                 task.error,
                 task.created_at,
@@ -170,11 +177,11 @@ impl Store {
         Ok(rows)
     }
 
-    /// 取最早入队且仍在排队的任务。
+    /// 取优先级最高、同优先级最早入队的任务。
     pub fn next_queued(&self) -> Result<Option<DownloadTask>, String> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT * FROM tasks WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1",
+            "SELECT * FROM tasks WHERE status = 'queued' ORDER BY priority DESC, created_at ASC LIMIT 1",
             [],
             row_to_task,
         )
@@ -246,6 +253,26 @@ impl Store {
             params![engine.as_str(), filename, total as i64, now_ms(), id],
         )
         .map_err(|e| format!("更新下载任务元信息失败: {e}"))?;
+        Ok(())
+    }
+
+    /// 记录续传校验器（ETag / Last-Modified）；只有新值非空时才覆盖。
+    pub fn update_validators(
+        &self,
+        id: &str,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE tasks
+             SET etag = COALESCE(?1, etag),
+                 last_modified = COALESCE(?2, last_modified),
+                 updated_at = ?3
+             WHERE id = ?4",
+            params![etag, last_modified, now_ms(), id],
+        )
+        .map_err(|e| format!("更新续传校验器失败: {e}"))?;
         Ok(())
     }
 
@@ -411,6 +438,9 @@ fn row_to_task(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
         mirrors: serde_json::from_str(&mirrors_raw).unwrap_or_default(),
         sha256: row.get("sha256")?,
         max_speed: row.get::<_, Option<i64>>("max_speed")?.map(|v| v as u64),
+        priority: row.get::<_, i64>("priority").unwrap_or(0) as i32,
+        etag: row.get("etag")?,
+        last_modified: row.get("last_modified")?,
         connections: row.get::<_, i64>("connections")?.max(1) as u32,
         error: row.get("error")?,
         created_at: row.get("created_at")?,
@@ -450,6 +480,9 @@ fn ensure_columns(conn: &Connection) -> Result<(), String> {
         ("mirrors", "TEXT NOT NULL DEFAULT '[]'"),
         ("sha256", "TEXT"),
         ("max_speed", "INTEGER"),
+        ("priority", "INTEGER NOT NULL DEFAULT 0"),
+        ("etag", "TEXT"),
+        ("last_modified", "TEXT"),
     ];
     for (name, declaration) in additions {
         if !existing.iter().any(|column| column == name) {
@@ -495,6 +528,54 @@ mod tests {
         assert!(columns.contains(&"mirrors".to_string()));
         assert!(columns.contains(&"sha256".to_string()));
         assert!(columns.contains(&"max_speed".to_string()));
+        assert!(columns.contains(&"priority".to_string()));
+        assert!(columns.contains(&"etag".to_string()));
+        assert!(columns.contains(&"last_modified".to_string()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn queued(id: &str, priority: i32, created_at: i64) -> DownloadTask {
+        DownloadTask {
+            id: id.to_string(),
+            urls: vec!["https://x.test/a.bin".to_string()],
+            save_path: format!("/tmp/{id}.bin"),
+            filename: "a.bin".to_string(),
+            referer: None,
+            cookie: None,
+            user_agent: None,
+            headers: std::collections::BTreeMap::new(),
+            engine: EngineKind::Native,
+            resolved_engine: None,
+            status: TaskStatus::Queued,
+            total_bytes: 0,
+            downloaded_bytes: 0,
+            max_bytes: None,
+            mirrors: Vec::new(),
+            sha256: None,
+            max_speed: None,
+            priority,
+            etag: None,
+            last_modified: None,
+            connections: 1,
+            error: None,
+            created_at,
+            updated_at: created_at,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn next_queued_prefers_higher_priority() {
+        let base = std::env::temp_dir().join(format!(
+            "download-kit-priority-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let store = Store::open(&base).unwrap();
+        store.insert_task(&queued("low", 0, 1)).unwrap();
+        store.insert_task(&queued("high", 10, 2)).unwrap();
+        let next = store.next_queued().unwrap().unwrap();
+        assert_eq!(next.id, "high");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

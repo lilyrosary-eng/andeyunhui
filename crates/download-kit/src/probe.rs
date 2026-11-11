@@ -159,6 +159,12 @@ pub async fn probe(
         if info.filename.is_none() {
             info.filename = head_info.filename;
         }
+        if info.etag.is_none() {
+            info.etag = head_info.etag;
+        }
+        if info.last_modified.is_none() {
+            info.last_modified = head_info.last_modified;
+        }
         if info.total_bytes == 0 {
             info.total_bytes = head_info.total_bytes;
         }
@@ -172,6 +178,14 @@ pub async fn probe(
 fn result_from_headers(url: &str, headers: &HeaderMap, partial: bool) -> ProbeResult {
     let content_type = headers
         .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let etag = headers
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let last_modified = headers
+        .get(reqwest::header::LAST_MODIFIED)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
@@ -194,6 +208,8 @@ fn result_from_headers(url: &str, headers: &HeaderMap, partial: bool) -> ProbeRe
         accept_ranges,
         content_type,
         filename,
+        etag,
+        last_modified,
     }
 }
 

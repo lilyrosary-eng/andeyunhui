@@ -44,6 +44,8 @@ async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 # 下载完成后的 SHA-256 校验（纯 Rust，MIT/Apache-2.0）。
 sha2 = "0.10"
+# 下载前磁盘可用空间预检（跨平台，MIT/Apache-2.0）。
+fs2 = "0.4"
 
 [features]
 # 仅供 `cargo test`：把 comctl32 v6 清单链进测试二进制。

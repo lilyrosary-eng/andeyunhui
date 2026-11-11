@@ -170,6 +170,9 @@ pub struct DownloadSpec {
     /// 单任务限速（字节/秒，0 或空 = 不限）；缺省取全局配置。
     #[serde(default)]
     pub max_speed: Option<u64>,
+    /// 调度优先级：数值越大越先执行。
+    #[serde(default)]
+    pub priority: i32,
 }
 
 /// 下载任务（不含分片明细，列表接口用它）。
@@ -208,6 +211,15 @@ pub struct DownloadTask {
     /// 单任务限速（字节/秒）；None = 不限。
     #[serde(default)]
     pub max_speed: Option<u64>,
+    /// 调度优先级：数值越大越先执行。
+    #[serde(default)]
+    pub priority: i32,
+    /// 首次探测得到的 ETag，用于续传前判断远端文件是否变化。
+    #[serde(default)]
+    pub etag: Option<String>,
+    /// 首次探测得到的 Last-Modified，用于续传前判断远端文件是否变化。
+    #[serde(default)]
+    pub last_modified: Option<String>,
     pub connections: u32,
     #[serde(default)]
     pub error: Option<String>,
@@ -269,6 +281,8 @@ pub struct EngineConfig {
     pub user_agent: String,
     /// 单任务默认限速（字节/秒，0 = 不限）。
     pub speed_limit: u64,
+    /// 全局聚合限速（字节/秒，0 = 不限）；内置引擎1/2 共享，外部 CLI 仅受单任务限速约束。
+    pub total_speed_limit: u64,
     /// HTTP / SOCKS 代理，例如 `http://127.0.0.1:7890`；空 = 不使用代理。
     #[serde(default)]
     pub proxy: Option<String>,
@@ -305,6 +319,7 @@ impl Default for EngineConfig {
             read_timeout_secs: 60,
             user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36".to_string(),
             speed_limit: 0,
+            total_speed_limit: 0,
             proxy: None,
             aria2_path: None,
             ffmpeg_path: None,
@@ -373,6 +388,11 @@ pub struct ProbeResult {
     pub content_type: Option<String>,
     #[serde(default)]
     pub filename: Option<String>,
+    /// 远端文件版本标识；续传前用来判断文件是否已变化。
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub last_modified: Option<String>,
 }
 
 /// 引擎描述：设置页/命令行只需消费这个列表，不必知道具体实现。

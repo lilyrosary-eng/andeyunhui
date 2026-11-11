@@ -91,6 +91,22 @@ impl EngineCtx {
         self.probe.clone()
     }
 
+    /// 记录 ETag / Last-Modified，供下次续传前比对。
+    pub(crate) fn update_validators(
+        &self,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+    ) -> Result<(), String> {
+        self.inner
+            .store
+            .update_validators(&self.task_id, etag, last_modified)
+    }
+
+    /// 远端文件已变化时清空旧分片记录，重新规划。
+    pub(crate) fn delete_parts(&self) -> Result<(), String> {
+        self.inner.store.delete_parts(&self.task_id)
+    }
+
     /// 推进到活动态（probing/downloading/merging）。任务已被暂停/取消时返回 false。
     pub fn transition(&self, status: TaskStatus) -> Result<bool, String> {
         self.inner.advance(&self.task_id, status)

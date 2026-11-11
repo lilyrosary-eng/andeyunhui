@@ -90,6 +90,7 @@ impl DownloadEngine for CurlEngine {
             }
         }
         ctx.update_meta(EngineKind::Curl, &task.filename, total)?;
+        crate::util::ensure_disk_space(&save_path, total)?;
         if let Some(outcome) = check_control(&ctx) {
             return Ok(outcome);
         }

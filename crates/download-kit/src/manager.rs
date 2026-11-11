@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{watch, Notify};
 
 use crate::engine::{self as engines, DownloadEngine, EngineCtx, EngineOutcome};
+use crate::engine::limiter::SpeedLimiter;
 use crate::probe;
 use crate::store::Store;
 use crate::types::{
@@ -89,6 +90,8 @@ pub(crate) struct Inner {
     pub(crate) store: Store,
     config: RwLock<EngineConfig>,
     engine_map: RwLock<HashMap<EngineKind, Arc<dyn DownloadEngine>>>,
+    /// 全局聚合限速：内置引擎1/2 的所有任务共享。
+    global_limiter: RwLock<Option<Arc<SpeedLimiter>>>,
     controls: Mutex<HashMap<String, watch::Sender<Control>>>,
     active: AtomicU32,
     wake: Notify,
@@ -108,6 +111,13 @@ impl Inner {
             .read()
             .map(|guard| guard.get(&kind).cloned())
             .unwrap_or_else(|poisoned| poisoned.into_inner().get(&kind).cloned())
+    }
+
+    pub(crate) fn global_limiter(&self) -> Option<Arc<SpeedLimiter>> {
+        self.global_limiter
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
     }
 
     fn emit<S: serde::Serialize + Clone>(&self, event: &str, payload: S) {
@@ -407,6 +417,9 @@ impl DownloadManager {
             store,
             config: RwLock::new(config.clone()),
             engine_map: RwLock::new(registry),
+            global_limiter: RwLock::new(
+                SpeedLimiter::new(config.total_speed_limit).map(Arc::new),
+            ),
             controls: Mutex::new(HashMap::new()),
             active: AtomicU32::new(0),
             wake: Notify::new(),
@@ -527,6 +540,9 @@ impl DownloadManager {
             mirrors,
             sha256,
             max_speed,
+            priority: spec.priority,
+            etag: None,
+            last_modified: None,
             connections,
             error: None,
             created_at: now,
@@ -713,6 +729,9 @@ impl DownloadManager {
         crate::config::save(&self.inner.base, &config)?;
         if let Ok(mut guard) = self.inner.config.write() {
             *guard = config.clone();
+        }
+        if let Ok(mut guard) = self.inner.global_limiter.write() {
+            *guard = SpeedLimiter::new(config.total_speed_limit).map(Arc::new);
         }
         if let Some(app) = &self.inner.app {
             let registry = engines::build_registry(app, &config);
@@ -919,12 +938,14 @@ mod tests {
     }
 
     fn test_inner(base: PathBuf, store: Store, config: EngineConfig) -> Arc<Inner> {
+        let global_limiter = SpeedLimiter::new(config.total_speed_limit).map(Arc::new);
         Arc::new(Inner {
             base,
             app: None,
             store,
             config: RwLock::new(config),
             engine_map: RwLock::new(HashMap::new()),
+            global_limiter: RwLock::new(global_limiter),
             controls: Mutex::new(HashMap::new()),
             active: AtomicU32::new(0),
             wake: Notify::new(),
@@ -964,6 +985,9 @@ mod tests {
             mirrors: Vec::new(),
             sha256: None,
             max_speed: None,
+            priority: 0,
+            etag: None,
+            last_modified: None,
             connections,
             error: None,
             created_at: now,

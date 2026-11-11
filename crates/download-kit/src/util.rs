@@ -143,6 +143,30 @@ pub fn dir_size(path: &Path) -> u64 {
     total
 }
 
+/// 下载前磁盘空间预检：总量已知时要求可用空间 ≥ 总量 + 64MB 余量。
+pub fn ensure_disk_space(path: &Path, total: u64) -> Result<(), String> {
+    if total == 0 {
+        return Ok(());
+    }
+    let probe = if path.exists() {
+        path
+    } else {
+        path.parent().unwrap_or(Path::new("."))
+    };
+    let available =
+        fs2::available_space(probe).map_err(|e| format!("读取磁盘可用空间失败: {e}"))?;
+    const RESERVE: u64 = 64 * 1024 * 1024;
+    let required = total.saturating_add(RESERVE);
+    if available < required {
+        return Err(format!(
+            "磁盘空间不足：需要 {:.1} MB（含 64 MB 余量），可用 {:.1} MB",
+            required as f64 / 1024.0 / 1024.0,
+            available as f64 / 1024.0 / 1024.0
+        ));
+    }
+    Ok(())
+}
+
 /// 计算单文件 SHA-256（小写 hex）。调用方负责放进 `spawn_blocking`。
 pub fn sha256_file(path: &Path) -> Result<String, String> {
     use sha2::{Digest, Sha256};
@@ -312,6 +336,18 @@ mod tests {
         std::fs::write(base.join("a.bin"), vec![0u8; 10]).unwrap();
         std::fs::write(nested.join("b.bin"), vec![0u8; 25]).unwrap();
         assert_eq!(dir_size(&base), 35);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn disk_space_check_handles_unknown_and_impossible_sizes() {
+        let base = std::env::temp_dir().join(format!(
+            "download-kit-diskspace-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(ensure_disk_space(&base, 0).is_ok());
+        assert!(ensure_disk_space(&base, u64::MAX).is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
 }
