@@ -4,6 +4,7 @@ import React from "react";
 import { T, useLang } from '../../_shared/pluginRuntime';
 import { WebglImageCanvas } from '../../_shared/webglImageCanvas';
 import { useZoomPan } from '../../_shared/useZoomPan';
+import { isLinux } from '@/platform/isLinux';
 // 图片查看器 — 四种查看模式
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const hostApi = window.__HOST_API__;
@@ -130,6 +131,7 @@ function TileImage({
   onFallback,
   onImageLoaded,
   retryToken = 0,
+  enabled = true,
 }: {
   imagePath: string;
   /** 当前缩放倍率（用来选层） */
@@ -152,6 +154,13 @@ function TileImage({
   onImageLoaded?: (size: { width: number; height: number }) => void;
   /** 重试计数：父级点「重试」时 +1，本组件据此重新发起请求 */
   retryToken?: number;
+  /**
+   * 是否真的需要瓦片。
+   * Windows 完整模式先用原图打底，只有缩放超过阈值才置 true（见 needTiles）。
+   * **一旦为 true 就粘住**（wantRef）：否则缩小回 1.0 会立刻丢瓦片，
+   * 再放大又要重新请求，来回抖动。
+   */
+  enabled?: boolean;
 }) {
   const [info, setInfo] = useState<TilesInfo | null>(null);
   const [failed, setFailed] = useState(false);
@@ -162,11 +171,22 @@ function TileImage({
   /** 回调放进 ref：effect 里异步取用，不把它们放进依赖（否则父级每次渲染都重发请求） */
   const onSmallRef = useRef(onSmall);
   onSmallRef.current = onSmall;
+  /** 粘住"曾经需要过瓦片"这一事实 */
+  const wantTilesRef = useRef(false);
+  if (enabled) wantTilesRef.current = true;
+  const needTiles = enabled || wantTilesRef.current;
 
   // 懒生成瓦片（后端限流解码 + 磁盘缓存，重复调用直接命中）
   useEffect(() => {
     if (!imagePath) return;
     let alive = true;
+    if (!needTiles) {
+      // Windows 完整模式：还没缩放，先用原图，别急着让后端解码整座金字塔
+      setInfo(null);
+      setFailed(false);
+      readyRef.current = false;
+      return;
+    }
     setFailed(false);
     readyRef.current = false;
     fallbackNotifiedRef.current = false;
@@ -223,7 +243,7 @@ function TileImage({
       alive = false;
       clearTimeout(timer);
     };
-  }, [imagePath, retryToken]);
+  }, [imagePath, retryToken, needTiles]);
 
   // 按缩放选层（**必须有层次变化**，这是金字塔的意义所在）。
   //
@@ -1773,6 +1793,23 @@ function FullView({
   }, [currentIndex, isCurrentGif, currentPath]);
 
 
+  /**
+   * **Windows 的完整模式：先用原图打底**（2026-11-11 用户批准的平台分叉）。
+   *
+   * 事实依据：其他展示模式用 `<img src=原图>` 加载 8192² 并不慢（用户实测），
+   * 而完整模式要等 Rust 侧把整座金字塔（341 块 PNG）写完才有画面。
+   * 瓦片本来是为 WebKitGTK 做的妥协（它解码 8192² 会吃掉 268MB 直接卡死），
+   * Windows 的 WebView2 没这个问题 —— 于是 Windows 一直在替 Linux 的妥协买单。
+   *
+   * 现在的行为：
+   *   Windows：立刻 `<img src=原图>` 上屏（与其它模式同一条路径），
+   *            瓦片只在**缩放超过阈值**时才生成并叠上来（见 needTiles）。
+   *   Linux  ：保持原样 —— 不渲染底图，直接等瓦片，否则卡死。
+   */
+  const winBaseFirst = !isLinux() && tilesEnabled && engine === 'tiles';
+  /** 完整模式在 Windows 上"缩放到一定倍数才需要瓦片"，Linux 一直需要 */
+  const needTiles = !isLinux() ? zoomScale > 1.2 : true;
+
   return (
     <div
       ref={containerRef}
@@ -1844,12 +1881,12 @@ function FullView({
           ref={canvasRef}
           className="absolute inset-0 w-full h-full select-none"
         />
-      ) : tilesEnabled && engine === 'tiles' && !isCurrentGif && !smallImage
-        // 瓦片模式：**不要底图**。整块画面由 TileImage 的 canvas 负责。
-        // 曾经回过 200px 缩略图，实测不可用（尺寸只有 200px、被 flex 居中后与瓦片坐标系
-        // 完全错位、放大后极糊），2026-11-09 用户要求删除。
+      ) : tilesEnabled && engine === 'tiles' && !isCurrentGif && !smallImage && !winBaseFirst
+        // **Linux**：瓦片模式不要底图，整块画面由 canvas 负责。
+        // 原因见下方注释：WebKitGTK 解码 8192² 原图（≈268MB）会把整个软件卡死，
+        // 所以 Linux 必须先出瓦片。这条对 Windows 不成立，见 winBaseFirst。
         ? null
-        : !isCurrentGif && !smallImage && !displaySrc && engine !== 'raw' ? (
+        : !isCurrentGif && !smallImage && !displaySrc && engine !== 'raw' && !winBaseFirst ? (
         // 显示层还没就绪：**绝不回退原图**。
         // 回退原图会让 WebView 解码 8192×8192（≈268MB）—— 表现就是
         // 「打开大图时整机卡死」+「画质在原图/降采样之间来回跳」。
@@ -1863,7 +1900,7 @@ function FullView({
           src={
             isCurrentGif
               ? gifDataUrl || currentUrl
-              : engine === 'raw' || smallImage
+              : engine === 'raw' || smallImage || winBaseFirst
                 ? currentUrl
                 : displaySrc
           }
@@ -1904,6 +1941,7 @@ function FullView({
             key={`${currentPath}#${tileRetry}`}
             imagePath={currentPath}
             retryToken={tileRetry}
+            enabled={needTiles}
             onReady={() => setTilesReady(true)}
             onSmall={() => setSmallImage(true)}
             onFallback={() => {
