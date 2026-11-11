@@ -1785,4 +1785,6 @@ export const jaJP: Record<string, string> = {
   'updater.cancel': 'キャンセル',
   'updater.openLogs': 'ログを開く',
   'updater.installStuckHint': '自動で再起動しない場合は、アプリを手動で開いてください。詳細は「ログを開く」を参照。',
+  'updater.packageSize': 'パッケージサイズ {size}',
+  'updater.preparing': 'サイズを取得中…',
 };

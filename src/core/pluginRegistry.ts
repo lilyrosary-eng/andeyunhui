@@ -24,9 +24,15 @@ export interface PluginDef {
   // 模块代号（如 "铃兰"、"莲花"）：由 PluginHost 从 manifest 注入，插件注册时无需提供。
   // UI 可据此展示代号（如导航栏 tooltip、模块标题副标）。
   codename?: string;
+  // 展示名（花名，如 "风信子"）：仅用于用户可见的模块标题 / 命令面板条目；
+  // 缺省时回退 name（功能名）。与 id、目录、parent、manifest.name 无关，不影响加载与安装。
+  displayName?: string;
+  // 展示名的悬停文案：不传时按「花名 · 功能名」自动拼装；传了则原样使用。
+  displayTooltip?: string;
   // 生命周期钩子：插件卸载/重载前调用，用于释放 audio、定时器、事件监听等资源。
+  // reason: 'reload' = 热重载（旧实例将被新代码替换）；'shutdown' = 用户禁用/删除插件。
   // 不抛错时由 PluginHost 在 unregister 前调用。
-  destroy?: () => void;
+  destroy?: (reason?: 'reload' | 'shutdown') => void;
 }
 
 // 插件注册器：插件调用 register() 注册自己，宿主通过 getAll() / get() 查询
@@ -72,6 +78,26 @@ export class PluginRegistry {
     plugin.visible = visible;
     window.dispatchEvent(new CustomEvent('plugin-visibility-changed', { detail: { id, visible } }));
     return true;
+  }
+
+  // ---- 长生命周期资源共享槽 ----
+  // 插件脚本里的 `window` 是每次加载新建的沙箱 Proxy，写 window.xxx 无法跨热重载存活；
+  // 需要跨重载保留的资源（如音乐播放内核）放这里，由宿主注册表持有。
+  private sharedSlots = new Map<string, unknown>();
+
+  /** 读取共享槽（key 建议带插件前缀，如 'music.player'） */
+  getSharedSlot<T = unknown>(key: string): T | undefined {
+    return this.sharedSlots.get(key) as T | undefined;
+  }
+
+  /** 写入共享槽：热重载/卸载重建后仍可读取 */
+  setSharedSlot(key: string, value: unknown): void {
+    this.sharedSlots.set(key, value);
+  }
+
+  /** 清除共享槽（用户禁用/删除插件、或在插件的 shutdown 路径里调用） */
+  deleteSharedSlot(key: string): void {
+    this.sharedSlots.delete(key);
   }
 }
 

@@ -26,6 +26,11 @@ import { WebTerminal } from './Terminal';
 import { WebSidebarShell, GlobeIcon, type WebSidebarItem } from './WebSidebarShell';
 import { CloudDrawer, CloudIcon } from '@shared/CloudDrawer';
 import { OnlineWebView } from './online/OnlineWebView';
+
+// 用户可见的模块展示名：花名用于侧栏标题 / 设置页 / 命令面板，功能名保留为副标题与检索词。
+// id、目录、manifest.id 仍是 web-interface，不做任何改动。
+const MODULE_DISPLAY_NAME = '牵牛花';
+const MODULE_FUNCTION_NAME = 'Web 接口';
 import { toWebSite } from './online/webPlatforms';
 import { useNetworkSites } from '@shared/useNetworkSites';
 import {
@@ -131,11 +136,12 @@ function SettingsContent({
   onClose: () => void;
 }) {
   const ModuleSettingsPanel = (window.__HOST_UI__ as Record<string, unknown>)?.ModuleSettingsPanel as
-    | React.FC<{ title: string; icon: React.ReactNode; onClose: () => void; children: React.ReactNode }>
+    | React.FC<{ title: string; subtitle?: string; icon: React.ReactNode; onClose: () => void; children: React.ReactNode }>
     | undefined;
   if (!ModuleSettingsPanel) return null;
   return React.createElement(ModuleSettingsPanel, {
-    title: 'Web 接口',
+    title: MODULE_DISPLAY_NAME,
+    subtitle: MODULE_FUNCTION_NAME,
     icon: React.createElement(GlobeIcon),
     onClose,
     children: React.createElement('div', { className: 'space-y-4' },
@@ -828,6 +834,8 @@ function WebInterfaceModule() {
   // 「云」入口：网络站点视图 + 站点选择抽屉（与视频/图片/笔记同一套交互）
   const [showNetwork, setShowNetwork] = useState(false);
   const [networkDrawerOpen, setNetworkDrawerOpen] = useState(false);
+  // 抽屉里选中的站点：必须传给在线视图，否则只会打开列表里的第一个
+  const [pendingSiteId, setPendingSiteId] = useState<string | null>(null);
   // 站点列表实时订阅共享注册表：设置在「茑萝 → 网络拓展」增删后抽屉立即刷新
   const webSiteList = useNetworkSites('web').map(toWebSite);
   // 终止确认弹窗：点「终止」先提示保存，确认后才真正停止并强杀进程树
@@ -1013,7 +1021,8 @@ function WebInterfaceModule() {
       {/* 左侧：统一侧边栏（复用宿主 ModuleSidebarShell + 右键菜单） */}
       <WebSidebarShell
         icon={<GlobeIcon />}
-        title="Web 接口"
+        title={MODULE_DISPLAY_NAME}
+        titleTooltip={`${MODULE_DISPLAY_NAME} · ${MODULE_FUNCTION_NAME}`}
         titleActions={cloudButton}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
@@ -1094,6 +1103,7 @@ function WebInterfaceModule() {
       {showNetwork && (
         <div className="absolute inset-0 z-30 flex bg-[var(--nav-bg)]">
           <OnlineWebView
+            initialSiteId={pendingSiteId}
             onExit={() => setShowNetwork(false)}
             onOpenModuleSettings={handleOpenSettings}
           />
@@ -1129,7 +1139,8 @@ function WebInterfaceModule() {
               desc: s.desc,
               accent: s.accent,
             })),
-            onPick: () => {
+            onPick: (id) => {
+              setPendingSiteId(id);
               setShowNetwork(true);
               setNetworkDrawerOpen(false);
             },
@@ -1153,7 +1164,8 @@ WebInterfaceModule.displayName = 'WebInterfaceModule';
 
 window.__PLUGIN_REGISTRY__?.register({
   id: 'web-interface',
-  name: 'Web 接口',
+  name: MODULE_FUNCTION_NAME,
+  displayName: MODULE_DISPLAY_NAME,
   kind: 'module',
   visible: true,
   iconName: 'Globe',

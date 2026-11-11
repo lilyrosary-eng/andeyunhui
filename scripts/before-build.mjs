@@ -23,6 +23,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 
 const isAndroid = process.env.TAURI_ENV_PLATFORM === 'android';
+const skipUnchanged = process.env.ANDEYUNHUI_SKIP_UNCHANGED === '1';
+const decisionOnly = process.env.ANDEYUNHUI_BUILD_DECISION === '1';
 
 const FULL_CHAIN =
   'node scripts/gen-waiting-pages.mjs && ' +
@@ -77,6 +79,23 @@ if (isAndroid) {
     execSync('node scripts/prepare-bundled-dlc.mjs', { cwd: root, stdio: 'inherit' });
   }
 } else {
+  // fast 模式：只改了 Rust 时跳过前端/插件/DLC 全链；改了前端或插件请用完整构建。
+  const stale = frontendStale();
+  const hasPlugins = existsSync(join(root, 'bundled-plugins', 'manifest.json'));
+  const hasDlc = existsSync(join(root, 'bundled-dlc'));
+  const hasSidecar = existsSync(join(root, 'src-tauri', 'binaries', 'ai-collab-mcp.exe'));
+  const canSkip = skipUnchanged && !stale && hasPlugins && hasDlc && hasSidecar;
+  console.log(
+    `[before-build] 决策 skipUnchanged=${skipUnchanged} stale=${stale} plugins=${hasPlugins} dlc=${hasDlc} sidecar=${hasSidecar} canSkip=${canSkip}`,
+  );
+  if (decisionOnly) {
+    console.log('[before-build] decision-only，不执行构建');
+    process.exit(0);
+  }
+  if (canSkip) {
+    console.log('[before-build] 桌面 FAST：前端/插件/DLC 未变，跳过完整构建链');
+    process.exit(0);
+  }
   console.log('[before-build] 桌面：执行完整构建链');
   execSync(FULL_CHAIN, { cwd: root, stdio: 'inherit', shell: true });
 }

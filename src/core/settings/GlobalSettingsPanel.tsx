@@ -1406,6 +1406,11 @@ export function GlobalSettingsPanel() {
                             {updaterInfo.body}
                           </div>
                         )}
+                        {updaterInfo.size ? (
+                          <div className="mt-2 text-xs text-neutral-400 dark:text-stone-500">
+                            {t('updater.packageSize', { size: fmtSize(updaterInfo.size) })}
+                          </div>
+                        ) : null}
                         <div className="mt-3 flex items-center justify-end">
                           <button
                             onClick={() => void updaterStart()}
@@ -1424,12 +1429,19 @@ export function GlobalSettingsPanel() {
                           <Loader2 size={15} className="animate-spin text-[var(--element-bg)]" />
                           {t('updater.downloading')}
                         </div>
-                        <div className="mt-3 h-2 overflow-hidden rounded-full bg-neutral-200 dark:bg-stone-700">
-                          <div
-                            className={`h-full rounded-full bg-[var(--element-bg)] transition-all duration-200 ${updaterTotal > 0 ? '' : 'w-1/3 animate-pulse'}`}
-                            style={updaterTotal > 0 ? { width: `${updaterPercent}%` } : undefined}
-                          />
-                        </div>
+                        {updaterTotal > 0 ? (
+                          <div className="mt-3 h-2 overflow-hidden rounded-full bg-neutral-200 dark:bg-stone-700">
+                            <div
+                              className="h-full rounded-full bg-[var(--element-bg)] transition-all duration-200"
+                              style={{ width: `${updaterPercent}%` }}
+                            />
+                          </div>
+                        ) : (
+                          <div className="mt-3 flex items-center gap-2 text-xs text-neutral-400 dark:text-stone-500">
+                            <Loader2 size={13} className="animate-spin" />
+                            {t('updater.preparing')}
+                          </div>
+                        )}
                         <div className="mt-2 flex justify-between text-xs text-neutral-400 dark:text-stone-500">
                           <span>
                             {updaterTotal > 0

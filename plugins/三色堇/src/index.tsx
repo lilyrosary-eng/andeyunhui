@@ -8,6 +8,10 @@ import { setCurrentBookPath, getCurrentBookPath } from './readingStore';
 import { getHighlight, listBooksWithPath, listHighlights } from './readingHighlights';
 import { useRootPaths, EmptyState, NoResultsState, useStreamingOpen, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
+import { CloudDrawer, CloudIcon } from '@shared/CloudDrawer';
+import { OnlineBookView } from './online/OnlineBookView';
+import { toBookPlatform } from './online/bookPlatforms';
+import { useNetworkSites } from '@shared/useNetworkSites';
 
 const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback, useRef, startTransition } = React;
@@ -264,6 +268,11 @@ function ReadingModule() {
 
   // 阅读进度统计面板 + 持久化（内嵌常驻，无需开关）
   const [showStats, setShowStats] = useState(false);
+  // 「云」网络书库：在线视图 + 站点抽屉（与视频/图片/Web 接口同一套交互）
+  const [showNetwork, setShowNetwork] = useState(false);
+  const [networkDrawerOpen, setNetworkDrawerOpen] = useState(false);
+  const [pendingSiteId, setPendingSiteId] = useState<string | null>(null);
+  const bookSiteList = useNetworkSites('book').map(toBookPlatform);
   const currentBookRef = useRef<ReadingBook | null>(null);
   const progressRef = useRef<ReadingProgress | null>(null);
   const dirtyRef = useRef(false);
@@ -707,9 +716,39 @@ function ReadingModule() {
     );
   }
 
+  // 「网络书库」整块替换模块内容（含自己的站点列表侧栏），与视频/图片在线视图同构
+  if (showNetwork) {
+    return (
+      <div className="relative flex-1 h-full overflow-hidden">
+        <OnlineBookView
+          initialSiteId={pendingSiteId}
+          onExit={() => setShowNetwork(false)}
+          onOpenModuleSettings={handleOpenSettings}
+        />
+      </div>
+    );
+  }
+
+  // 侧栏标题栏的「云」按钮：与视频/图片/Web 接口同一位置与同一样式
+  const cloudButton = (
+    <button
+      onClick={() => setNetworkDrawerOpen((v) => !v)}
+      title="云"
+      className={`btn-press flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs transition-colors ${
+        showNetwork || networkDrawerOpen
+          ? 'text-[var(--element-color-raw)] bg-[var(--element-muted)]'
+          : 'text-neutral-500 dark:text-stone-400 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)]'
+      }`}
+    >
+      <CloudIcon size={15} />
+      <span>云</span>
+    </button>
+  );
+
   return (
-    <div className="flex-1 flex h-full overflow-hidden">
+    <div className="relative flex-1 flex h-full overflow-hidden">
       <ReadingSidebar
+        titleActions={cloudButton}
         books={books}
         currentFilePath={currentBook?.filePath ?? null}
         openingFilePath={openingFilePath}
@@ -770,6 +809,45 @@ function ReadingModule() {
           </div>
         )}
       </div>
+
+      {/* 网络书库选择抽屉：与视频「云视频」/ 图片「网络图片」/ Web 接口同一套组件 */}
+      <CloudDrawer
+        open={networkDrawerOpen}
+        onClose={() => setNetworkDrawerOpen(false)}
+        title="网络书库"
+        sectionLabel="书库来源"
+        groups={[
+          {
+            key: 'local',
+            title: '本地书库',
+            desc: '本机书籍文件',
+            active: !showNetwork,
+            onSelect: () => {
+              setShowNetwork(false);
+              setNetworkDrawerOpen(false);
+            },
+          },
+          {
+            key: 'network',
+            title: '网络书库',
+            desc: '官方页面 · 浏览器窗口',
+            active: showNetwork,
+            defaultExpanded: true,
+            items: bookSiteList.map((p) => ({
+              id: p.id,
+              name: p.name,
+              desc: p.desc,
+              accent: p.accent,
+            })),
+            onPick: (id) => {
+              setPendingSiteId(id);
+              setShowNetwork(true);
+              setNetworkDrawerOpen(false);
+            },
+          },
+        ]}
+        footer="只打开官方页面：登录与阅读都在站点自己完成，我们不抓取正文、不批量下载。"
+      />
     </div>
   );
 }

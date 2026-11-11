@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZGMUEyRDYzQUZGOTQ5NUYKUldSZlNmbXZZeTBhYnprSUU1MzZUSkRDUnIwaHovNnR3VzZseUxlK3FsQ0gxQy92WE1VSk1DS0UK",
+      "endpoints": [
+        "https://github.com/lilyrosary-eng/andeyunhui/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

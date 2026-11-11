@@ -39,7 +39,6 @@ export function OnlineSidebarShell({
   icon,
   title,
   moduleId,
-  onClose,
   onOpenModuleSettings,
   onOpenStats,
   statsActive,
@@ -50,15 +49,13 @@ export function OnlineSidebarShell({
   titleActions,
   children,
 }: OnlineSidebarShellProps) {
-  // 标题兼容：调用方若传字符串（未自带返回按钮），则包一层可点按钮调用 onClose。
-  // 音乐侧栏自行传入 button 元素（不受影响）；视频侧栏也自行传入 button（双保险）。
+  // 标题一律只做展示：模块切换统一走标题栏右侧的云按钮，
+  // 避免用户形成「点标题返回」的另一套心智模型（在线视图里最容易迷路的就是这一点）。
   const titleNode =
     typeof title === 'string'
-      ? React.createElement('button', {
+      ? React.createElement('span', {
           key: 'shell-title',
-          onClick: () => onClose(),
-          className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 hover:text-[var(--element-color-raw)] transition-colors',
-          title: '返回',
+          className: 'font-bold text-lg text-neutral-800 dark:text-stone-100',
         }, title)
       : title;
 

@@ -71,6 +71,8 @@ interface ReadingSidebarProps {
   onHighlightJump?: (chapterIndex: number, highlightId: string) => void;
   onBackToBooks: () => void;
   onOpenStats: () => void;
+  /** 标题栏右侧插槽（「云」网络书库入口） */
+  titleActions?: React.ReactNode;
 }
 
 // ========== 图标 ==========
@@ -293,7 +295,7 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
     searchQuery, onSearchChange,
     onBookClick, onOpenSettings, onChangeRoot,
     currentBook, currentChapterIndex, onChapterClick, onHighlightJump, onBackToBooks,
-    onOpenStats,
+    onOpenStats, titleActions,
   } = props;
 
   // 侧边栏第三个按钮：阅读统计（列出全部书籍，无需先打开某本书）
@@ -648,6 +650,7 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
           icon: React.createElement(BookIcon),
           title: currentBook.title,
           onOpenModuleSettings: onOpenSettings,
+          titleActions,
           footerExtra: statsButton,
           searchQuery: '',
           onSearchChange: () => {},
@@ -731,6 +734,7 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
         icon: React.createElement(BookIcon),
         title: T('reading.title'),
         onOpenModuleSettings: onOpenSettings,
+        titleActions,
         footerExtra: statsButton,
         searchQuery,
         onSearchChange,

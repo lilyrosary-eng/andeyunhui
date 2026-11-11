@@ -1,6 +1,6 @@
 {
   "id": "capsule",
-  "name": "黄金棋盘",
+  "name": "绣球",
   "version": "1.0.0",
   "hostApiVersion": 1,
   "permissions": {
@@ -14,6 +14,6 @@
   "visible": true,
   "parent": "niaoluo",
   "codename": "茑萝",
-  "desc": "屏幕顶部居中常驻的黄金棋盘，后续功能待扩展。",
+  "desc": "屏幕顶部居中常驻的绣球浮岛，集成文件搜索 / 局域网传输 / 资源监视。",
   "deps": []
 }

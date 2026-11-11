@@ -70,6 +70,7 @@ export function NotesSidebar() {
   const onCreateNote = useNotesStore(s => s.createNote);
   const onModuleSetting = useAppStore(s => s.toggleNoteSettings);
   const networkOpen = useNotesStore(s => s.networkOpen);
+  const networkSiteId = useNotesStore(s => s.networkSiteId);
   const setNetworkDrawerOpen = useNotesStore(s => s.setNetworkDrawerOpen);
   const drawerOpen = useNotesStore(s => s.networkDrawerOpen);
 
@@ -79,7 +80,7 @@ export function NotesSidebar() {
       onClick={() => setNetworkDrawerOpen(!drawerOpen)}
       title="云"
       className={`btn-press flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs transition-colors ${
-        networkOpen || drawerOpen
+        networkOpen || networkSiteId || drawerOpen
           ? 'text-[var(--element-color-raw)] bg-[var(--element-muted)]'
           : 'text-neutral-500 dark:text-stone-400 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)]'
       }`}

@@ -18,6 +18,7 @@ import { GlobalContextMenu } from '@/core/contextMenu/GlobalContextMenu';
 import { AutofillHost } from '@/core/autofill/AutofillHost';
 // Agent 工具审批的全局确认条：主窗口根节点挂一次，覆盖 AI 对话 / 工作台。
 import { ToolApprovalHost } from '@/components/ai-chat/ToolApprovalHost';
+import { UpdateNotifier } from '@/components/updater/UpdateNotifier';
 import { initHostCommandProviders } from '@/core/commandPalette/hostProviders';
 import { setModuleActivator } from '@/core/navigation/navigation';
 import { attachDeepLinkClickHandler } from '@/core/navigation/deepLink';
@@ -802,6 +803,8 @@ function App() {
       <AutofillHost />
       {/* Agent 工具审批确认条：放在窗口根，任何 AI 入口都能看到并处理 */}
       <ToolApprovalHost />
+      {/* Windows 更新提示 / 下载进度 / 安装遮罩（非 Windows 直接返回 null） */}
+      <UpdateNotifier />
       {/* 数据迁移进度遮罩：迁移进行中叠加在加载页之上，避免用户以为卡死 */}
       {migrationPct !== null && (
         <div className="fixed inset-0 z-[var(--layer-fullscreen)] flex items-center justify-center bg-black/40 backdrop-blur-sm">

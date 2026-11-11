@@ -17,6 +17,10 @@ import type { AiWorkProduct } from '@/core/ai/aiWorkProducts';
 import type { CollabRoom } from '@/core/ai/aiCollab';
 
 export interface AiChatSidebarProps {
+  /** 模块花名（如「风信子」）：只影响侧栏标题，缺省回退功能名「AI 对话」 */
+  displayName?: string;
+  /** 侧栏标题悬停文案：缺省按「花名 · AI 对话」拼装 */
+  displayTooltip?: string;
   conversations: Conversation[];
   activeId: string;
   onSelect: (id: string) => void;
@@ -70,6 +74,8 @@ export interface AiChatSidebarProps {
 }
 
 export const AiChatSidebar = memo(function AiChatSidebar({
+  displayName,
+  displayTooltip,
   conversations,
   activeId,
   onSelect,
@@ -247,10 +253,12 @@ export const AiChatSidebar = memo(function AiChatSidebar({
     </div>
   );
 
-  let title = 'AI 对话';
-  if (isCollab) title = 'AI 协作';
-  else if (!isChat && inProduct) title = '专属产物库';
-  else if (showArea) title = '任务';
+  // 花名用于模块默认标题；子视图（协作/任务/产物库）仍用各自的功能标题。
+  let title = displayName ?? 'AI 对话';
+  let titleTooltip = displayTooltip ?? (displayName ? `${displayName} · AI 对话` : undefined);
+  if (isCollab) { title = 'AI 协作'; titleTooltip = undefined; }
+  else if (!isChat && inProduct) { title = '专属产物库'; titleTooltip = undefined; }
+  else if (showArea) { title = '任务'; titleTooltip = undefined; }
 
   let icon = <Bot size={20} />;
   if (isCollab) icon = <Network size={20} />;
@@ -292,6 +300,7 @@ export const AiChatSidebar = memo(function AiChatSidebar({
       collapsedSurfaceClass="bg-[#f5f5f0] dark:bg-[#1c1917]"
       icon={icon}
       title={title}
+      titleTooltip={titleTooltip}
       primaryAction={primaryAction}
       secondaryActions={
         isChat

@@ -45,6 +45,8 @@ export interface WebSidebarItem {
 export interface WebSidebarShellProps {
   icon?: React.ReactNode;
   title: string;
+  /** 标题悬停文案（「花名 · 功能名」）；不传则无 tooltip */
+  titleTooltip?: string;
   searchQuery?: string;
   onSearchChange?: (value: string) => void;
   searchPlaceholder?: string;
@@ -145,7 +147,7 @@ function WebSidebarItem({ item, active, onSelect, onStart, onEdit, onDelete }: {
 }
 
 export function WebSidebarShell({
-  icon, title, searchQuery, onSearchChange, searchPlaceholder, onOpenModuleSettings,
+  icon, title, titleTooltip, searchQuery, onSearchChange, searchPlaceholder, onOpenModuleSettings,
   primaryAction, titleActions, onToggleTerminal, terminalActive, onRefresh,
   onStart, onEdit, onDelete, items, selectedId, onSelect, emptyText,
 }: WebSidebarShellProps) {
@@ -187,7 +189,7 @@ export function WebSidebarShell({
     }, [
       React.createElement('div', { key: 'head', className: 'flex items-center gap-2 mb-4 px-1' },
         icon ?? React.createElement(GlobeIcon),
-        React.createElement('span', { key: 't', className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 truncate' }, title),
+        React.createElement('span', { key: 't', title: titleTooltip, className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 truncate' }, title),
       ),
       React.createElement('div', { key: 'primary', className: 'mb-3' },
         React.createElement('button', {
@@ -218,6 +220,7 @@ export function WebSidebarShell({
     moduleId: 'web-interface',
     icon: icon ?? React.createElement(GlobeIcon),
     title,
+    titleTooltip,
     onOpenModuleSettings,
     searchQuery,
     onSearchChange,

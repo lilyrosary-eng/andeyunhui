@@ -1785,4 +1785,6 @@ export const deDE: Record<string, string> = {
   'updater.cancel': 'Abbrechen',
   'updater.openLogs': 'Logs öffnen',
   'updater.installStuckHint': 'Wenn die App nicht automatisch neu startet, öffnen Sie sie bitte manuell; Details unter „Logs öffnen“.',
+  'updater.packageSize': 'Paketgröße {size}',
+  'updater.preparing': 'Größe wird ermittelt…',
 };

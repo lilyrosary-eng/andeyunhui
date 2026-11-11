@@ -145,6 +145,8 @@ function ImageModule() {
   const [showStats, setShowStats] = useState(false);
   // 「网络」视图：pixiv 等官方网页壳（与视频模块同构：侧栏换成平台列表）
   const [showNetwork, setShowNetwork] = useState(false);
+  // 抽屉里选中的平台 id：必须传给在线视图，否则它只会打开列表里的第一个（曾经点花瓣/涂鸦都开 pixiv）
+  const [pendingPlatformId, setPendingPlatformId] = useState<string | null>(null);
   // 平台选择抽屉（入口与视频/音乐一致：侧栏标题栏的「网络」按钮 → 右侧抽屉）
   const [networkDrawerOpen, setNetworkDrawerOpen] = useState(false);
   // 平台列表实时订阅共享注册表：设置里增删站点后抽屉立即刷新
@@ -492,6 +494,7 @@ function ImageModule() {
     return (
       <div className="relative flex-1 h-full overflow-hidden">
         <OnlineImageView
+          initialPlatformId={pendingPlatformId}
           onExit={() => setShowNetwork(false)}
           onOpenModuleSettings={handleOpenModuleSettings}
         />
@@ -652,7 +655,8 @@ function ImageModule() {
               // 需要代理的站点提前标注，避免用户以为是模块坏了
               badge: p.needsProxy ? '需代理' : undefined,
             })),
-            onPick: () => {
+            onPick: (id) => {
+              setPendingPlatformId(id);
               setShowNetwork(true);
               setNetworkDrawerOpen(false);
             },

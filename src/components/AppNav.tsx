@@ -76,8 +76,14 @@ export function AppNav({ mainPluginIds, hidden = false }: AppNavProps) {
         {pluginRegistry && mainPluginIds.map((pluginId) => {
           const def = pluginRegistry.get(pluginId);
           if (!def || !def.visible) return null;
+          // 双轨呈现：有花名时「花名 · 功能名」，否则沿用「功能名（代号）」
+          const navTooltip = def.displayName
+            ? `${def.displayName} · ${def.name}`
+            : def.codename
+              ? `${def.name}（${def.codename}）`
+              : def.name;
           return (
-            <button key={pluginId} onClick={() => handleSwitchModule(pluginId)} className={navBtnClass(activeModule === pluginId)} title={def.codename ? `${def.name}（${def.codename}）` : def.name}>
+            <button key={pluginId} onClick={() => handleSwitchModule(pluginId)} className={navBtnClass(activeModule === pluginId)} title={navTooltip}>
               <PluginIcon name={def.iconName} size={20} fallback={<span className="text-xs">{def.name[0]}</span>} />
             </button>
           );

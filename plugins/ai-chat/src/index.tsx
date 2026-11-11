@@ -28,6 +28,11 @@ import { loadAiWorkParallelism, saveAiWorkParallelism } from '@/core/ai/aiWorkSe
 import type { AiWorkTab } from '@/components/ai-chat/AiWorkTabs';
 import { AiWorkProductSettings } from './AiWorkProductSettings';
 
+// 用户可见的模块展示名：花名用于侧栏标题 / 设置页 / 命令面板，功能名保留为副标题与检索词。
+// id、目录、manifest.id 仍是 ai-chat，不做任何改动。
+const MODULE_DISPLAY_NAME = '风信子';
+const MODULE_FUNCTION_NAME = 'AI 对话';
+
 const COMPANION_ENABLED_KEY = 'andeyunhui.aichat.companion.enabled';
 function readCompanionEnabled(): boolean {
   try { return localStorage.getItem(COMPANION_ENABLED_KEY) === '1'; } catch { return false; }
@@ -96,7 +101,7 @@ function ensurePaletteConvs(force = false): void {
 try {
   window.__HOST_API__?.registerCommandProvider?.({
     id: 'ai-chat',
-    label: 'AI 对话',
+    label: MODULE_DISPLAY_NAME,
     moduleId: 'ai-chat',
     priority: 20,
     refresh: () => ensurePaletteConvs(),
@@ -313,6 +318,7 @@ const Root = memo(function Root() {
   return (
     <div className="relative flex-1 flex h-full overflow-hidden">
       <AiChatSidebar
+        displayName={MODULE_DISPLAY_NAME}
         conversations={conversations}
         activeId={activeId}
         onSelect={selectConv}
@@ -398,7 +404,7 @@ const Root = memo(function Root() {
             <AiWorkProductSettings />
           </ModuleSettingsPanel>
         ) : (
-        <ModuleSettingsPanel title="AI 对话" icon={<Bot size={20} />} onClose={() => setSettingsOpen(false)}>
+        <ModuleSettingsPanel title={MODULE_DISPLAY_NAME} subtitle={MODULE_FUNCTION_NAME} icon={<Bot size={20} />} onClose={() => setSettingsOpen(false)}>
           <div className="rounded-xl border border-black/10 dark:border-white/10 p-4">
             <label className="flex cursor-pointer items-center justify-between gap-3">
               <div>
@@ -607,7 +613,8 @@ Root.displayName = 'AiChatRoot';
 
 window.__PLUGIN_REGISTRY__?.register({
   id: 'ai-chat',
-  name: 'AI 对话',
+  name: MODULE_FUNCTION_NAME,
+  displayName: MODULE_DISPLAY_NAME,
   kind: 'module',
   visible: true,
   iconName: 'Bot',

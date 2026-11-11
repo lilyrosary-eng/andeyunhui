@@ -241,10 +241,9 @@ export default function OnlineMusicSidebar(props: OnlineMusicSidebarProps) {
   } = props;
 
   const likedActive = !!likedPlaylist && activePlaylistId === likedPlaylist.id && activeTempId == null;
-  const titleEl = React.createElement('button', {
-    onClick: onClose,
-    className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 hover:text-[var(--element-color-raw)] transition-colors flex items-center gap-2',
-    title: '返回本地音乐',
+  // 标题只做展示：模块切换统一走标题栏右侧的云按钮（抽屉里有「本地音乐」项）
+  const titleEl = React.createElement('div', {
+    className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 flex items-center gap-2',
   }, brandLabel);
 
   // 标题行右侧「网络」入口：与视频/AI 对话模块同槽位（ModuleSidebarShell.titleActions）

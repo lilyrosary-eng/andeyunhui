@@ -128,7 +128,12 @@ declare global {
         category?: string;
         desc?: string;
         codename?: string;
-        destroy?: () => void;
+        /** 用户可见的花名（侧栏标题 / 命令面板）；缺省回退 name，不影响 id 与加载 */
+        displayName?: string;
+        /** 花名的悬停文案；缺省按「花名 · 功能名」拼装 */
+        displayTooltip?: string;
+        /** 卸载/重载前调用；reason='reload' 为热重载，'shutdown' 为用户禁用/删除 */
+        destroy?: (reason?: 'reload' | 'shutdown') => void;
       }) => void;
       get: (id: string) => {
         id: string;
@@ -143,7 +148,12 @@ declare global {
         category?: string;
         desc?: string;
         codename?: string;
-        destroy?: () => void;
+        /** 用户可见的花名（侧栏标题 / 命令面板）；缺省回退 name，不影响 id 与加载 */
+        displayName?: string;
+        /** 花名的悬停文案；缺省按「花名 · 功能名」拼装 */
+        displayTooltip?: string;
+        /** 卸载/重载前调用；reason='reload' 为热重载，'shutdown' 为用户禁用/删除 */
+        destroy?: (reason?: 'reload' | 'shutdown') => void;
       } | undefined;
       getAll: () => {
         id: string;
@@ -158,7 +168,12 @@ declare global {
         category?: string;
         desc?: string;
         codename?: string;
-        destroy?: () => void;
+        /** 用户可见的花名（侧栏标题 / 命令面板）；缺省回退 name，不影响 id 与加载 */
+        displayName?: string;
+        /** 花名的悬停文案；缺省按「花名 · 功能名」拼装 */
+        displayTooltip?: string;
+        /** 卸载/重载前调用；reason='reload' 为热重载，'shutdown' 为用户禁用/删除 */
+        destroy?: (reason?: 'reload' | 'shutdown') => void;
       }[];
       getChildren: (parentId: string) => {
         id: string;
@@ -173,10 +188,19 @@ declare global {
         category?: string;
         desc?: string;
         codename?: string;
-        destroy?: () => void;
+        /** 用户可见的花名（侧栏标题 / 命令面板）；缺省回退 name，不影响 id 与加载 */
+        displayName?: string;
+        /** 花名的悬停文案；缺省按「花名 · 功能名」拼装 */
+        displayTooltip?: string;
+        /** 卸载/重载前调用；reason='reload' 为热重载，'shutdown' 为用户禁用/删除 */
+        destroy?: (reason?: 'reload' | 'shutdown') => void;
       }[];
       unregister: (id: string) => void;
       setVisible: (id: string, visible: boolean) => boolean;
+      /** 长生命周期资源共享槽：跨插件热重载保留（如音乐播放内核） */
+      getSharedSlot: <T = unknown>(key: string) => T | undefined;
+      setSharedSlot: (key: string, value: unknown) => void;
+      deleteSharedSlot: (key: string) => void;
     };
     __HOST_UI__: Record<string, React.ComponentType<Record<string, unknown>>>;
     __HOST_I18N__: {

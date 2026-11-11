@@ -239,14 +239,15 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
     const seen = new Set<string>();
     const groupLabel = (key: string) => staticGroups.find((g) => g.key === key)?.label ?? key;
 
-    const moduleItem = (id: string, title: string, subtitle: string, iconName?: string): CommandItem => ({
+    const moduleItem = (id: string, title: string, subtitle: string, iconName?: string, altKeywords = ''): CommandItem => ({
       id: `module:${id}`,
       title,
       subtitle,
       group: groupLabel('modules'),
       groupKey: 'modules',
       icon: iconName ? <PluginIcon name={iconName} size={16} fallback={<Puzzle size={16} />} /> : <Puzzle size={16} />,
-      keywords: `${id} ${subtitle}`,
+      // 双轨检索：花名 + 功能名都要能搜到（改花名后输入功能词仍可命中）
+      keywords: `${id} ${altKeywords} ${subtitle}`.trim(),
       run: () => setActiveModule(id),
     });
 
@@ -262,10 +263,18 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
 
     // 插件模块
     for (const def of pluginRegistry?.getAll() ?? []) {
-      if (def.kind !== 'module' || def.visible === false || seen.has(def.id)) continue;
+      if (def.kind !== 'module' || seen.has(def.id)) continue;
+      // 顶层模块的 visible=false 表示主动隐藏入口；子插件的 visible=false 只是「不进顶部图标栏」，
+      // 它们由父模块侧栏承载，必须仍然可被命令面板检索到（否则茑萝子模块只能靠侧栏点）。
+      if (def.visible === false && !def.parent) continue;
       const parentLabel = def.parent === 'niaoluo' ? '茑萝子模块' : def.parent ? `子模块 · ${def.parent}` : '模块';
-      const subtitle = def.codename ? `${parentLabel} · ${def.codename}` : parentLabel;
-      items.push(moduleItem(def.id, def.name, subtitle, def.iconName));
+      // 花名与功能名不同时，副标题显示功能名；否则沿用代号。
+      // 茑萝子插件的 codename 统一是父模块花名「茑萝」，与 parentLabel 重复，直接省略。
+      const secondary = def.displayName
+        ? (def.displayName !== def.name ? def.name : '')
+        : (def.codename && def.codename !== '茑萝' ? def.codename : '');
+      const subtitle = secondary ? `${parentLabel} · ${secondary}` : parentLabel;
+      items.push(moduleItem(def.id, def.displayName ?? def.name, subtitle, def.iconName, `${def.displayName ?? ''} ${def.name}`));
       seen.add(def.id);
     }
 

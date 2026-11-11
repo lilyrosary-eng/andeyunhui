@@ -1787,4 +1787,6 @@ export const zhTW: Record<string, string> = {
   'updater.cancel': '取消',
   'updater.openLogs': '檢視記錄',
   'updater.installStuckHint': '若長時間未自動重新啟動，請手動重新開啟應用程式；詳細記錄請見「檢視記錄」。',
+  'updater.packageSize': '安裝包大小 {size}',
+  'updater.preparing': '正在取得大小…',
 };

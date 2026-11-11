@@ -11,6 +11,11 @@
     "commands": [
       "add_to_blacklist",
       "ai_quick_ask",
+      "browser_close",
+      "browser_focus",
+      "browser_open",
+      "browser_open_external",
+      "browser_sniff",
       "cancel_open_book",
       "cancel_scan",
       "get_all_notes",

@@ -179,3 +179,8 @@ _tmp_*
 .superpowers/
 # 绘画插件的临时浏览器 harness（本地验证用，不是交付物）。
 .huihua-harness.html
+
+# 应用内更新发布物（签名后的安装包 / latest.json）
+dist-updater/
+# 端到端更新实测用的临时清单/包
+dist-updater-test/

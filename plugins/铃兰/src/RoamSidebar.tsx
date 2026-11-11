@@ -215,11 +215,9 @@ export function RoamSidebar(props: RoamSidebarProps) {
     );
   };
 
-  // 标题行：Sparkles + "漫游电台"（「网络」入口统一放在 titleActions）
-  const titleEl = React.createElement('button', {
-    onClick: onClose,
-    className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 hover:text-[var(--element-color-raw)] transition-colors flex items-center gap-2',
-    title: '返回本地音乐',
+  // 标题行：Sparkles + "漫游电台"（只做展示；模块切换统一走右侧云按钮）
+  const titleEl = React.createElement('div', {
+    className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 flex items-center gap-2',
   }, [
     React.createElement(Sparkles, { key: 'icon', size: 18, className: 'text-[#7c4dff] dark:text-[#b388ff]' }),
     '漫游电台',

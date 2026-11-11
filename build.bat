@@ -22,9 +22,43 @@ REM ============================================================
 
 cd /d "%~dp0"
 
+REM ============================================================
+REM FAST 模式：build.bat fast
+REM   - thin LTO + 8 codegen units（完整 profile 是 fat LTO + 1 CGU，最后大 crate 基本单核）
+REM   - 跳过未变的前端/插件/DLC 全链（只改了 Rust 时）
+REM   - 挂上 sccache（本机已安装）
+REM 默认（build.bat）仍是完整发布 profile，用于最终分发包。
+REM ============================================================
+set "ANDEYUNHUI_FAST=0"
+if /I "%~1"=="fast" set "ANDEYUNHUI_FAST=1"
+if "%ANDEYUNHUI_FAST%"=="1" (
+  set "CARGO_PROFILE_RELEASE_LTO=thin"
+  set "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8"
+  set "ANDEYUNHUI_SKIP_UNCHANGED=1"
+  echo [BUILD] FAST profile: thin LTO / 8 codegen units / sccache / skip unchanged frontend chain
+)
+if not defined RUSTC_WRAPPER set "RUSTC_WRAPPER=sccache"
+
 REM 0. Ensure placeholder folder scaffold (.gitkeep) so no directory is dropped by NSIS/git
 echo [BUILD] [pre] Ensuring placeholder folders...
 node scripts/ensure-placeholders.mjs
+
+REM 0.5. Build Windows updater helper (bundled as binaries/andeyunhui-updater.exe)
+echo [BUILD] [helper] Building updater helper...
+call dev-env.bat >nul 2>&1
+cargo build --release --manifest-path crates\updater-helper\Cargo.toml
+if errorlevel 1 (
+  echo.
+  echo [BUILD] [X] updater helper build failed
+  echo [BUILD] Press any key to close...
+  pause >nul
+  exit /b 1
+)
+copy /Y crates\updater-helper\target\release\andeyunhui-updater.exe src-tauri\binaries\andeyunhui-updater.exe >nul
+if not exist "%USERPROFILE%\.tauri\andeyunhui-updater.key" if not defined ANDEYUNHUI_UPDATER_KEY (
+  echo [BUILD] [!] 找不到更新签名私钥：%USERPROFILE%\.tauri\andeyunhui-updater.key
+  echo [BUILD]     updater 发布物（latest.json）会生成失败；请先 pnpm tauri signer generate。
+)
 
 echo [BUILD] Starting full build...
 echo [BUILD] Working dir: %CD%
@@ -51,6 +85,17 @@ if %BUILD_EXIT% neq 0 (
   echo [BUILD] [X] Tauri build failed (exit %BUILD_EXIT%)
   echo [BUILD] Log: %CD%\build.log
   echo.
+  echo [BUILD] Press any key to close...
+  pause >nul
+  exit /b 1
+)
+
+REM 2.5. Sign the NSIS setup with the project's updater key and generate latest.json
+echo [BUILD] [2.5/3] Generating updater release (sign + latest.json)...
+node scripts\make-updater-release.mjs
+if errorlevel 1 (
+  echo.
+  echo [BUILD] [X] updater release generation failed
   echo [BUILD] Press any key to close...
   pause >nul
   exit /b 1

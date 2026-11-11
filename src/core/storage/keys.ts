@@ -7,6 +7,9 @@ export const KEYS = {
   app: {
     dataRootGuided:    { key: 'dataRootGuided', kind: 'flag', scope: 'desktop', default: '0', note: '首次数据根引导' },
   },
+  updater: {
+    lastCheck:         { key: 'andeyunhui.updater.lastCheck', kind: 'string', scope: 'desktop', default: '0', note: '上次自动检查更新时间戳（ms）' },
+  },
   transfer: {
     onboarded:         { key: 'andeyunhui.transfer.onboarded', kind: 'flag', scope: 'desktop', default: '0' },
     mobileShare:       { key: 'andeyunhui.mobile.share', kind: 'json', scope: 'mobile', note: '移动端分享中转载荷' },
@@ -16,9 +19,9 @@ export const KEYS = {
     // 默认 '1'（显示）：RAG 为默认开启的茑萝子模块；用户在「全局设置 → 茑萝」关掉后写 '0'，重启仍保持关闭
     ragVisible:        { key: 'niaoluo:rag-visible', kind: 'flag', scope: 'shared', default: '1' },
     capsuleTab:        { key: 'niaoluo:capsule-tab', kind: 'string', scope: 'shared', default: 'search' },
-    // 网络拓展：用户在「设置 → 茑萝」里为各模块追加的站点（JSON 数组，只存用户新增项；
-    // 内置站点仍写在各自插件里，避免升级覆盖）。插件侧经 plugins/_shared/networkSites.ts 读取。
-    networkSites:      { key: 'andeyunhui.network.sites', kind: 'json', scope: 'shared', note: '网络拓展自定义站点：video/image/web 三组' },
+    // 网络拓展：用户在「设置 → 茑萝」里管理的站点（v2 对象：自定义项 + 内置项改写/隐藏 + 组内顺序；
+    // 旧版是纯数组，读取时自动迁移）。插件侧经 plugins/_shared/networkSites.ts 读取。
+    networkSites:      { key: 'andeyunhui.network.sites', kind: 'json', scope: 'shared', note: '网络拓展：自定义站点/内置改写/隐藏/组内顺序（video/image/web/book/note/music）' },
   },
   notes: {
     // 网络检索结果的呈现方式：paged=分页 / infinite=无限下拉

@@ -52,6 +52,7 @@ React + Rust，基于 Tauri v2 构建，同一套代码同时产出 Windows 桌�
 - 桌面宠物（桌宠）· 自定义桌宠系统：透明浮窗常驻桌面最顶层，支持拖拽移动、单击行走/双击切主窗/右键弹跳互动；多状态素材体系（idle / work / 自定义），每状态可绑多张图片或视频帧；用户可在设置面板导入自己的图片/视频作为自定义素材（官方基线与用户导入分离标记）；预设系统支持保存/切换完整方案快照（manifest + 缩放/透明度/点击穿透等设置）；系统资源监控联动（>60% CPU/内存占用自动切换「工作」动画）；视频逐帧抠图透明渲染（`<video>` 逐帧提取，IPC <1.5MB 时 `asset://` 兜底）。
 - 跨设备传输 / 中转站：跨模块「中转站」暂存区、原生文件拖出（Windows DoDragDrop）、设备间文件/会话传输（接收落盘到指定保存目录并导入）。
 - 系统集成：单实例守卫、系统托盘（自定义 UI 菜单）、会话日志系统、Windows 任务栏媒体集成（SMTC）、数据根可配置（junction 迁移，支持把全部用户数据迁到非系统盘）。
+- 应用内更新（Windows）：启动后自动检查（每 24h）、发现新版提示、下载进度可见；用户确认后由 SYSTEM 更新助手静默执行 NSIS `/UPDATE` 安装并自动重启。不卸载旧版、不弹 UAC、不改安装路径、不动用户数据；首次包含更新助手的版本仍需正常运行一次安装器（UAC 一次）完成 bootstrap。
 - 扩展中心：内置扩展管理界面，浏览与管理已安装插件与 AI 模型配置。
 - 多语言：内置简体中文、繁体中文、英语、日语、韩语、法语、德语 7 种语言（zh-CN 基准）。
 
@@ -89,6 +90,7 @@ andeyunhui/
 │  ├─ overlay-*.ts          # 截图/录屏/桌宠独立轻量覆盖窗入口
 │  └─ Capsule.tsx           # 浮岛 AI 编程主入口
 ├─ src-tauri/               # 后端（Rust / Tauri）
+│  ├─ nsis/                 # 定制 NSIS 模板/安装钩子（原地升级、更新助手、文件关联、数据保护）
 │  ├─ src/
 │  │  ├─ main.rs            # 应用入口、托盘、单实例、热键、插件协议、FS 监听、数据根迁移
 │  │  ├─ commands.rs        # Tauri command 汇总（笔记/插件/中转站/托盘/工具…）
@@ -100,7 +102,7 @@ andeyunhui/
 │  └─ gen/android/          # Tauri Android 生成工程（tauri android init/build 再生）
 ├─ plugins/                 # 插件源码（茑萝 宿主：办公/AI/桌宠(deskpet)/绘画/RAG/攻防；莲花/铃兰/玉兰/三色堇/薄荷/鸢尾花…）
 ├─ external-deps/           # 重依赖预打包（esbuild IIFE，运行时按需注入；含 ffmpeg、PaddleOCR 等）
-├─ crates/                  # Rust 子 crate（pro-tools-kit 专业工具、gongfang-kit 攻防内核）
+├─ crates/                  # Rust 子 crate（pro-tools-kit 专业工具、gongfang-kit 攻防内核、updater-helper 静默更新助手）
 ├─ scripts/                 # 构建脚本（external-deps、等待页、部署插件、打包等）
 ├─ wait-page/               # 哥特风莲花描边启动/等待页
 ├─ landing-page/            # 对外营销落地页（静态 HTML / CSS / JS）
@@ -118,7 +120,7 @@ andeyunhui/
 
 ## 当前开发状态
 
-- **当前版本**：Windows 桌面端持续推进，最新可构建版本为 2.4.0（NSIS 安装包 `安得云荟_2.4.0_x64-setup.exe`）；版本号以 `src-tauri/tauri.conf.json` 与设置页「关于软件」为准。
+- **当前版本**：Windows 桌面端持续推进，最新可构建版本为 2.4.3（NSIS 安装包 `andeyunhui_2.4.3_x64-setup.exe`）；版本号以 `src-tauri/tauri.conf.json` 与设置页「关于软件」为准。
 - **Android 端**：移动端代码与桌面端同仓库同在 `main` 上维护（`src/mobile/**` 复用同一套 React 前端，`src-tauri/gen/android` 为 Tauri Android 生成工程）。目前仍是规划目标：4 个占位 `onActivate`、设置页版本号硬编码，APK/AAB 尚未正式发布。本 README 中涉及 Android 的描述均为规划目标，安装与使用请以 Windows 桌面端为准。（历史备注：曾有 `feat/android-v1` 的说法，该分支在本地与远程均不存在，实际只有 `backup/android-v1-preclean2` / `backup/android-v1-prefilter` 两个死分支。）
 - **近期重点模块**：Web 接口模块（本地网页服务调试）、AI 办公工作台（AIWork / AIWorkflow，AIGC 产物落地与对话式蓝图），以及阅读 · 三色堇的排版与页码稳定性修复。
 - 版本演进与已知问题详见 [`CHANGELOG.md`](./CHANGELOG.md)，设计与诊断文档见 `docs/`。
@@ -135,6 +137,10 @@ pnpm tauri dev
 # 构建 Windows 安装包（NSIS）
 # 注意：Windows 下建议使用项目自带的 build.bat 走 cmd，避免 pnpm.ps1 传参问题
 build.bat
+
+# 快速迭代（thin LTO / 8 codegen units / sccache；未改前端时跳过前端/插件/DLC 链）
+# 仅改了 Rust 时用它；改前端或插件后用完整 build.bat
+build.bat fast
 
 # 构建 Android（需先 tauri android init，并配置 Android SDK/NDK 与签名）
 pnpm tauri android build
@@ -165,6 +171,23 @@ pnpm lint:fix     # ESLint 自动修复
 > 历史故障：曾误放「shared 版 `ffmpeg.exe` + `avcodec` + `avfilter`」的残缺集 —— 79.7 MiB 依赖打进安装包却完全无法加载（CLI 与进程内编码器都起不来）。上面的校验就是为拦住这种包。
 
 CI / 干净克隆上缺这组文件时，打包会明确报错并中止；不影响常规 `pnpm install` / `pnpm dev` 的前端部分。
+
+## 发布应用内更新（Windows）
+
+1. 运行 `build.bat`：会构建 `crates/updater-helper`、打包 NSIS，并在构建成功后用本项目的更新私钥签名安装包、生成 `dist-updater/latest.json`。
+2. 把 `dist-updater/` 里的安装包、`.sig` 与 `latest.json` 上传到 GitHub Release 的对应版本，并确保该 Release 是 latest。
+3. 客户端端点见 `src-tauri/tauri.windows.conf.json`，默认请求 `https://github.com/lilyrosary-eng/andeyunhui/releases/latest/download/latest.json`。
+4. 更新私钥默认在 `%USERPROFILE%\.tauri\andeyunhui-updater.key`，**不要提交**；公钥固定在 `src-tauri/tauri.windows.conf.json` 与 `crates/updater-helper/src/pubkey.txt`，两处必须一致。
+5. 首次包含更新助手的版本仍需正常运行一次安装器（UAC 一次，安装助手与 SYSTEM 计划任务）；从下一个版本起，更新全程静默，无需卸载或重新选择路径。
+
+**没有服务器时的托管建议：**
+
+- `latest.json` 很小，可以放 **Gitee 仓库 raw / Release**（国内访问稳定、免费）；安装包大，放 Gitee Release（注意附件大小限制）或 **腾讯云 COS / 阿里云 OSS**（按量计费，不需要服务器，通常每月几元）；**Cloudflare R2** 有免费额度，但国内访问不稳定，适合作备用。
+- 生成时可追加镜像，例如 `node scripts/make-updater-release.mjs --mirror-url https://your-mirror/setup.exe`；`latest.json` 会带上 `sha256` 与 `mirrors`，客户端下载前会预检，主源被墙时自动切镜像。
+- 下载使用 `download-kit`（Range 续传、重试、多源、取消、SHA-256）；安装器有 10 分钟超时与进程树清理，应用退出也带硬退出兜底。
+- 如果所有源都不可达，更新中心会提示并保留“打开发布页手动下载”的兜底；主应用不会被下载失败阻塞。
+
+> 更新安装器使用定制 NSIS 模板：升级时跳过“卸载旧版”页与目录页，原地覆盖当前安装目录；卸载器不再提供“删除应用数据”。
 
 ## 插件系统概览
 

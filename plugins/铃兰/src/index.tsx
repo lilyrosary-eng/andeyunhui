@@ -19,6 +19,8 @@ import QishuiSidebar from './QishuiSidebar';
 import { qishuiGetRecommendPlaylists, type QishuiPlaylistCard } from './qishuiApi';
 import NeteaseSidebar from './NeteaseSidebar';
 import { useOnlineSource } from './useOnlineSource';
+import { useNetworkSites } from '../../_shared/useNetworkSites';
+import { MusicSiteView } from './MusicSiteView';
 import type { KugouPlaylistCard } from './kugouApi';
 import NeteaseStatsView from './NeteaseStatsView';
 import NeteaseSettingsPanel from './NeteaseSettingsPanel';
@@ -1313,6 +1315,10 @@ useEffect(() => {
 }, []);
 const [roamSeedTracks, setRoamSeedTracks] = useState<Partial<Record<RoamSource, RoamSeedTrack>>>({});
 const [roamSettingsOpen, setRoamSettingsOpen] = useState(false);
+// 抽屉第三组「自定义网站」：只放用户添加的外部网址（与在线音乐源互不影响）
+const [musicSiteId, setMusicSiteId] = useState<string | null>(null);
+const musicSites = useNetworkSites('music');
+const activeMusicSite = musicSiteId ? (musicSites.find((s) => s.id === musicSiteId) ?? null) : null;
 
 // 进入某个漫游路径：清旧路径缓存，并确保该路径的数据源就绪
 // （铃兰 = 注入本地歌曲池；临时播放栏 = 注入该栏队列快照并随机打散）
@@ -1721,6 +1727,8 @@ useEffect(() => {
 
   const handleSelectPlaylist = useCallback((playlist: Playlist) => {
     setSelectedPlaylist(playlist);
+    // 从「自定义网站」视图切回本地歌单
+    setMusicSiteId(null);
     // 从设置/统计页切回歌单列表
     setShowSettings(false);
     setShowStats(false);
@@ -3056,6 +3064,9 @@ useEffect(() => {
                 />
               </div>
             )
+          ) : activeMusicSite ? (
+            // 抽屉第三组「自定义网站」：外部网址用独立浏览器窗口承载
+            <MusicSiteView site={activeMusicSite} />
           ) : neteaseOpen ? (
             <NeteaseView
               ref={neteaseViewRef}
@@ -3260,6 +3271,7 @@ setKugouOpen(false);
 setQishuiOpen(false);
 setRoamOpen(false);
 setRoamSettingsOpen(false);
+setMusicSiteId(null);
 clearAllRoamCache();
 setRoamHistories(emptyRoamHistories());
 setShowModuleDrawer(false);
@@ -3271,6 +3283,7 @@ setKugouOpen(false);
 setQishuiOpen(false);
 setRoamOpen(false);
 setRoamSettingsOpen(false);
+setMusicSiteId(null);
 clearAllRoamCache();
 setRoamHistories(emptyRoamHistories());
 }}
@@ -3281,6 +3294,7 @@ setNeteaseOpen(false);
 setQishuiOpen(false);
 setRoamOpen(false);
 setRoamSettingsOpen(false);
+setMusicSiteId(null);
 clearAllRoamCache();
 setRoamHistories(emptyRoamHistories());
 // 切换折叠菜单子项时，清理榜单详情 / 收藏夹等内层级状态，避免覆盖漫游 / 我的
@@ -3298,6 +3312,7 @@ setNeteaseOpen(false);
 setKugouOpen(false);
 setRoamOpen(false);
 setRoamSettingsOpen(false);
+setMusicSiteId(null);
 clearAllRoamCache();
 setRoamHistories(emptyRoamHistories());
 setQishuiActivePlaylistId(null);
@@ -3312,6 +3327,19 @@ setRoamSettingsOpen(false);
 setNeteaseOpen(false);
 setKugouOpen(false);
 setQishuiOpen(false);
+setMusicSiteId(null);
+setSelectedPlaylist(null);
+setSearchQuery('');
+}}
+        customSites={musicSites}
+        activeCustomSiteId={musicSiteId}
+onSelectCustomSite={(id: string) => {
+setMusicSiteId(id);
+setNeteaseOpen(false);
+setKugouOpen(false);
+setQishuiOpen(false);
+setRoamOpen(false);
+setRoamSettingsOpen(false);
 setSelectedPlaylist(null);
 setSearchQuery('');
 }}
@@ -3365,6 +3393,10 @@ window.__PLUGIN_REGISTRY__.register({
   component: MusicModule,
   sidebar: undefined,
   settings: undefined,
-  // 热插拔卸载/重载前释放音频资源，避免 audio 元素与监听器泄漏
-  destroy: () => musicPlayer.destroy(),
+  // 生命周期：插件热重载只解绑 UI（detach，播放继续）；
+  // 用户在拓展管理里禁用/删除插件时才 shutdown（真正停播并释放音频）。
+  destroy: (reason) => {
+    if (reason === 'reload') musicPlayer.detach();
+    else musicPlayer.shutdown();
+  },
 });

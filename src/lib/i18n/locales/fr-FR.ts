@@ -1784,4 +1784,6 @@ export const frFR: Record<string, string> = {
   'updater.cancel': 'Annuler',
   'updater.openLogs': 'Ouvrir les journaux',
   'updater.installStuckHint': 'Si l’application ne redémarre pas automatiquement, ouvrez-la manuellement ; voir « Ouvrir les journaux ».',
+  'updater.packageSize': 'Taille du paquet {size}',
+  'updater.preparing': 'Récupération de la taille…',
 };

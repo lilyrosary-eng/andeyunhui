@@ -784,6 +784,49 @@ pub struct ListenRanking {
     pub top_artists: Vec<RankingArtist>,
 }
 
+/// 多歌手分隔符（与 normalize_meta 保持同一套：半角/全角的 / & , ; 以及中文顿号）。
+fn is_artist_separator(c: char) -> bool {
+    matches!(
+        c,
+        '/' | '\u{FF0F}' | '&' | '\u{FF06}' | ',' | '\u{FF0C}' | ';' | '\u{FF1B}' | '、'
+    )
+}
+
+/// 把「A/B & C」这类多歌手串拆成独立歌手，供统计按人计数（每位各计一次）。
+/// - 分隔符与 normalize_meta 一致（半角/全角）
+/// - 去首尾空白、丢弃空段；同一串内按规范化键去重（"A/A" 只算一次）
+/// - 只做字面拆分，不判断语义：AC/DC、Simon & Garfunkel 这类含分隔符的乐队名会被拆开
+///   （track 合并键仍按 normalize_meta 保留整体，两者用途不同）
+pub(crate) fn split_artists(s: &str) -> Vec<String> {
+    fn flush(out: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, raw: &str) {
+        let name = raw.trim();
+        if name.is_empty() {
+            return;
+        }
+        let key = normalize_meta(name);
+        if key.is_empty() {
+            return;
+        }
+        if seen.insert(key) {
+            out.push(name.to_string());
+        }
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut cur = String::new();
+    for c in s.chars() {
+        if is_artist_separator(c) {
+            flush(&mut out, &mut seen, &cur);
+            cur.clear();
+        } else {
+            cur.push(c);
+        }
+    }
+    flush(&mut out, &mut seen, &cur);
+    out
+}
+
 /// 返回最近 N 天的排行与环比：Top 歌曲、Top 歌手，以及与前 N 天的对比。
 pub fn music_get_listen_ranking(app: AppHandle, days: i64) -> Result<ListenRanking, String> {
     let days = days.max(1);
@@ -858,13 +901,28 @@ pub fn music_get_listen_ranking(app: AppHandle, days: i64) -> Result<ListenRanki
             ))
         })
         .map_err(|e| format!("读取 Top 歌手失败: {}", e))?;
+    // Top 歌手：先按「多歌手」拆分（A/B、A & B、A、B…每位各计一次），再按规范化名字合并。
+    // 这样一首 xx/yy 合唱播放一次 → xx、yy 各 +1；之后再听 yy/zz → yy 累计 2 次。
+    // 同一行内重复出现的同一歌手（A/A）只计一次。
     let mut artist_agg: std::collections::HashMap<String, (i64, String, i64)> = std::collections::HashMap::new();
     for row in raw_artists {
         let (artist, pc) = row.map_err(|e| format!("Top 歌手行解析失败: {}", e))?;
-        let key = normalize_meta(&artist);
-        let e = artist_agg.entry(key).or_insert((0, artist.clone(), 0));
-        e.0 += pc;
-        if pc > e.2 { e.2 = pc; e.1 = artist; }
+        let parts = split_artists(&artist);
+        // 整串都是分隔符/空白时保留原名，走下面的空键过滤
+        let parts = if parts.is_empty() { vec![artist] } else { parts };
+        for name in parts {
+            let key = normalize_meta(&name);
+            if key.is_empty() {
+                continue;
+            }
+            let e = artist_agg.entry(key).or_insert((0, name.clone(), 0));
+            e.0 += pc;
+            // 展示名取单行播放次数最高的原文写法（大小写/全角差异时更稳定）
+            if pc > e.2 {
+                e.2 = pc;
+                e.1 = name;
+            }
+        }
     }
     let mut top_artists: Vec<RankingArtist> = artist_agg
         .into_iter()
@@ -897,7 +955,7 @@ pub fn music_get_listen_ranking(app: AppHandle, days: i64) -> Result<ListenRanki
 
 #[cfg(test)]
 mod meta_tests {
-    use super::{normalize_meta, merge_listen_tracks};
+    use super::{normalize_meta, merge_listen_tracks, split_artists};
 
     #[test]
     fn multi_artist_separators_merge_to_same_key() {
@@ -917,6 +975,36 @@ mod meta_tests {
     fn band_names_stay_whole_in_key() {
         // 只归一为稳定键，不拆分语义：AC/DC → "ac dc"，与 "AC DC" 同键
         assert_eq!(normalize_meta("AC/DC"), normalize_meta("AC DC"));
+    }
+
+    #[test]
+    fn split_artists_by_all_supported_separators() {
+        assert_eq!(split_artists("A/B"), vec!["A", "B"]);
+        assert_eq!(split_artists("A & B、C，D；E"), vec!["A", "B", "C", "D", "E"]);
+        assert_eq!(split_artists("周杰伦／费玉清"), vec!["周杰伦", "费玉清"]);
+        assert_eq!(split_artists("A;B,C"), vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn split_artists_trims_and_drops_empty_parts() {
+        assert_eq!(split_artists("  A /  / B  "), vec!["A", "B"]);
+        assert_eq!(split_artists(" / & , "), Vec::<String>::new());
+        assert_eq!(split_artists("单人歌手"), vec!["单人歌手"]);
+        assert_eq!(split_artists(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn split_artists_dedupes_same_name_in_one_string() {
+        // "A/A"、"A/a"、"A/A " 同一行只算一次（规范化键相同）
+        assert_eq!(split_artists("A/A"), vec!["A"]);
+        assert_eq!(split_artists("A/a/A "), vec!["A"]);
+    }
+
+    #[test]
+    fn split_artists_splits_band_names_with_separators() {
+        // 统计口径按字面拆分，与 track 合并键（normalize_meta）的「整体保留」不同。
+        // 含分隔符的乐队名会被拆成多个人统计（AC/DC → AC、DC）。
+        assert_eq!(split_artists("AC/DC"), vec!["AC", "DC"]);
     }
 
     #[test]

@@ -8,6 +8,7 @@ import { getImagePlatforms, toImagePlatform, type ImagePlatform } from './imageP
 import { useNetworkSites } from '@shared/useNetworkSites';
 import { OnlineSidebarShell } from '@shared/OnlineSidebarShell';
 import { WebBrowserShell } from '@shared/WebBrowserShell';
+import { CloudTitleButton, OnlineCloudSwitch } from '@shared/OnlineCloudSwitch';
 
 const { useState, useEffect } = React;
 
@@ -42,6 +43,12 @@ export function OnlineImageView({ initialPlatformId, onExit, onOpenModuleSetting
   const [activeId, setActiveId] = useState<string | null>(
     initialPlatformId ?? platforms[0]?.id ?? null,
   );
+  // 从抽屉再选另一个平台时（本视图已挂载），要跟着切，而不是停留在第一次的平台
+  useEffect(() => {
+    if (initialPlatformId) setActiveId(initialPlatformId);
+  }, [initialPlatformId]);
+  // 「云」抽屉：在线视图里也能直接切平台/回本地，不必先点 logo 返回
+  const [cloudOpen, setCloudOpen] = useState(false);
   const platform = platforms.find((p) => p.id === activeId) ?? null;
 
   // 离开网络视图时只关本模块的浏览器窗口（不能 close_all，否则会连带关掉视频的）
@@ -117,13 +124,11 @@ export function OnlineImageView({ initialPlatformId, onExit, onOpenModuleSetting
     ),
   );
 
+  // 标题只做展示：模块切换统一走标题栏右侧「云」按钮（抽屉里有「本地图库」项）
   const titleEl = React.createElement(
-    'button',
+    'div',
     {
-      onClick: onExit,
-      className:
-        'font-bold text-lg text-neutral-800 dark:text-stone-100 hover:text-[var(--element-color-raw)] transition-colors flex items-center gap-2',
-      title: '返回本地图库',
+      className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 flex items-center gap-2',
     },
     '网络图片',
   );
@@ -137,6 +142,10 @@ export function OnlineImageView({ initialPlatformId, onExit, onOpenModuleSetting
       moduleId: 'image',
       onClose: onExit,
       onOpenModuleSettings,
+      titleActions: React.createElement(CloudTitleButton, {
+        open: cloudOpen,
+        onClick: () => setCloudOpen((v) => !v),
+      }),
       children: platformList,
     }),
     React.createElement(
@@ -163,6 +172,27 @@ export function OnlineImageView({ initialPlatformId, onExit, onOpenModuleSetting
             '请选择平台',
           ),
     ),
+    // 「云」抽屉：在线视图里直接切平台 / 回本地图库
+    React.createElement(OnlineCloudSwitch, {
+      open: cloudOpen,
+      onClose: () => setCloudOpen(false),
+      title: '网络图片',
+      sectionLabel: '图片来源',
+      localLabel: '本地图库',
+      localDesc: '本机文件夹扫描',
+      items: platforms.map((p) => ({
+        id: p.id,
+        name: p.name,
+        desc: p.desc,
+        accent: p.accent,
+        badge: p.needsProxy ? '需代理' : undefined,
+      })),
+      activeId,
+      onPick: (id: string) => setActiveId(id),
+      onLocal: onExit,
+      footer:
+        '只打开官方页面：登录与浏览都在站点自己完成，我们不抓取内容、不批量下载。',
+    }),
   );
 }
 

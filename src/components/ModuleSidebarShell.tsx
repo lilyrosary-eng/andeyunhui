@@ -16,6 +16,8 @@ export interface ModuleSidebarShellProps {
   moduleId: string;
   icon: ReactNode;
   title: string;
+  /** 标题的悬停提示（如「风信子 · AI 对话」）；不传则无 tooltip，标题保持原样 */
+  titleTooltip?: string;
   onOpenModuleSettings?: () => void;
   moduleSettingsLabel?: string;
   footerExtra?: ReactNode;
@@ -49,6 +51,7 @@ export function ModuleSidebarShell({
   moduleId,
   icon,
   title,
+  titleTooltip,
   onOpenModuleSettings,
   moduleSettingsLabel,
   footerExtra,
@@ -154,7 +157,10 @@ export function ModuleSidebarShell({
           {/* 顶部标题区：图标 + 标题 */}
           <div className="shrink-0 flex items-center gap-2 px-4 pt-4 pb-3">
             {icon}
-            <span className="font-bold text-lg tracking-tight text-neutral-800 dark:text-stone-100 flex-1 truncate">{title}</span>
+            <span
+              className="font-bold text-lg tracking-tight text-neutral-800 dark:text-stone-100 flex-1 truncate"
+              title={titleTooltip}
+            >{title}</span>
             {titleActions && (
               <div className="flex items-center gap-1 shrink-0">{titleActions}</div>
             )}

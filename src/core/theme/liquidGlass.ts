@@ -47,6 +47,66 @@ export const LIQUID_GLASS_REFRACTION =
   typeof CSS !== 'undefined' &&
   CSS.supports('backdrop-filter', 'url(#lg)');
 
+/* ------------------------------------------------------------------ *
+ * 本地 A/B 开关（不改变默认行为）
+ *
+ *   svg     当前实现：SVG 位移图 + backdrop-filter
+ *   blur12  只挂普通 blur(12px)，不生成位移图 —— 用来隔离 SVG filter 的成本
+ *   css     只保留 index.css 的玻璃光照层，不启动 manager
+ *   off     连光照层都不加（基线；功能开关本身仍需打开）
+ *
+ * 切换（刷新后生效）：
+ *   localStorage.setItem('calcite:liquid-glass-mode', 'blur12'); location.reload();
+ *   或在 DevTools 控制台：calciteGlassMode('blur12')
+ *   Vite dev server 也可以直接 ?lg=blur12
+ * 不设置时默认 'svg'，生产行为与改动前一致。
+ * ------------------------------------------------------------------ */
+const LG_MODE_KEY = 'calcite:liquid-glass-mode';
+const LG_MODES = ['svg', 'blur12', 'css', 'off'] as const;
+export type LiquidGlassMode = typeof LG_MODES[number];
+
+function isLiquidGlassMode(v: string | null): v is LiquidGlassMode {
+  return v !== null && (LG_MODES as readonly string[]).includes(v);
+}
+
+export function getLiquidGlassMode(): LiquidGlassMode {
+  try {
+    const q = new URLSearchParams(location.search).get('lg');
+    if (isLiquidGlassMode(q)) return q;
+    const stored = localStorage.getItem(LG_MODE_KEY);
+    if (isLiquidGlassMode(stored)) return stored;
+  } catch {
+    // location/localStorage 在某些嵌入环境不可用，保持默认。
+  }
+  return 'svg';
+}
+
+declare global {
+  interface Window {
+    calciteGlassMode?: (mode?: string) => LiquidGlassMode | void;
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.calciteGlassMode = (mode?: string) => {
+    if (!mode) {
+      const cur = getLiquidGlassMode();
+      console.info(`[liquid-glass] mode=${cur} (${LG_MODES.join(' | ')})`);
+      return cur;
+    }
+    if (!isLiquidGlassMode(mode)) {
+      console.warn(`[liquid-glass] unknown mode '${mode}'; use ${LG_MODES.join(', ')}`);
+      return;
+    }
+    try {
+      localStorage.setItem(LG_MODE_KEY, mode);
+      location.reload();
+    } catch (e) {
+      console.warn('[liquid-glass] cannot persist mode:', e);
+    }
+  };
+}
+
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
@@ -204,6 +264,7 @@ interface CacheEntry {
 
 interface Attached {
   key: string;
+  filterKey: string | null;
   value: string;
   original: string;
   originalPriority: string;
@@ -211,6 +272,7 @@ interface Attached {
 }
 
 let running = false;
+let activeMode: LiquidGlassMode = 'svg';
 let svgRoot: SVGSVGElement | null = null;
 let nextFilterId = 0;
 let mutationObserver: MutationObserver | null = null;
@@ -289,9 +351,19 @@ function attach(el: Element): void {
   if (!running || attached.has(el)) return;
   const m = measure(el);
   if (!m) return;
-  const key = `${m.w}|${m.h}|${m.r}`;
-  const entry = acquireFilter(m.w, m.h, m.r);
-  const value = `url(#${entry.filterId}) blur(2px) saturate(1.5)`;
+  let key: string;
+  let filterKey: string | null = null;
+  let value: string;
+  if (activeMode === 'svg') {
+    key = `${m.w}|${m.h}|${m.r}`;
+    const entry = acquireFilter(m.w, m.h, m.r);
+    filterKey = key;
+    value = `url(#${entry.filterId}) blur(2px) saturate(1.5)`;
+  } else {
+    // A/B: 普通高斯模糊，不进入 feImage/feDisplacementMap 图。
+    key = 'blur';
+    value = 'blur(12px) saturate(1.5)';
+  }
   const style = (el as HTMLElement).style;
   const original = style.getPropertyValue('backdrop-filter');
   const originalPriority = style.getPropertyPriority('backdrop-filter');
@@ -300,20 +372,22 @@ function attach(el: Element): void {
     if (!attached.has(el)) return;
     const cur = attached.get(el)!;
     const nm = measure(el);
-    const nk = nm ? `${nm.w}|${nm.h}|${nm.r}` : null;
+    const nk = nm
+      ? (activeMode === 'svg' ? `${nm.w}|${nm.h}|${nm.r}` : 'blur')
+      : null;
     if (nk === cur.key) return;
     detach(el);
     if (nk) attach(el);
   });
   ro.observe(el);
-  attached.set(el, { key, value, original, originalPriority, ro });
+  attached.set(el, { key, filterKey, value, original, originalPriority, ro });
 }
 
 function detach(el: Element): void {
   const cur = attached.get(el);
   if (!cur) return;
   cur.ro.disconnect();
-  releaseFilter(cur.key);
+  if (cur.filterKey) releaseFilter(cur.filterKey);
   const style = (el as HTMLElement).style;
   if (style.getPropertyValue('backdrop-filter') === cur.value) {
     if (cur.original) style.setProperty('backdrop-filter', cur.original, cur.originalPriority);
@@ -349,7 +423,10 @@ function flushMutations(records: MutationRecord[]): void {
         // 自己写入的 style 变更也会触发记录：值没变就跳过，避免循环
         if (cur && (el as HTMLElement).style.getPropertyValue('backdrop-filter') === cur.value) {
           const m = measure(el);
-          if (m && `${m.w}|${m.h}|${m.r}` === cur.key) continue;
+          const nk = m
+            ? (activeMode === 'svg' ? `${m.w}|${m.h}|${m.r}` : 'blur')
+            : null;
+          if (nk && nk === cur.key) continue;
         }
         detach(el);
         attach(el);
@@ -362,16 +439,20 @@ function flushMutations(records: MutationRecord[]): void {
 
 /** 启动折射管理器（幂等）。仅在 LIQUID_GLASS_REFRACTION 为 true 时调用。 */
 export function startLiquidGlass(): void {
-  if (running || !LIQUID_GLASS_REFRACTION) return;
+  const mode = getLiquidGlassMode();
+  if (running || mode === 'off' || mode === 'css' || !LIQUID_GLASS_REFRACTION) return;
+  activeMode = mode;
   running = true;
-  // 不能用 display:none —— 部分引擎会因此断开 filter 引用
-  svgRoot = document.createElementNS(SVG_NS, 'svg');
-  svgRoot.setAttribute('width', '0');
-  svgRoot.setAttribute('height', '0');
-  svgRoot.setAttribute('aria-hidden', 'true');
-  svgRoot.style.position = 'absolute';
-  svgRoot.style.pointerEvents = 'none';
-  document.body.appendChild(svgRoot);
+  if (mode === 'svg') {
+    // 不能用 display:none —— 部分引擎会因此断开 filter 引用
+    svgRoot = document.createElementNS(SVG_NS, 'svg');
+    svgRoot.setAttribute('width', '0');
+    svgRoot.setAttribute('height', '0');
+    svgRoot.setAttribute('aria-hidden', 'true');
+    svgRoot.style.position = 'absolute';
+    svgRoot.style.pointerEvents = 'none';
+    document.body.appendChild(svgRoot);
+  }
   scanSubtree(document.body);
   mutationObserver = new MutationObserver((records) => {
     pendingRecords.push(...records);
@@ -390,6 +471,7 @@ export function startLiquidGlass(): void {
     attributes: true,
     attributeFilter: ['class', 'style'],
   });
+  console.info(`[liquid-glass] mode=${mode} attached=${attached.size} refraction=${LIQUID_GLASS_REFRACTION}`);
 }
 
 /** 停止并还原所有被附着元素的内联 backdrop-filter（幂等）。 */
@@ -402,4 +484,5 @@ export function stopLiquidGlass(): void {
   svgRoot?.remove();
   svgRoot = null;
   cache.clear();
+  console.info('[liquid-glass] stopped');
 }

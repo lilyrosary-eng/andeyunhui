@@ -4,13 +4,15 @@ import { useI18n } from '@/lib/i18n';
 
 export interface ModuleSettingsPanelProps {
   title: string;
+  /** 标题下的副标题：用于保留功能名（如「风信子」设置页下的「AI 对话」） */
+  subtitle?: string;
   icon: ReactNode;
   onClose: () => void;
   children: ReactNode;
 }
 
 /** 通用模块设置面板 — 覆盖在主内容区上方 */
-export function ModuleSettingsPanel({ title, icon, onClose, children }: ModuleSettingsPanelProps) {
+export function ModuleSettingsPanel({ title, subtitle, icon, onClose, children }: ModuleSettingsPanelProps) {
   const { t } = useI18n();
   return (
     <div className="flex-1 h-full overflow-y-auto main-panel-bg p-6 fade-in immersive-safe-top">
@@ -19,7 +21,12 @@ export function ModuleSettingsPanel({ title, icon, onClose, children }: ModuleSe
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-2">
             <span className="text-[var(--element-bg)]">{icon}</span>
-            <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{title} {t('common.settings')}</h2>
+            <div>
+              <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{title} {t('common.settings')}</h2>
+              {subtitle && (
+                <p className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5">{subtitle}</p>
+              )}
+            </div>
           </div>
           <button
             onClick={onClose}

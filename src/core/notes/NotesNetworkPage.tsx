@@ -98,8 +98,10 @@ export function NotesNetworkPage() {
   const seenRef = useRef<Set<string>>(new Set());
   /** 当前结果对应的关键词（「加载更多」沿用它翻下一页） */
   const queryRef = useRef('');
-  /** 批次进行中标记（防止滚动事件重复触发） */
+  /** 批次进行中标记（只用于挡住「加载更多」的重复触发；新一轮搜索永远可以打断） */
   const busyRef = useRef(false);
+  /** 搜索批次序号：新一代搜索会递增，旧批次的回调据此丢弃，避免把旧结果写进新列表 */
+  const runSeqRef = useRef(0);
 
   const activeSource = useMemo(() => resolveSourceScope(source), [source]);
 
@@ -157,7 +159,9 @@ export function NotesNetworkPage() {
    */
   const fetchBatch = useCallback(
     async (q: string, reset: boolean) => {
-      if (busyRef.current) return;
+      // 只有「加载更多」会被进行中的批次挡住；新一轮搜索必须能立刻打断旧批次
+      if (!reset && busyRef.current) return;
+      const seq = reset ? ++runSeqRef.current : runSeqRef.current;
       const targets = NOTE_SOURCES.filter(
         (s) =>
           (source === 'all' || s.id === source) &&
@@ -177,6 +181,8 @@ export function NotesNetworkPage() {
           const offset = reset ? 0 : prev.offset;
           try {
             const list = await searchNoteSource(def.id, q, BATCH_SIZE, offset);
+            // 旧批次的迟到结果直接丢弃（否则会把上一轮关键词的结果混进新列表）
+            if (seq !== runSeqRef.current) return;
             appendItems(
               list.map((it) => ({
                 ...it,
@@ -185,6 +191,8 @@ export function NotesNetworkPage() {
                 accent: def.accent,
               })),
             );
+            // 任意一个源回来就进入「已检索」态：有数据就应当渲染，不等四个源齐
+            if (list.length > 0) setSearched(true);
             progressRef.current[def.id] = {
               offset: offset + list.length,
               // 不足一批 = 该源没有更多；恰好取满时下一轮会再请求一次并拿到空数组
@@ -192,16 +200,22 @@ export function NotesNetworkPage() {
               count: (reset ? 0 : prev.count) + list.length,
             };
           } catch (e) {
+            if (seq !== runSeqRef.current) return;
             const msg = typeof e === 'string' ? e : (e as any)?.message || String(e);
             failed.push({ name: def.name, error: msg });
             // 失败不前进 offset：下次「加载更多」会重试该源
             progressRef.current[def.id] = { ...prev, error: msg };
           } finally {
-            setPendingSources((n) => Math.max(0, n - 1));
-            setProgress({ ...progressRef.current });
+            if (seq === runSeqRef.current) {
+              setPendingSources((n) => Math.max(0, n - 1));
+              setProgress({ ...progressRef.current });
+            }
           }
         }),
       );
+
+      // 旧批次收尾：不能覆盖新一代搜索的状态
+      if (seq !== runSeqRef.current) return;
 
       setFailedSources(failed);
       setSearched(true);
@@ -450,22 +464,8 @@ export function NotesNetworkPage() {
         className="flex-1 min-h-0 overflow-y-auto mt-3 -mr-2 pr-2 space-y-2"
         onScroll={onListScroll}
       >
-        {loading && items.length === 0 ? (
-          <p className="text-sm text-neutral-400 dark:text-stone-500 py-10 text-center">
-            {isAggregate
-              ? `正在请求官方接口…（${NOTE_SOURCES.length - pendingSources}/${NOTE_SOURCES.length} 个源已返回）`
-              : '正在请求官方接口…'}
-          </p>
-        ) : !searched ? (
-          <div className="py-10 text-center text-sm text-neutral-400 dark:text-stone-500 leading-relaxed">
-            输入关键词开始检索。<br />
-            {isAggregate
-              ? '聚合搜索会同时请求四个源，结果按来源标注；只调用站点公开文档化的接口。'
-              : '只调用站点公开文档化的接口；不抓正文、不绕登录与付费墙。'}
-          </div>
-        ) : items.length === 0 ? (
-          <p className="text-sm text-neutral-400 dark:text-stone-500 py-10 text-center">没有结果。</p>
-        ) : (
+        {/* 渲染优先级：有数据就画（哪怕此时还有源在返回），否则才显示「请求中 / 未检索 / 无结果」 */}
+        {items.length > 0 ? (
           shownItems.map((item) => {
             const key = `${item.sourceId ?? source}:${item.id}`;
             const saved = savedKeys.has(key);
@@ -524,6 +524,21 @@ export function NotesNetworkPage() {
               </div>
             );
           })
+        ) : loading ? (
+          <p className="text-sm text-neutral-400 dark:text-stone-500 py-10 text-center">
+            {isAggregate
+              ? `正在请求官方接口…（${NOTE_SOURCES.length - pendingSources}/${NOTE_SOURCES.length} 个源已返回）`
+              : '正在请求官方接口…'}
+          </p>
+        ) : !searched ? (
+          <div className="py-10 text-center text-sm text-neutral-400 dark:text-stone-500 leading-relaxed">
+            输入关键词开始检索。<br />
+            {isAggregate
+              ? '聚合搜索会同时请求四个源，结果按来源标注；只调用站点公开文档化的接口。'
+              : '只调用站点公开文档化的接口；不抓正文、不绕登录与付费墙。'}
+          </div>
+        ) : (
+          <p className="text-sm text-neutral-400 dark:text-stone-500 py-10 text-center">没有结果。</p>
         )}
       </div>
 

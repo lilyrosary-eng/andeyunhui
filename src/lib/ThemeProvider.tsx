@@ -3,7 +3,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { isAndroid } from '../platform/isMobile';
 import { HEAVY_FX } from '../platform/isLinux';
-import { LIQUID_GLASS_REFRACTION, startLiquidGlass, stopLiquidGlass } from '../core/theme/liquidGlass';
+import { LIQUID_GLASS_REFRACTION, getLiquidGlassMode, startLiquidGlass, stopLiquidGlass } from '../core/theme/liquidGlass';
 import { sampleWallpaper, scrimPctFor, type WallpaperSample } from './wallpaperProbe';
 import { storage } from '../core/storage';
 import { KEYS } from '../core/storage/keys';
@@ -226,9 +226,15 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // WebKitGTK 无 backdrop-filter 引用能力且历史上会打爆显存（见 platform/isLinux.ts）。
   useEffect(() => {
     const root = document.documentElement;
-    root.classList.toggle('liquid-glass', liquidGlass);
-    if (liquidGlass && LIQUID_GLASS_REFRACTION) startLiquidGlass();
+    // 本地 A/B：off 连光照层都不加；css 只保留光照层；svg/blur12 才启动 manager。
+    // 不设置时 mode='svg'，与原行为一致。
+    const mode = getLiquidGlassMode();
+    const effective = liquidGlass && mode !== 'off';
+    const withManager = effective && (mode === 'svg' || mode === 'blur12');
+    root.classList.toggle('liquid-glass', effective);
+    if (withManager && LIQUID_GLASS_REFRACTION) startLiquidGlass();
     else stopLiquidGlass();
+    console.info(`[liquid-glass] mode=${mode} class=${effective} manager=${withManager && LIQUID_GLASS_REFRACTION}`);
     return () => stopLiquidGlass();
   }, [liquidGlass]);
 

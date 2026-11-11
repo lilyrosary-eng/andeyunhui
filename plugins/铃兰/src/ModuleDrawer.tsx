@@ -5,6 +5,7 @@ import { X, Sparkles } from 'lucide-react';
 import { CloudIcon, CheckIcon, MusicIcon, ChevronDownIcon, ChevronRightIcon, ListenNowIcon, RadioIcon, SearchIcon, UserIcon, DownloadIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 import type { NeteaseProfile } from './neteaseApi';
+import type { NetworkSite } from '../../_shared/networkSites';
 
 interface ModuleDrawerProps {
   open: boolean;
@@ -29,6 +30,10 @@ onSelectQishui?: (key: 'listen' | 'search' | 'about') => void;
   isRoamOpen?: boolean;
   // 点击漫游卡片时回调
   onSelectRoam?: () => void;
+  // 抽屉第三组：用户自定义的外部网站（与在线音乐源分开，互不影响）
+  customSites?: NetworkSite[];
+  activeCustomSiteId?: string | null;
+  onSelectCustomSite?: (id: string) => void;
 }
 
 // 通用首页图标（云按钮折叠菜单复用）
@@ -246,7 +251,7 @@ const qishuiItems: { key: 'listen' | 'search' | 'about'; icon: React.ReactElemen
 { key: 'about', icon: React.createElement(UserIcon, { size: 16 }) },
 ];
 
-export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic, onSelectNetease, neteaseProfile, isKugouOpen, onSelectKugou, isQishuiOpen, onSelectQishui, isRoamOpen, onSelectRoam }: ModuleDrawerProps) {
+export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic, onSelectNetease, neteaseProfile, isKugouOpen, onSelectKugou, isQishuiOpen, onSelectQishui, isRoamOpen, onSelectRoam, customSites, activeCustomSiteId, onSelectCustomSite }: ModuleDrawerProps) {
   useLang();
   const [mounted, setMounted] = useState(open);
   const [visible, setVisible] = useState(false);
@@ -254,8 +259,8 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
   const [kugouExpanded, setKugouExpanded] = useState(!!isKugouOpen);
   const [qishuiExpanded, setQishuiExpanded] = useState(!!isQishuiOpen);
 
-  // 修正：本地音乐只有在网易云/酷狗/汽水/漫游都未打开时才高亮
-  const isLocalActive = !isNeteaseOpen && !isKugouOpen && !isQishuiOpen && !isRoamOpen;
+  // 修正：本地音乐只有在网易云/酷狗/汽水/漫游/自定义网站都未打开时才高亮
+  const isLocalActive = !isNeteaseOpen && !isKugouOpen && !isQishuiOpen && !isRoamOpen && !activeCustomSiteId;
 
   useEffect(() => {
     if (open) {
@@ -449,6 +454,53 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
             desc="流式推荐 · 自动续推"
             accent={accents.roam}
           />
+
+          {/* 第三组：自定义网站。与上面的在线音乐源分开成组，顺序/增删只在设置里调整 */}
+          <div className="mt-4 pt-4 border-t border-neutral-200/60 dark:border-stone-700/60">
+            <p className="px-1 mb-2 text-[10px] font-medium text-neutral-400 dark:text-stone-500 uppercase tracking-wider">
+              自定义网站
+            </p>
+            {!customSites || customSites.length === 0 ? (
+              <p className="px-1 py-1.5 text-xs leading-relaxed text-neutral-400 dark:text-stone-500">
+                还没有自定义网站。到「设置 → 茑萝 → 网络拓展 → 音乐」添加。
+              </p>
+            ) : (
+              <div className="space-y-1">
+                {customSites.map((site) => {
+                  const active = activeCustomSiteId === site.id;
+                  return (
+                    <button
+                      key={site.id}
+                      onClick={() => {
+                        if (onSelectCustomSite) onSelectCustomSite(site.id);
+                        onClose();
+                      }}
+                      className={`w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors ${
+                        active
+                          ? 'bg-[#e0f7f9]/60 dark:bg-[#1a3a3c]/40 border border-[#4dd0e1]/60 dark:border-[#4dd0e1]/40'
+                          : 'border border-transparent hover:bg-neutral-100/70 dark:hover:bg-stone-700/50'
+                      }`}
+                    >
+                      <span
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[11px] font-bold text-white"
+                        style={{ background: site.accent || '#6b7280' }}
+                      >
+                        {site.name.slice(0, 1)}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium text-neutral-700 dark:text-stone-200">
+                          {site.name}
+                        </span>
+                        <span className="block truncate text-xs text-neutral-400 dark:text-stone-500">
+                          {site.desc || site.url}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

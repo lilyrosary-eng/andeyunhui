@@ -1785,4 +1785,6 @@ export const koKR: Record<string, string> = {
   'updater.cancel': '취소',
   'updater.openLogs': '로그 열기',
   'updater.installStuckHint': '자동으로 다시 시작되지 않으면 앱을 직접 실행하세요. 자세한 내용은 "로그 열기"를 참조하세요.',
+  'updater.packageSize': '패키지 크기 {size}',
+  'updater.preparing': '크기 확인 중…',
 };

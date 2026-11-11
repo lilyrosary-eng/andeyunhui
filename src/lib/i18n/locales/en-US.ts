@@ -1795,4 +1795,6 @@ export const enUS: Record<string, string> = {
   'updater.cancel': 'Cancel',
   'updater.openLogs': 'Open logs',
   'updater.installStuckHint': 'If the app does not restart automatically, open it manually; see "Open logs" for details.',
+  'updater.packageSize': 'Package size {size}',
+  'updater.preparing': 'Getting size…',
 };

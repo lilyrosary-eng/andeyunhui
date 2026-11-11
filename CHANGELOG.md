@@ -1,7 +1,7 @@
 # 更新日志 / Changelog
 
 > 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本（SemVer）。
-> 本文件记录主要版本的演进。当前可构建版本以 `src-tauri/tauri.conf.json` 为准（现 2.4.2，Windows 桌面端，NSIS 安装包）；Android 端代码与桌面端同在 `main` 维护，仍是规划目标，尚未正式发布。稳定性与覆盖面仍在持续打磨，升级前请备份个人数据。
+> 本文件记录主要版本的演进。当前可构建版本以 `src-tauri/tauri.conf.json` 为准（现 2.4.3，Windows 桌面端，NSIS 安装包）；Android 端代码与桌面端同在 `main` 维护，仍是规划目标，尚未正式发布。稳定性与覆盖面仍在持续打磨，升级前请备份个人数据。
 > **版本号唯一真源**：`src-tauri/tauri.conf.json` 的 `version`。`package.json` 与 `src-tauri/Cargo.toml` 的 `version` 必须同步为同一值（历史上后两者长期停留在 `0.1.0`，2026-10-18 已对齐到 2.4.0）。
 
 ## [Unreleased] - 工程化加固（未发布）
@@ -9,6 +9,7 @@
 > 以下改动不改变用户可见功能，全部是「地基」类工作。每一条都实跑了质量门（`tsc` ×2 / `vitest` / `cargo check` / `cargo test` / `eslint`）。
 
 ### 新增
+- **Windows 应用内更新**：启动后自动检查（24h 一次）、更新中心/右下角提示、真实下载进度；下载完成并校验 minisign 签名后，由安装器注册的 SYSTEM 更新助手执行 NSIS `/UPDATE /S`，原地覆盖并自动以当前用户重启。不卸载旧版、不弹 UAC、不改安装路径、不迁移数据；升级默认跳过“卸载旧版/目录选择”页。下载复用 `download-kit`（Range 续传、多源镜像、重试、取消、SHA-256），主源被墙时预检并切换镜像；安装器 10 分钟超时并清理进程树，应用退出有硬退出兜底，下次启动可恢复卡在 `installing` 的状态。首次包含更新助手的版本仍需正常运行一次安装器（UAC 一次）完成 bootstrap。发布物由 `scripts/make-updater-release.mjs` 用项目私钥签名并生成 `latest.json`（含 sha256/mirrors）。
 - **`codemode` 工具（模型写脚本循环调工具，复刻 pi-codemode）**：agent 需要连续调同一批工具时（批量读多个文件、换几种模式搜索、按列表逐个处理），模型可以给出**一段 JavaScript**，在进程内的 QuickJS 沙箱里跑完：`await tools.<名字>({...})` 调工具、`text()/return` 交出结果，**中间结果全部留在沙箱**，不进上下文。
   - 引擎：`src-tauri/src/services/ai_service/codemode.rs`（rquickjs 0.9，QuickJS 源码随 crate 编译，增量约 1.5MB）。VM 跑在独立线程（16MB 栈），工具调用以 Promise 挂起、由宿主按 id 回投，所以 `Promise.all` 是真并发。
   - 护栏：96MB 堆上限、2MB QuickJS 栈护栏（深递归变成可 catch 的 RangeError）、90s 墙钟（**等工具的时间不计入**，因为里面可能包含等用户点批准）、20 万字符输出上限、单个工具调用 10 分钟兜底；`while(true){}` 与 `while(true) await null` 都能被中断。

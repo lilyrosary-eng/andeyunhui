@@ -44,11 +44,17 @@ interface NotesState {
   networkDrawerOpen: boolean;
   /** 「网络」当前选中的源（侧栏列表与结果页共用，保证两边永远一致；`all` = 聚合搜索） */
   networkSource: NoteSourceKey;
+  /**
+   * 笔记抽屉「自定义网站」组里当前打开的站点 id。
+   * 与 networkSource 互斥：它是用户添加的网址，不是检索 API 源。
+   */
+  networkSiteId: string | null;
 
   // ---- actions ----
   setNetworkOpen: (open: boolean) => void;
   setNetworkDrawerOpen: (open: boolean) => void;
   setNetworkSource: (source: NoteSourceKey) => void;
+  setNetworkSiteId: (id: string | null) => void;
   setNotes: (notes: NoteInfo[]) => void;
   setSearchQuery: (q: string) => void;
   setTitle: (t: string) => void;
@@ -168,10 +174,14 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   networkOpen: false,
   networkDrawerOpen: false,
   networkSource: 'arxiv',
+  networkSiteId: null,
 
-  setNetworkOpen: (networkOpen) => set({ networkOpen }),
+  setNetworkOpen: (networkOpen) =>
+    set(networkOpen ? { networkOpen, networkSiteId: null } : { networkOpen }),
   setNetworkDrawerOpen: (networkDrawerOpen) => set({ networkDrawerOpen }),
-  setNetworkSource: (networkSource) => set({ networkSource }),
+  setNetworkSource: (networkSource) => set({ networkSource, networkSiteId: null }),
+  // 打开自定义网站时退出检索结果页；两者不会同时占据主区
+  setNetworkSiteId: (networkSiteId) => set({ networkSiteId, networkOpen: false }),
   setNotes: (notes) => set({ notes }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setTitle: (title) => {
@@ -192,8 +202,8 @@ export const useNotesStore = create<NotesState>((set, get) => ({
       return;
     }
     logger.notes.switchNote(id);
-    // 从「网络」页或列表点开一篇笔记时，主区要回到编辑器（否则看起来像点了没反应）
-    set({ currentNoteId: id, networkOpen: false });
+    // 从「网络」页 / 自定义网站或列表点开一篇笔记时，主区要回到编辑器（否则看起来像点了没反应）
+    set({ currentNoteId: id, networkOpen: false, networkSiteId: null });
     api.getNoteContent(id).then((data) => {
       logger.notes.contentLoaded(id, data.title);
       // 去掉内容首行 # 大标题（标题输入框已显示，编辑区和预览区无需重复）

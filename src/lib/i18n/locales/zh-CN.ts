@@ -1799,4 +1799,6 @@ export const zhCN: Record<string, string> = {
   'updater.cancel': '取消',
   'updater.openLogs': '查看日志',
   'updater.installStuckHint': '若长时间未自动重启，请手动重新打开应用；详细日志见“查看日志”。',
+  'updater.packageSize': '安装包大小 {size}',
+  'updater.preparing': '正在获取大小…',
 };

@@ -11,12 +11,62 @@
 // 为什么不在面板里嵌 webview：Windows/WebView2 下子 webview 会被主 webview 的
 // 合成层盖住（白屏），详见 src-tauri/src/embedded_browser.rs 头注释。
 import React from 'react';
-import { GlobeIcon, SearchIcon, DownloadIcon, CloseIcon } from './icons';
 
 const { useState, useEffect, useCallback, useRef } = React;
 
-const hostApi: any =
-  (window as any).__HOST_API__ || { invoke: async () => undefined, listen: async () => () => {} };
+// 图标就地定义：不能复用 ./icons —— 它顶层读 window.__HOST_REACT__，
+// 宿主（笔记模块也复用本组件）静态导入时全局还没挂上，渲染会直接白屏。
+function SvgIcon({ size = 18, children }: { size?: number; children: React.ReactNode }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {children}
+    </svg>
+  );
+}
+
+const GlobeIcon = ({ size = 18 }: { size?: number }) => (
+  <SvgIcon size={size}>
+    <circle cx="12" cy="12" r="10" />
+    <line x1="2" y1="12" x2="22" y2="12" />
+    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+  </SvgIcon>
+);
+
+const SearchIcon = ({ size = 18 }: { size?: number }) => (
+  <SvgIcon size={size}>
+    <circle cx="11" cy="11" r="8" />
+    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+  </SvgIcon>
+);
+
+const DownloadIcon = ({ size = 18 }: { size?: number }) => (
+  <SvgIcon size={size}>
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <polyline points="7 10 12 15 17 10" />
+    <line x1="12" y1="15" x2="12" y2="3" />
+  </SvgIcon>
+);
+
+const CloseIcon = ({ size = 18 }: { size?: number }) => (
+  <SvgIcon size={size}>
+    <path d="M18 6 6 18M6 6l12 12" />
+  </SvgIcon>
+);
+
+// 取宿主 API 用函数而不是模块级常量：宿主静态导入本文件时 __HOST_API__ 尚未挂载
+const FALLBACK_HOST_API = { invoke: async () => undefined, listen: async () => () => {} };
+function hostApi(): any {
+  return (window as any).__HOST_API__ || FALLBACK_HOST_API;
+}
 
 export interface WebPlatform {
   id: string;
@@ -101,7 +151,7 @@ export function WebBrowserShell({ platform, onDownload, extraActions }: WebBrows
       setError(null);
       setBusy(true);
       try {
-        await hostApi.invoke('browser_open', {
+        await hostApi().invoke('browser_open', {
           target: platform.id,
           url: u,
           title: `安得云荟 · ${platform.name}`,
@@ -140,7 +190,7 @@ export function WebBrowserShell({ platform, onDownload, extraActions }: WebBrows
   }, [platform.id, openAt]);
 
   const focusBrowser = () => {
-    void hostApi.invoke('browser_focus', { target: platform.id }).catch((e: unknown) => {
+    void hostApi().invoke('browser_focus', { target: platform.id }).catch((e: unknown) => {
       const msg = errText(e);
       if (msg.includes('尚未打开')) {
         setWindowOpen(false);
@@ -153,7 +203,7 @@ export function WebBrowserShell({ platform, onDownload, extraActions }: WebBrows
   };
 
   const closeBrowser = () => {
-    void hostApi.invoke('browser_close', { target: platform.id }).catch(() => {});
+    void hostApi().invoke('browser_close', { target: platform.id }).catch(() => {});
     setWindowOpen(false);
     setCurrent('');
     setNotice(null);
@@ -166,7 +216,7 @@ export function WebBrowserShell({ platform, onDownload, extraActions }: WebBrows
     setError(null);
     setNotice(null);
     try {
-      const raw: string[] = (await hostApi.invoke('browser_sniff', { target: platform.id })) || [];
+      const raw: string[] = (await hostApi().invoke('browser_sniff', { target: platform.id })) || [];
       const merged: SniffItem[] = [];
       const seen = new Set<string>();
       for (const s of raw) {
@@ -438,7 +488,7 @@ export function WebBrowserShell({ platform, onDownload, extraActions }: WebBrows
             'button',
             {
               onClick: () => {
-                void hostApi
+                void hostApi()
                   .invoke('browser_open_external', { url: current || platform.home })
                   .catch((e: unknown) => setError(`调起系统浏览器失败：${errText(e)}`));
               },

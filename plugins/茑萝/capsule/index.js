@@ -72,13 +72,15 @@
 
   registry.register({
     id: CAPSULE_LABEL,
-    name: '黄金棋盘',
+    name: '绣球',
+    // 悬停文案用完整花名；黄金棋盘为旧名，已彻底弃用
+    displayTooltip: '绣球花',
     iconName: 'LayoutGrid',
     kind: 'module',
     visible: false,
     parent: 'niaoluo',
     component: CapsulePlaceholder,
-    desc: '屏幕顶部居中常驻的黄金棋盘，后续功能待扩展。',
+    desc: '屏幕顶部居中常驻的绣球浮岛，集成文件搜索 / 局域网传输 / 资源监视。',
     codename: '茑萝',
     destroy: function () {
       if (unlisten) { try { unlisten(); } catch (_) { /* ignore */ } }

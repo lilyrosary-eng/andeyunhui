@@ -260,11 +260,17 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
 
 // ========== 热插拔：应用内重载 / 卸载插件（无需重启） ==========
 
-/** 安全调用插件的 destroy 钩子，释放 audio/定时器/事件监听等资源 */
-function safeDestroyPlugin(id: string, registry: PluginRegistry): void {
+/** 安全调用插件的 destroy 钩子，释放 audio/定时器/事件监听等资源。
+ *  reason 用于区分「热重载」与「用户禁用/删除」：前者应保留播放等长生命周期资源，
+ *  后者才真正停止（例如音乐模块的 detach / shutdown）。 */
+function safeDestroyPlugin(
+  id: string,
+  registry: PluginRegistry,
+  reason: 'reload' | 'shutdown' = 'shutdown',
+): void {
   const def = registry.get(id);
   if (def?.destroy) {
-    try { def.destroy(); } catch (err) {
+    try { def.destroy(reason); } catch (err) {
       logger.log(`[pluginHot] destroy 抛错 ${id}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
@@ -300,8 +306,9 @@ async function reloadSinglePlugin(id: string, registry: PluginRegistry): Promise
       return;
     }
     const scriptText = await api.readPluginFile(id, entry);
-    // 先调用 destroy 释放旧实例资源，再注销（register 有重复 id 守卫，必须先清）
-    safeDestroyPlugin(id, registry);
+    // 先调用 destroy 释放旧实例资源，再注销（register 有重复 id 守卫，必须先清）。
+    // 热重载传 'reload'：允许插件把「播放内核」等长生命周期资源与旧 UI 解绑后继续存活。
+    safeDestroyPlugin(id, registry, 'reload');
     registry.unregister(id);
     const sandbox = createSandboxGlobals(id, registry, manifest, policy);
     executeInSandbox(scriptText, sandbox, id);
@@ -328,7 +335,8 @@ async function reloadSinglePlugin(id: string, registry: PluginRegistry): Promise
 }
 
 function unloadSinglePlugin(id: string, registry: PluginRegistry): void {
-  // 卸载前调用 destroy 释放资源（audio、定时器、事件监听等）
+  // 卸载前调用 destroy 释放资源（audio、定时器、事件监听等）。
+  // 走默认 reason='shutdown'：这是用户明确禁用/删除插件（或插件目录被移除），应真正停播。
   safeDestroyPlugin(id, registry);
   registry.unregister(id);
   window.dispatchEvent(new CustomEvent('plugin-unregistered', { detail: { id } }));

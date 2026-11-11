@@ -10,6 +10,7 @@ import { getWebSites, toWebSite, type WebSite } from './webPlatforms';
 import { useNetworkSites } from '@shared/useNetworkSites';
 import { OnlineSidebarShell } from '@shared/OnlineSidebarShell';
 import { WebBrowserShell } from '@shared/WebBrowserShell';
+import { CloudTitleButton, OnlineCloudSwitch } from '@shared/OnlineCloudSwitch';
 import { GlobeIcon } from '../WebSidebarShell';
 
 interface Props {
@@ -25,6 +26,12 @@ export function OnlineWebView({ initialSiteId, onExit, onOpenModuleSettings }: P
   const [activeId, setActiveId] = useState<string | null>(
     initialSiteId ?? sites[0]?.id ?? null,
   );
+  // 从抽屉再选另一个站点时（本视图已挂载）要跟着切，而不是停留在第一次的站点
+  useEffect(() => {
+    if (initialSiteId) setActiveId(initialSiteId);
+  }, [initialSiteId]);
+  // 「云」抽屉：在线视图里也能直接切站点 / 回本地服务
+  const [cloudOpen, setCloudOpen] = useState(false);
   const site = sites.find((s) => s.id === activeId) ?? null;
 
   // 离开网络视图时只关本模块的浏览器窗口（不能 close_all，否则会连带关掉视频/图片的）
@@ -98,13 +105,11 @@ export function OnlineWebView({ initialSiteId, onExit, onOpenModuleSettings }: P
     ),
   );
 
+  // 标题只做展示：模块切换统一走标题栏右侧「云」按钮（抽屉里有「本地服务」项）
   const titleEl = React.createElement(
-    'button',
+    'div',
     {
-      onClick: onExit,
-      className:
-        'font-bold text-lg text-neutral-800 dark:text-stone-100 hover:text-[var(--element-color-raw)] transition-colors flex items-center gap-2',
-      title: '返回本地服务',
+      className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 flex items-center gap-2',
     },
     '网络站点',
   );
@@ -118,6 +123,10 @@ export function OnlineWebView({ initialSiteId, onExit, onOpenModuleSettings }: P
       moduleId: 'web-interface',
       onClose: onExit,
       onOpenModuleSettings,
+      titleActions: React.createElement(CloudTitleButton, {
+        open: cloudOpen,
+        onClick: () => setCloudOpen((v) => !v),
+      }),
       children: siteList,
     }),
     React.createElement(
@@ -142,6 +151,25 @@ export function OnlineWebView({ initialSiteId, onExit, onOpenModuleSettings }: P
             '请选择站点',
           ),
     ),
+    // 「云」抽屉：在线视图里直接切站点 / 回本地服务
+    React.createElement(OnlineCloudSwitch, {
+      open: cloudOpen,
+      onClose: () => setCloudOpen(false),
+      title: '网络站点',
+      sectionLabel: '站点来源',
+      localLabel: '本地服务',
+      localDesc: '本机 Web 服务预设',
+      items: sites.map((s) => ({
+        id: s.id,
+        name: s.name,
+        desc: s.desc,
+        accent: s.accent,
+      })),
+      activeId,
+      onPick: (id: string) => setActiveId(id),
+      onLocal: onExit,
+      footer: '只打开官方页面：登录与浏览都在站点自己完成，我们不抓取内容、不批量下载。',
+    }),
   );
 }
 

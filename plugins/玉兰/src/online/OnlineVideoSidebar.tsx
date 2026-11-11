@@ -36,6 +36,8 @@ interface Props {
   onOpenModuleSettings?: () => void;
   onOpenStats?: () => void;
   statsActive?: boolean;
+  /** 标题栏右侧插槽（「云」按钮，与模块页一致） */
+  titleActions?: React.ReactNode;
   temps: VideoTempEntry[];
   activeTempId?: string | null;
   onSelectTemp: (entry: VideoTempEntry) => void;
@@ -65,6 +67,7 @@ export function OnlineVideoSidebar({
   onOpenModuleSettings,
   onOpenStats,
   statsActive,
+  titleActions,
   temps,
   activeTempId,
   onSelectTemp,
@@ -218,13 +221,11 @@ export function OnlineVideoSidebar({
         ),
   );
 
-  // 标题做成按钮：点击返回本地视频（与音乐侧栏一致；壳本身不消费 onClose）
+  // 标题只做展示：模块切换统一走标题栏右侧「云」按钮（抽屉里有「本地视频」项）
   const titleEl = React.createElement(
-    'button',
+    'div',
     {
-      onClick: onExit,
-      className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 hover:text-[var(--element-color-raw)] transition-colors flex items-center gap-2',
-      title: '返回本地视频',
+      className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 flex items-center gap-2',
     },
     '网络视频',
   );
@@ -237,6 +238,7 @@ export function OnlineVideoSidebar({
     onOpenModuleSettings,
     onOpenStats,
     statsActive,
+    titleActions,
     searchQuery: search,
     onSearchChange: setSearch,
     searchPlaceholder: '搜索平台…',

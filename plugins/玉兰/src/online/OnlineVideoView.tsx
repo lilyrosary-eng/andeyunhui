@@ -12,6 +12,7 @@ import { OnlineVideoSidebar, type VideoTempEntry } from './OnlineVideoSidebar';
 import { BrowserPanel } from './BrowserPanel';
 import { VideoStatsView } from './VideoStatsView';
 import { PlaylistGridRow } from '@shared/OnlineMusicTemplates';
+import { CloudTitleButton, OnlineCloudSwitch } from '@shared/OnlineCloudSwitch';
 
 const { useState, useEffect } = React;
 
@@ -82,6 +83,12 @@ export function OnlineVideoView({
 }: Props) {
   const [activeId, setActiveId] = useState<string | null>(initialPlatformId ?? null);
   const [showStats, setShowStats] = useState(false);
+  // 从抽屉再选另一个平台时（本视图已挂载）要跟着切，而不是停留在第一次的平台
+  useEffect(() => {
+    if (initialPlatformId) setActiveId(initialPlatformId);
+  }, [initialPlatformId]);
+  // 「云」抽屉：在线视图里也能直接切平台 / 回本地视频
+  const [cloudOpen, setCloudOpen] = useState(false);
   const platform = videoPlatforms.find((p) => p.id === activeId) || null;
   // 平台内视图只知道「播了什么」，平台 id 由这里补上再交给宿主
   const playWithPlatform = (item: OnlineVideoItem) => onPlayVideo(activeId || '', item);
@@ -110,6 +117,10 @@ export function OnlineVideoView({
       onOpenModuleSettings,
       onOpenStats: () => setShowStats((v) => !v),
       statsActive: showStats,
+      titleActions: React.createElement(CloudTitleButton, {
+        open: cloudOpen,
+        onClick: () => setCloudOpen((v) => !v),
+      }),
       temps,
       activeTempId,
       onSelectTemp,
@@ -142,6 +153,28 @@ export function OnlineVideoView({
               ),
             ),
     ),
+    // 「云」抽屉：在线视图里直接切平台 / 回本地视频
+    React.createElement(OnlineCloudSwitch, {
+      open: cloudOpen,
+      onClose: () => setCloudOpen(false),
+      title: '云端视频',
+      sectionLabel: '视频源',
+      localLabel: '本地视频',
+      localDesc: '本机文件夹扫描',
+      items: videoPlatforms.map((p) => ({
+        id: p.id,
+        name: p.name,
+        desc: p.desc,
+        accent: p.accent,
+      })),
+      activeId,
+      onPick: (id: string) => {
+        setActiveId(id);
+        setShowStats(false);
+      },
+      onLocal: onExit,
+      footer: '只打开官方页面：登录与播放都由站点自己完成，我们不解析页面、不代理视频流。',
+    }),
   );
 }
 

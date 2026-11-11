@@ -1440,12 +1440,25 @@ class MusicPlayer {
   getDuration(): number { return this.audio.duration || 0; }
 
   /**
+   * 与插件生命周期解绑（插件热重载时调用）：
+   * 播放内核由 window.__MUSIC_PLAYER__ 持有，热重载复用同一实例，
+   * 这里**不停播、不清 src、不清队列、不删全局引用**，只留一条日志便于排查。
+   *
+   * 生命周期约定：
+   *   - 模块切换 / 插件热重载 / 插件卸载后重建 → detach()，播放继续；
+   *   - 用户在拓展管理里禁用/删除插件 → shutdown()，才真正停止并释放。
+   */
+  detach(): void {
+    debugLog('music player detach: 保留播放内核（热重载不中断播放）');
+  }
+
+  /**
    * 释放播放器持有的所有资源：暂停音频、清空 src、移除事件监听。
-   * 由 PluginHost 在插件卸载/重载前调用 destroy 钩子触发。
+   * 仅在「用户明确禁用/删除插件」时由 PluginHost 以 reason='shutdown' 调用。
    * 调用后清除 window.__MUSIC_PLAYER__ 全局引用，使下次加载创建全新实例，
    * 避免复用「已销毁」的旧实例（audio.src 已清空、监听器已清空）导致功能失效。
    */
-  destroy(): void {
+  shutdown(): void {
     this.disposed = true;
     // 无缝播放收尾：取消在途交叉淡化、作废预取解析并彻底释放第二元素
     try {
@@ -1507,7 +1520,9 @@ class MusicPlayer {
     this.tracks = [];
     this.currentIndex = -1;
     this.isPlaying = false;
-    // 清除全局引用，使重载时 `globalWin.__MUSIC_PLAYER__ ?? new MusicPlayer()` 走新建分支
+    // 清除「宿主持有的共享槽」与沙箱内全局引用：
+    // 下次加载会走 `existing ?? new MusicPlayer()` 的新建分支，拿到全新实例。
+    hostSlot()?.deleteSharedSlot?.(PLAYER_SLOT_KEY);
     const w = window as unknown as { __MUSIC_PLAYER__?: MusicPlayer };
     if (w.__MUSIC_PLAYER__ === this) {
       delete w.__MUSIC_PLAYER__;
@@ -1515,11 +1530,38 @@ class MusicPlayer {
   }
 }
 
-// 单例：热重载时若 window.__MUSIC_PLAYER__ 已被 destroy 清除，则新建实例。
-// window.__MUSIC_PLAYER__ 由全局类型声明定义，供跨模块访问（如歌词悬浮窗）。
+// 播放内核单例。
+// ⚠ 插件脚本里的 `window` 是 PluginHost 每次加载新建的沙箱 Proxy，写 window.xxx 只落在本次沙箱，
+//   热重载必然丢失。因此内核存放在「宿主 PluginRegistry 的共享槽」里（跨热重载存活），
+//   只有用户明确禁用/删除插件时 shutdown() 才会清除它。
+const PLAYER_SLOT_KEY = 'music.player';
+
+interface RegistrySlotApi {
+  getSharedSlot?: <T = unknown>(key: string) => T | undefined;
+  setSharedSlot?: (key: string, value: unknown) => void;
+  deleteSharedSlot?: (key: string) => void;
+}
+
+function hostSlot(): RegistrySlotApi | undefined {
+  return (window as unknown as { __PLUGIN_REGISTRY__?: RegistrySlotApi }).__PLUGIN_REGISTRY__;
+}
+
+// window.__MUSIC_PLAYER__ 仍保留：同一沙箱内的旧代码 / DevTools 可直接访问；
+// 跨重载的唯一事实源是上面的宿主共享槽。
 const globalWin = window as unknown as { __MUSIC_PLAYER__?: MusicPlayer };
-export const musicPlayer: MusicPlayer = globalWin.__MUSIC_PLAYER__ ?? new MusicPlayer();
+const existingPlayer = hostSlot()?.getSharedSlot?.<MusicPlayer>(PLAYER_SLOT_KEY)
+  ?? globalWin.__MUSIC_PLAYER__;
+export const musicPlayer: MusicPlayer = existingPlayer ?? new MusicPlayer();
+hostSlot()?.setSharedSlot?.(PLAYER_SLOT_KEY, musicPlayer);
 globalWin.__MUSIC_PLAYER__ = musicPlayer;
+if (existingPlayer) {
+  // 播放内核（本类实例）跨插件热重载复用：播放、队列、进度都保留；
+  // 注意此时 musicPlayer.ts 的内部逻辑仍是旧代码 —— 改它需要重启应用才生效，
+  // 而 index.tsx / UI 组件的改动仍会随热重载即时生效。
+  try {
+    console.error('[music] 复用已有播放内核（播放不中断；改动 musicPlayer.ts 需重启应用）');
+  } catch { /* 忽略 */ }
+}
 // 也尝试把播放器暴露到顶层 window，方便 DevTools 控制台直接访问（插件可能跑在 sandbox/iframe）。
 try {
   ((window.top as unknown) as any).__MUSIC_PLAYER__ = musicPlayer;
