@@ -1945,11 +1945,15 @@ function FullView({
             onReady={() => setTilesReady(true)}
             onSmall={() => setSmallImage(true)}
             onFallback={() => {
-              // 瓦片真的失败了（生成报错 / 多次重试仍失败）。
-              // 这里只置**独立的 tileError**，并且界面上给"重试"按钮——
-              // 以前置 imgError，而 imgError 只在换图时复位，再点同一张就永远卡在错误态。
-              console.warn('[莲花/tiles] 瓦片不可用，已提示重试:', currentPath);
-              setTileError(true);
+              // 瓦片真的失败了（生不出来 / 格式不支持 / 多次重试仍失败）。
+              //
+              // **Windows 的完整模式不能因此把画面顶掉**：那里已经有 `<img src=原图>` 在显示
+              // （winBaseFirst），瓦片只是"放大后更清晰"的增强。为了一张显示正常的图
+              // 弹全屏"加载失败"，等于自己把兼容面砍掉一半 —— webview 能解的格式
+              // （avif/ico/svg/…）都能看，只是没有瓦片清晰度。
+              // Linux 不行：那边没有底图，瓦片失败就是真的什么都没了。
+              console.warn('[莲花/tiles] 瓦片不可用（已保留原图显示）:', currentPath);
+              if (!winBaseFirst) setTileError(true);
             }}
             // **必须回填尺寸**：瓦片启用时底层 <img> 不渲染，getBaseRect 拿不到
             // naturalWidth ⇒ base.width = 0 ⇒ 瓦片层把 8192 当成适配尺寸 ⇒
