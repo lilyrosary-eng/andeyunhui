@@ -117,7 +117,7 @@ export function TaskDetailPanel({
             <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-[11px]">
               <Info label="引擎" value={engineName} />
               <Info label="连接数" value={detail.connections > 0 ? String(detail.connections) : '自动'} />
-              <Info label="分片" value={`${detail.parts.length} 片`} />
+              <Info label="分片" value={detail.parts.length > 0 ? `${detail.parts.length} 片` : '引擎管理'} />
               <Info label="优先级" value={String(detail.priority)} />
               <Info
                 label="创建时间"
@@ -238,15 +238,16 @@ export function TaskDetailPanel({
             </div>
           </div>
 
-          <div className="rounded-2xl border border-black/5 bg-white/70 p-4 dark:border-white/5 dark:bg-stone-900/40">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-[10px] font-semibold uppercase tracking-wide text-neutral-400 dark:text-stone-500">
-                分片明细
-              </span>
-              <span className="text-[10px] text-neutral-400 dark:text-stone-500">{detail.parts.length} 片</span>
-            </div>
-            <div className="space-y-1.5">
-              {detail.parts.map((part) => {
+          {detail.parts.length > 0 ? (
+            <div className="rounded-2xl border border-black/5 bg-white/70 p-4 dark:border-white/5 dark:bg-stone-900/40">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-neutral-400 dark:text-stone-500">
+                  分片明细
+                </span>
+                <span className="text-[10px] text-neutral-400 dark:text-stone-500">{detail.parts.length} 片</span>
+              </div>
+              <div className="space-y-1.5">
+                {detail.parts.map((part) => {
                 const expected = part.end > part.start ? part.end - part.start : 0;
                 const partPercent = expected > 0 ? Math.min(100, (part.downloaded / expected) * 100) : 0;
                 return (
@@ -280,8 +281,13 @@ export function TaskDetailPanel({
                   </div>
                 );
               })}
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="rounded-2xl border border-black/5 bg-white/70 px-4 py-3 text-[10px] leading-relaxed text-neutral-400 dark:border-white/5 dark:bg-stone-900/40 dark:text-stone-500">
+              外部引擎由工具自身管理分片，这里只显示整体进度。
+            </div>
+          )}
         </div>
       </div>
     </div>

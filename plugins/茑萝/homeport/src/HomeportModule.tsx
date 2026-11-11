@@ -86,6 +86,7 @@ export function HomeportModule() {
   const [engines, setEngines] = useState<EngineStatus | null>(null);
   const [config, setConfig] = useState<EngineConfig | null>(null);
   const [filter, setFilter] = useState<Filter>('all');
+  const [query, setQuery] = useState('');
   const [view, setView] = useState<'tasks' | 'settings'>('tasks');
   const [showNew, setShowNew] = useState(false);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
@@ -269,11 +270,18 @@ export function HomeportModule() {
   );
 
   const filtered = useMemo(() => {
-    if (filter === 'active') return tasks.filter((task) => FILTER_ACTIVE.has(task.status));
-    if (filter === 'completed') return tasks.filter((task) => task.status === 'completed');
-    if (filter === 'failed') return tasks.filter((task) => FILTER_FAILED.has(task.status));
-    return tasks;
-  }, [filter, tasks]);
+    let list = tasks;
+    if (filter === 'active') list = list.filter((task) => FILTER_ACTIVE.has(task.status));
+    else if (filter === 'completed') list = list.filter((task) => task.status === 'completed');
+    else if (filter === 'failed') list = list.filter((task) => FILTER_FAILED.has(task.status));
+    const text = query.trim().toLowerCase();
+    if (text) {
+      list = list.filter((task) =>
+        `${task.filename} ${task.savePath} ${task.urls.join(' ')}`.toLowerCase().includes(text),
+      );
+    }
+    return list;
+  }, [filter, tasks, query]);
 
   const totalSpeed = useMemo(
     () => tasks.reduce((sum, task) => sum + (ACTIVE_STATUSES.includes(task.status) ? task.speed ?? 0 : 0), 0),
@@ -618,6 +626,13 @@ export function HomeportModule() {
                 ) : null}
               </button>
             ))}
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索任务 / 地址"
+              spellCheck={false}
+              className="mb-1 ml-auto mr-1 w-40 rounded-lg border border-black/10 bg-white/60 px-2 py-1 text-[11px] text-neutral-700 outline-none placeholder:text-neutral-400 dark:border-white/10 dark:bg-stone-900/40 dark:text-stone-200"
+            />
           </div>
 
           {error ? (
