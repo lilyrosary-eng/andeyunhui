@@ -16,7 +16,7 @@ use crate::engine::{DownloadEngine, EngineCtx, EngineOutcome};
 use crate::manager::Control;
 use crate::probe::{self, HttpMeta};
 use crate::types::{EngineConfig, EngineKind, TaskStatus};
-use crate::util::{parse_aria2_progress, tail_text};
+use crate::util::{parse_aria2_progress, parse_aria2_speed, tail_text};
 
 pub struct Aria2Engine {
     config: EngineConfig,
@@ -327,7 +327,7 @@ fn drain_progress_lines(
         if let Some((downloaded, total)) = parse_aria2_progress(&line) {
             *last_downloaded = downloaded;
             *last_total = total;
-            ctx.set_progress(downloaded, total);
+            ctx.set_progress_speed(downloaded, total, parse_aria2_speed(&line).unwrap_or(0.0));
         }
     }
 }

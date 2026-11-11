@@ -216,9 +216,30 @@ fn drain_progress(
         if let Some((downloaded, total)) = parse_progress_line(&line) {
             *last_downloaded = downloaded;
             *last_total = total;
-            ctx.set_progress(downloaded, total);
+            ctx.set_progress_speed(downloaded, total, parse_progress_speed(&line).unwrap_or(0.0));
         }
     }
+}
+
+/// 从同一进度行提取 `1.2 MiB/s` 的速度。
+pub(crate) fn parse_progress_speed(line: &str) -> Option<f64> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    for (index, token) in tokens.iter().enumerate() {
+        let Some(unit) = token.strip_suffix("/s") else {
+            continue;
+        };
+        let candidate = if unit.chars().any(|ch| ch.is_ascii_digit()) {
+            unit.to_string()
+        } else if index > 0 {
+            format!("{}{}", tokens[index - 1], unit)
+        } else {
+            unit.to_string()
+        };
+        if let Some(value) = parse_human_size(&candidate) {
+            return Some(value as f64);
+        }
+    }
+    None
 }
 
 /// 解析 gopeed CLI 的进度行：
@@ -271,7 +292,9 @@ mod tests {
     fn parses_progress_bar() {
         let line = "downloading... [■■■■□□] 45.0%    1.2 MiB/s    10 MiB";
         assert_eq!(parse_progress_line(line), Some((4_718_592, 10_485_760)));
+        assert_eq!(parse_progress_speed(line), Some(1_258_291.0));
         assert_eq!(parse_progress_line("saving path: C:/tmp"), None);
+        assert_eq!(parse_progress_speed("saving path: C:/tmp"), None);
         assert_eq!(parse_progress_line("downloading... [□□] 0.0% 0 B/s 0 B"), None);
     }
 

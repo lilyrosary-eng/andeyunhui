@@ -267,6 +267,13 @@ pub fn checksum_file(path: &Path, algorithm: ChecksumAlgorithm) -> Result<String
     }
 }
 
+/// 解析 aria2 控制台进度行里的速度（`DL:1.0MiB` → 字节/秒）。
+pub fn parse_aria2_speed(line: &str) -> Option<f64> {
+    let start = line.find("DL:")? + 3;
+    let token = line[start..].split_whitespace().next()?;
+    parse_human_size(token).map(|value| value as f64)
+}
+
 /// 解析 `1.2MiB` / `34MB` / `512K` / `123` 这类人读大小。
 pub fn parse_human_size(raw: &str) -> Option<u64> {
     let text = raw.trim();
@@ -386,7 +393,9 @@ mod tests {
     fn aria2_progress_line_parses() {
         let line = "[#2089b0 1.0MiB/5.0MiB(20%) CN:8 DL:1.0MiB ETA:4s]";
         assert_eq!(parse_aria2_progress(line), Some((1_048_576, 5_242_880)));
+        assert_eq!(parse_aria2_speed(line), Some(1_048_576.0));
         assert_eq!(parse_aria2_progress("no progress"), None);
+        assert_eq!(parse_aria2_speed("no progress"), None);
     }
 
     #[test]
